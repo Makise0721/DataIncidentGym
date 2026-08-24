@@ -4,7 +4,6 @@ import pytest
 
 from data_incident_gym.baseline import BaselineError, validate_upstream_fixture
 
-
 EXPECTED_COMMIT = "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb"
 
 
