@@ -34,6 +34,11 @@ def test_build_runs_compose_seed_then_dbt_build_without_shell(
     assert "--full-refresh" in commands[1]
     assert commands[2][0:2] == ["dbt", "build"]
     assert all(kwargs.get("shell") is not True for _, kwargs in calls)
+    assert all(kwargs["cwd"] == tmp_path for _, kwargs in calls)
+    assert all(kwargs["timeout"] == settings.command_timeout_seconds for _, kwargs in calls)
+    assert all(kwargs["text"] is True for _, kwargs in calls)
+    assert all(kwargs["encoding"] == "utf-8" for _, kwargs in calls)
+    assert all(kwargs["errors"] == "replace" for _, kwargs in calls)
     assert all(
         "command-secret" not in argument for command in commands for argument in command
     )
@@ -102,12 +107,12 @@ def test_validate_dbt_artifacts_rejects_missing_files(
     target.mkdir(parents=True)
     logs.mkdir(parents=True)
 
-    (target / "manifest.json").write_text("{}", encoding="utf-8")
+    (target / "manifest.json").write_text('{"nodes": {}}', encoding="utf-8")
     (target / "run_results.json").write_text(
         json.dumps({"results": [{"status": "success"}]}),
         encoding="utf-8",
     )
-    (logs / "dbt.log").write_text("", encoding="utf-8")
+    (logs / "dbt.log").write_text("log", encoding="utf-8")
     (target / missing_name).unlink(missing_ok=True)
     (logs / missing_name).unlink(missing_ok=True)
 
@@ -119,12 +124,12 @@ def test_validate_dbt_artifacts_rejects_empty_results(tmp_path: Path) -> None:
     builder = BaselineBuilder(Settings(_env_file=None), tmp_path)
     builder.dbt_target.mkdir(parents=True)
     builder.dbt_logs.mkdir(parents=True)
-    (builder.dbt_target / "manifest.json").write_text("{}", encoding="utf-8")
+    (builder.dbt_target / "manifest.json").write_text('{"nodes": {}}', encoding="utf-8")
     (builder.dbt_target / "run_results.json").write_text(
         json.dumps({"results": []}),
         encoding="utf-8",
     )
-    (builder.dbt_logs / "dbt.log").write_text("", encoding="utf-8")
+    (builder.dbt_logs / "dbt.log").write_text("log", encoding="utf-8")
 
     with pytest.raises(BaselineError, match="results 不能为空"):
         builder.validate_dbt_artifacts()
@@ -138,12 +143,49 @@ def test_validate_dbt_artifacts_rejects_non_success_status(
     builder = BaselineBuilder(Settings(_env_file=None), tmp_path)
     builder.dbt_target.mkdir(parents=True)
     builder.dbt_logs.mkdir(parents=True)
-    (builder.dbt_target / "manifest.json").write_text("{}", encoding="utf-8")
+    (builder.dbt_target / "manifest.json").write_text('{"nodes": {}}', encoding="utf-8")
     (builder.dbt_target / "run_results.json").write_text(
         json.dumps({"results": [{"status": status}]}),
         encoding="utf-8",
     )
-    (builder.dbt_logs / "dbt.log").write_text("", encoding="utf-8")
+    (builder.dbt_logs / "dbt.log").write_text("log", encoding="utf-8")
 
     with pytest.raises(BaselineError, match="非法 dbt status"):
+        builder.validate_dbt_artifacts()
+
+
+@pytest.mark.parametrize("empty_name", ["manifest.json", "run_results.json", "dbt.log"])
+def test_validate_dbt_artifacts_rejects_empty_files(
+    tmp_path: Path,
+    empty_name: str,
+) -> None:
+    builder = BaselineBuilder(Settings(_env_file=None), tmp_path)
+    builder.dbt_target.mkdir(parents=True)
+    builder.dbt_logs.mkdir(parents=True)
+    (builder.dbt_target / "manifest.json").write_text('{"nodes": {}}', encoding="utf-8")
+    (builder.dbt_target / "run_results.json").write_text(
+        json.dumps({"results": [{"status": "success"}]}),
+        encoding="utf-8",
+    )
+    (builder.dbt_logs / "dbt.log").write_text("log", encoding="utf-8")
+    target = builder.dbt_target / empty_name
+    log = builder.dbt_logs / empty_name
+    (log if empty_name == "dbt.log" else target).write_text("", encoding="utf-8")
+
+    with pytest.raises(BaselineError, match="为空"):
+        builder.validate_dbt_artifacts()
+
+
+def test_validate_dbt_artifacts_rejects_invalid_manifest(tmp_path: Path) -> None:
+    builder = BaselineBuilder(Settings(_env_file=None), tmp_path)
+    builder.dbt_target.mkdir(parents=True)
+    builder.dbt_logs.mkdir(parents=True)
+    (builder.dbt_target / "manifest.json").write_text("not-json", encoding="utf-8")
+    (builder.dbt_target / "run_results.json").write_text(
+        json.dumps({"results": [{"status": "success"}]}),
+        encoding="utf-8",
+    )
+    (builder.dbt_logs / "dbt.log").write_text("log", encoding="utf-8")
+
+    with pytest.raises(BaselineError, match="无法解析 dbt artifact"):
         builder.validate_dbt_artifacts()

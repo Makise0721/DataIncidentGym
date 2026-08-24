@@ -144,11 +144,27 @@ class BaselineBuilder:
                 raise BaselineError(f"缺少 dbt artifact：{name}")
 
         try:
-            run_results = json.loads(
-                artifact_paths["run_results.json"].read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError) as exc:
-            raise BaselineError(f"无法读取 dbt artifact：run_results.json（{exc}）") from exc
+            manifest_text = artifact_paths["manifest.json"].read_text(encoding="utf-8")
+            run_results_text = artifact_paths["run_results.json"].read_text(encoding="utf-8")
+            dbt_log_text = artifact_paths["dbt.log"].read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise BaselineError(f"无法读取 dbt artifact（{exc}）") from exc
+
+        if not manifest_text.strip():
+            raise BaselineError("dbt artifact 为空：manifest.json")
+        if not run_results_text.strip():
+            raise BaselineError("dbt artifact 为空：run_results.json")
+        if not dbt_log_text.strip():
+            raise BaselineError("dbt artifact 为空：dbt.log")
+
+        try:
+            manifest = json.loads(manifest_text)
+            run_results = json.loads(run_results_text)
+        except json.JSONDecodeError as exc:
+            raise BaselineError(f"无法解析 dbt artifact：{exc}") from exc
+
+        if not isinstance(manifest, dict) or not manifest:
+            raise BaselineError("manifest.json 内容无效")
 
         results = run_results.get("results") if isinstance(run_results, dict) else None
         if not isinstance(results, list) or not results:
