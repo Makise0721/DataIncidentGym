@@ -316,7 +316,7 @@ class BaselineBuilder:
         except BaselineError:
             raise
         except Exception as exc:
-            raise BaselineError(f"读取数据库失败：{self._redact(str(exc))}") from exc
+            raise BaselineError(f"读取数据库失败：{self._redact(str(exc))}") from None
 
         return make_baseline_summary(self.settings.postgres_schema, relations)
 

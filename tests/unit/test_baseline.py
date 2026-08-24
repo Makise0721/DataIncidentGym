@@ -1,5 +1,6 @@
 import json
 import subprocess
+import traceback
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -248,6 +249,7 @@ def test_inspect_database_wraps_connection_error_without_password(
     assert "读取数据库失败" in str(error.value)
     assert "database-secret" not in str(error.value)
     assert "***" in str(error.value)
+    assert "database-secret" not in "".join(traceback.format_exception(error.value))
 
 
 def test_write_summary_persists_canonical_json(tmp_path: Path) -> None:
