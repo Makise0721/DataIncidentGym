@@ -1,0 +1,16 @@
+config:
+  send_anonymous_usage_stats: false
+
+jaffle_shop:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DIG_POSTGRES_HOST', '127.0.0.1') }}"
+      port: {{ env_var('DIG_POSTGRES_PORT', '55432') | int }}
+      dbname: "{{ env_var('DIG_POSTGRES_DATABASE', 'data_incident_gym') }}"
+      schema: "{{ env_var('DIG_POSTGRES_SCHEMA', 'analytics') }}"
+      user: "{{ env_var('DIG_POSTGRES_USER', 'dig_admin') }}"
+      password: "{{ env_var('DIG_POSTGRES_PASSWORD', 'dig_admin') }}"
+      threads: 1
+      connect_timeout: 10
