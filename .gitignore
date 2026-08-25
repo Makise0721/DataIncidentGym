@@ -1,5 +1,6 @@
 .venv/
 .env
+.env.diagnostic
 .dig/
 __pycache__/
 *.py[cod]
