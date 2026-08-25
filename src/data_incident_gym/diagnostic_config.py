@@ -16,6 +16,7 @@ class DiagnosticSettings(BaseSettings):
         env_file=PROJECT_ROOT / ".env.diagnostic",
         extra="ignore",
         frozen=True,
+        hide_input_in_errors=True,
     )
 
     postgres_host: Literal["127.0.0.1", "localhost", "::1"] = "127.0.0.1"

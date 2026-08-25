@@ -71,8 +71,9 @@ def test_diagnostic_model_base_url_rejects_unsafe_forms(
 ) -> None:
     monkeypatch.setenv("DIG_DIAGNOSTIC_MODEL_BASE_URL", value)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as error:
         DiagnosticSettings(_env_file=None)
+    assert "TEST_REDACTED_VALUE" not in str(error.value)
 
 
 @pytest.mark.parametrize("field", ["MODEL_NAME", "MODEL_API_KEY"])
