@@ -111,6 +111,53 @@ class IncidentVerifier:
         child_map = manifest.get("child_map")
         if not isinstance(nodes, dict) or not isinstance(child_map, dict):
             raise _clean(LabVerificationError("manifest 缺少 nodes/child_map"))
+        missing_child_map = set(nodes) - set(child_map)
+        if missing_child_map:
+            raise _clean(LabVerificationError("manifest child_map 缺少节点"))
+        if set(child_map) - set(nodes):
+            raise _clean(LabVerificationError("manifest child_map 节点条目不完整"))
+        adjacency: dict[str, list[str]] = {}
+        for node_id, node in nodes.items():
+            if not isinstance(node, dict) or not isinstance(node.get("resource_type"), str):
+                raise _clean(LabVerificationError("manifest 节点无效"))
+            children = child_map[node_id]
+            if not isinstance(children, list):
+                raise _clean(LabVerificationError("manifest child_map 无效"))
+            seen_children: set[str] = set()
+            for child in children:
+                if not isinstance(child, str):
+                    raise _clean(LabVerificationError("manifest child_map 无效"))
+                if child in seen_children:
+                    raise _clean(LabVerificationError("manifest child_map 节点重复"))
+                seen_children.add(child)
+                if child not in nodes:
+                    raise _clean(LabVerificationError("manifest child_map 节点不存在"))
+            adjacency[node_id] = children
+
+        visited: set[str] = set()
+        visiting: set[str] = set()
+        for root in nodes:
+            if root in visited:
+                continue
+            pending: list[tuple[str, bool]] = [(root, False)]
+            while pending:
+                current, exiting = pending.pop()
+                if exiting:
+                    visiting.remove(current)
+                    visited.add(current)
+                    continue
+                if current in visited:
+                    continue
+                if current in visiting:
+                    raise _clean(LabVerificationError("manifest child_map 存在循环"))
+                visiting.add(current)
+                pending.append((current, True))
+                for child in reversed(adjacency[current]):
+                    if child in visiting:
+                        raise _clean(LabVerificationError("manifest child_map 存在循环"))
+                    if child not in visited:
+                        pending.append((child, False))
+
         start_node = nodes.get(start)
         if not isinstance(start_node, dict) or start_node.get("resource_type") != "model":
             raise _clean(LabVerificationError("manifest 缺少直接失败模型"))
@@ -129,23 +176,8 @@ class IncidentVerifier:
                 continue
             visiting.add(current)
             pending.append((current, True))
-            if current not in child_map:
-                raise _clean(LabVerificationError("manifest child_map 缺少节点"))
-            children = child_map[current]
-            if not isinstance(children, list):
-                raise _clean(LabVerificationError("manifest child_map 无效"))
-            seen_children: set[str] = set()
-            for child in reversed(children):
-                if not isinstance(child, str):
-                    raise _clean(LabVerificationError("manifest child_map 无效"))
-                if child in seen_children:
-                    raise _clean(LabVerificationError("manifest child_map 节点重复"))
-                seen_children.add(child)
-                node = nodes.get(child)
-                if node is None:
-                    raise _clean(LabVerificationError("manifest child_map 节点不存在"))
-                if not isinstance(node, dict):
-                    raise _clean(LabVerificationError("manifest model 节点无效"))
+            for child in reversed(adjacency[current]):
+                node = nodes[child]
                 if node.get("resource_type") != "model":
                     continue
                 if child in visiting:
@@ -220,11 +252,17 @@ class IncidentVerifier:
         ):
             raise _clean(LabVerificationError("dbt 意外成功，未触发预期故障"))
 
+        manifest = self._read_object(run_root / "dbt/target/manifest.json")
+        manifest_nodes = manifest.get("nodes")
+        if not isinstance(manifest_nodes, dict):
+            raise _clean(LabVerificationError("manifest 缺少 nodes/child_map"))
+
         run_results = self._read_object(run_root / "dbt/target/run_results.json")
         results = run_results.get("results")
         if not isinstance(results, list):
             raise _clean(LabVerificationError("run_results 缺少 results"))
         failed_node_ids: list[str] = []
+        unknown_result_ids: list[str] = []
         seen_result_ids: set[str] = set()
         for result in results:
             if not isinstance(result, dict):
@@ -235,6 +273,8 @@ class IncidentVerifier:
             ):
                 raise _clean(LabVerificationError("run_results 结果项无效"))
             unique_id = result["unique_id"]
+            if unique_id not in manifest_nodes:
+                unknown_result_ids.append(unique_id)
             if unique_id in seen_result_ids:
                 raise _clean(LabVerificationError("run_results unique_id 重复"))
             seen_result_ids.add(unique_id)
@@ -244,8 +284,9 @@ class IncidentVerifier:
         failed_nodes = tuple(sorted(failed_node_ids))
         if failed_nodes != (committed_truth.direct_failure,):
             raise _clean(LabVerificationError(f"直接失败节点不匹配：{failed_nodes}"))
+        if unknown_result_ids:
+            raise _clean(LabVerificationError("run_results 节点不存在"))
 
-        manifest = self._read_object(run_root / "dbt/target/manifest.json")
         affected = self._model_descendants(manifest, committed_truth.direct_failure)
         if affected != set(committed_truth.affected_assets):
             raise _clean(LabVerificationError(f"影响模型不匹配：{sorted(affected)}"))

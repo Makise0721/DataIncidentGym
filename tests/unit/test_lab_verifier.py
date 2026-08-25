@@ -118,6 +118,26 @@ def test_verifier_accepts_expected_failure_and_writes_stable_result(
     )
 
 
+def test_verifier_accepts_manifest_and_run_result_extensions(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    manifest_path = run_root / "dbt/target/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["future_manifest_extension"] = {"version": 2}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    results_path = run_root / "dbt/target/run_results.json"
+    results = json.loads(results_path.read_text(encoding="utf-8"))
+    results["future_run_results_extension"] = ["kept"]
+    results["results"][0]["future_result_extension"] = True
+    results_path.write_text(json.dumps(results), encoding="utf-8")
+
+    result = IncidentVerifier(tmp_path).verify(RUN_ID)
+
+    assert result.status == "EXPECTED_FAILURE"
+
+
 def test_verifier_rejects_wrong_failed_node(
     tmp_path: Path,
     project_root: Path,
@@ -279,6 +299,70 @@ def test_verifier_rejects_missing_manifest_child_map_entry(
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(LabVerificationError, match="缺少节点"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
+@pytest.mark.parametrize("mutation", ["cycle", "duplicate", "missing"])
+def test_verifier_rejects_invalid_unrelated_manifest_graph(
+    tmp_path: Path,
+    project_root: Path,
+    mutation: str,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    manifest_path = run_root / "dbt/target/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["nodes"]["model.jaffle_shop.unrelated"] = {"resource_type": "model"}
+    if mutation == "cycle":
+        manifest["nodes"]["model.jaffle_shop.unrelated_2"] = {"resource_type": "model"}
+        manifest["child_map"]["model.jaffle_shop.unrelated"] = [
+            "model.jaffle_shop.unrelated_2"
+        ]
+        manifest["child_map"]["model.jaffle_shop.unrelated_2"] = [
+            "model.jaffle_shop.unrelated"
+        ]
+    elif mutation == "duplicate":
+        manifest["child_map"]["model.jaffle_shop.unrelated"] = [
+            "model.jaffle_shop.orders",
+            "model.jaffle_shop.orders",
+        ]
+    else:
+        pass
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="(循环|重复|不完整|缺少)"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
+def test_verifier_rejects_unrelated_non_model_cycle(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    manifest_path = run_root / "dbt/target/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["nodes"]["test.jaffle_shop.unrelated"] = {"resource_type": "test"}
+    manifest["child_map"]["test.jaffle_shop.unrelated"] = [
+        "test.jaffle_shop.unrelated"
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="存在循环"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
+def test_verifier_rejects_run_result_node_missing_from_manifest(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    results_path = run_root / "dbt/target/run_results.json"
+    results = json.loads(results_path.read_text(encoding="utf-8"))
+    results["results"].append(
+        {"unique_id": "model.jaffle_shop.unknown", "status": "skipped"}
+    )
+    results_path.write_text(json.dumps(results), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="节点不存在"):
         IncidentVerifier(tmp_path).verify(RUN_ID)
 
 
