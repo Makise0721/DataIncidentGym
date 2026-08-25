@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -71,4 +72,35 @@ def test_healthy_run_rejects_nonzero_and_redacts_password(tmp_path: Path) -> Non
 
     assert "加载固定 seeds" in str(error.value)
     assert "exit=17" in str(error.value)
+    assert "database-secret" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("failed with database-secret"),
+        subprocess.TimeoutExpired(
+            "dbt",
+            1,
+            output="database-secret",
+            stderr="database-secret",
+        ),
+    ],
+)
+def test_execution_failures_do_not_retain_unredacted_cause(
+    tmp_path: Path,
+    failure: BaseException,
+) -> None:
+    def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
+        raise failure
+
+    settings = Settings(_env_file=None, postgres_password="database-secret")
+
+    with pytest.raises(DbtExecutionError) as error:
+        DbtRunner(settings, tmp_path, fake_run).run_incident(
+            tmp_path / "target",
+            tmp_path / "logs",
+        )
+
+    assert error.value.__cause__ is None
     assert "database-secret" not in str(error.value)

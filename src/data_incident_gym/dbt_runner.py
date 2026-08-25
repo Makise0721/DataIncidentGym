@@ -79,7 +79,7 @@ class DbtRunner:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise DbtExecutionError(
                 f"{stage} 无法执行：{self._redact(str(exc))}"
-            ) from exc
+            ) from None
         return DbtRunResult(
             return_code=result.returncode,
             stdout=self._redact(result.stdout or ""),
@@ -102,7 +102,7 @@ class DbtRunner:
         except OSError as exc:
             raise DbtExecutionError(
                 f"无法创建 dbt 产物目录：{self._redact(str(exc))}"
-            ) from exc
+            ) from None
 
     def run_healthy(self, target_path: Path, log_path: Path) -> None:
         self._prepare(target_path, log_path)
