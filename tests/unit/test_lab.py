@@ -198,6 +198,30 @@ def test_schema_state_rejects_row_count_drift(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("row_count", "nullable", "ordinal_position"),
+    [(113.0, True, 1), (113, 1, 1), (113, True, 1.0)],
+)
+def test_schema_state_rejects_implicit_type_coercion(
+    tmp_path: Path,
+    row_count: object,
+    nullable: object,
+    ordinal_position: object,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    columns = list(HEALTHY.columns)
+    original = columns[0]
+    columns[0] = ColumnSummary(
+        original.name,
+        original.data_type,
+        nullable,
+        ordinal_position,
+    )
+    drifted = RelationSummary("raw_payments", row_count, tuple(columns))
+
+    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
+
+
+@pytest.mark.parametrize(
     "changed",
     [
         {"data_type": "bigint"},

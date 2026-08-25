@@ -188,6 +188,18 @@ class IncidentLab:
     ) -> CaseState:
         if relation is None:
             return "MISSING"
+        if (
+            type(relation.name) is not str
+            or type(relation.row_count) is not int
+            or any(
+                type(column.name) is not str
+                or type(column.data_type) is not str
+                or type(column.nullable) is not bool
+                or type(column.ordinal_position) is not int
+                for column in relation.columns
+            )
+        ):
+            return "DRIFTED"
         if relation.name != truth.expected_schema.relation:
             return "DRIFTED"
         columns = tuple(
