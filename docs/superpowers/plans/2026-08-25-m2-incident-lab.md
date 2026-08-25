@@ -16,7 +16,7 @@
 - 用户于 2026-08-25 同意使用实际仓库路径 `C:\Users\29913\codex_space\DataIncidentGym`，并要求 M2 计划最多 6 个 Task。
 - 用户已确认本计划采用以下接口决策：保留 `pipeline build` 的 M1 健康构建语义；新增 `lab build` 专门执行不含 seed 的故障构建；预期故障通过验证时 `lab build` exit 0。
 - 本文档获准编写不等于获准执行。只有用户另行批准本计划后，才允许开始 Task 1。
-- 当前工作区已有用户自己的 `AGENT.md` 修改。所有提交必须使用显式路径，禁止 `git add .`，不得包含或撤销该修改。
+- 当前工作区已有用户自己的根目录 Markdown 修改：`AGENT.md` 和 `mistake.md`。用户明确要求根目录 Markdown 暂不提交、暂不推送；`AGENT.md` 不得编辑，`mistake.md` 仍需作为工作区决策记录更新，但只能保持未暂存、未提交。所有提交必须使用显式路径，禁止 `git add .`，不得包含或撤销这些修改。
 
 ## M2 范围与验收映射
 
@@ -101,7 +101,7 @@ config/incidents/
 
 **Files:**
 - Modify: `docs/requirements.md:158-172,281-306`
-- Modify: `mistake.md`
+- Modify (workspace-only, never stage or commit): `mistake.md`
 - Create: `config/incidents/schema_rename_payment_amount.json`
 - Create: `src/data_incident_gym/incidents.py`
 - Create: `tests/unit/test_incidents.py`
@@ -367,7 +367,7 @@ uv run data-incident-gym lab build schema_rename_payment_amount
 - `lab build` 只在已注入状态执行不含 seed 的故障构建。底层 dbt 非零且独立验证符合 Ground Truth 时，实验命令成功并返回 `EXPECTED_FAILURE`；非预期结果返回非零退出码。
 ```
 
-在 `mistake.md` 末尾追加：
+在 `mistake.md` 末尾追加工作区决策记录。`mistake.md` 仍需更新作为工作区决策记录，但因用户明确要求根目录 Markdown 暂不提交、暂不推送，不得加入任何提交：
 
 ```markdown
 ## 2026-08-25：M1 完成事实与 M2 接口决策
@@ -383,12 +383,12 @@ uv run data-incident-gym lab build schema_rename_payment_amount
 ```powershell
 uv run pytest tests/unit/test_incidents.py -q
 uv run ruff check src/data_incident_gym/incidents.py tests/unit/test_incidents.py
-git diff --check -- docs/requirements.md mistake.md config/incidents/schema_rename_payment_amount.json src/data_incident_gym/incidents.py tests/unit/test_incidents.py docs/superpowers/plans/2026-08-25-m2-incident-lab.md
-git add docs/requirements.md mistake.md config/incidents/schema_rename_payment_amount.json src/data_incident_gym/incidents.py tests/unit/test_incidents.py docs/superpowers/plans/2026-08-25-m2-incident-lab.md
+git diff --check -- docs/requirements.md config/incidents/schema_rename_payment_amount.json src/data_incident_gym/incidents.py tests/unit/test_incidents.py docs/superpowers/plans/2026-08-25-m2-incident-lab.md
+git add docs/requirements.md config/incidents/schema_rename_payment_amount.json src/data_incident_gym/incidents.py tests/unit/test_incidents.py docs/superpowers/plans/2026-08-25-m2-incident-lab.md
 git commit -m "docs: define M2 incident contract"
 ```
 
-Expected: focused pytest、Ruff 和 diff check exit 0；提交不包含 `AGENT.md`；随后独立 `luna_worker` 审查通过。
+Expected: focused pytest、Ruff 和 diff check exit 0；提交只包含上述非根目录文件，不包含 `AGENT.md` 或 `mistake.md`；随后独立 `luna_worker` 审查通过。
 
 ---
 
