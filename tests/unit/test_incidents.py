@@ -7,6 +7,7 @@ from data_incident_gym.incidents import (
     CASE_ID,
     IncidentCaseError,
     load_ground_truth,
+    parse_ground_truth,
 )
 
 
@@ -34,9 +35,47 @@ def test_committed_ground_truth_is_strict_and_canonical(project_root: Path) -> N
     assert truth.to_json().endswith("\n")
 
 
+def test_ground_truth_canonical_digest_is_stable_across_json_key_order(
+    project_root: Path,
+) -> None:
+    source = project_root / "config/incidents/schema_rename_payment_amount.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    reordered = {key: payload[key] for key in reversed(payload)}
+    reordered["injection"] = {
+        key: payload["injection"][key]
+        for key in reversed(payload["injection"])
+    }
+
+    original = parse_ground_truth(json.dumps(payload), "original")
+    reordered_truth = parse_ground_truth(json.dumps(reordered), "reordered")
+
+    assert reordered_truth.canonical_json() == original.canonical_json()
+    assert reordered_truth.digest() == original.digest()
+
+
 def test_unknown_case_is_rejected_before_path_construction(tmp_path: Path) -> None:
     with pytest.raises(IncidentCaseError, match="未知故障案例"):
         load_ground_truth("../../outside", tmp_path)
+
+
+@pytest.mark.parametrize("extra_target", ["top-level", "injection"])
+def test_ground_truth_rejects_extra_fields(
+    tmp_path: Path,
+    project_root: Path,
+    extra_target: str,
+) -> None:
+    source = project_root / "config/incidents/schema_rename_payment_amount.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if extra_target == "top-level":
+        payload["unexpected"] = True
+    else:
+        payload["injection"]["unexpected"] = True
+    target = tmp_path / "config/incidents/schema_rename_payment_amount.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(IncidentCaseError, match="Ground Truth 无效"):
+        load_ground_truth(CASE_ID, tmp_path)
 
 
 def test_ground_truth_rejects_contract_drift(
