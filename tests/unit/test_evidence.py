@@ -266,6 +266,22 @@ def test_error_subclasses_expose_stable_codes_and_redact_details(
     assert error.__context__ is None
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        r"C:\TEST_REDACTED_VALUE Folder\artifact.json",
+        r"\\TEST_REDACTED_VALUE\share\TEST_REDACTED_VALUE Folder\artifact.json",
+        r"/var/TEST_REDACTED_VALUE Folder/artifact.json",
+    ],
+)
+def test_error_redacts_absolute_paths_with_spaces(path: str) -> None:
+    message = str(InvalidArtifactError(f"failed to read {path} while validating"))
+
+    assert "TEST_REDACTED_VALUE" not in message
+    assert "artifact.json" not in message
+    assert "while validating" in message
+
+
 def test_raise_without_context_removes_original_exception() -> None:
     with pytest.raises(InvalidArtifactError) as captured:
         try:

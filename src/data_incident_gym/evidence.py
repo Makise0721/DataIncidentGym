@@ -216,6 +216,11 @@ def _safe_message(message: object) -> str:
         "[redacted path]",
         text,
     )
+    text = re.sub(
+        r"(\[redacted path\])(?:[ \t]+[^\r\n\s,;:()\[\]]*[\\/][^\r\n\s,;:()\[\]]*)+",
+        r"\1",
+        text,
+    )
     return text
 
 
