@@ -116,23 +116,31 @@ class IncidentVerifier:
             raise _clean(LabVerificationError("manifest 缺少直接失败模型"))
 
         found = {start}
-        pending = [start]
+        pending: list[tuple[str, tuple[str, ...]]] = [(start, (start,))]
         while pending:
-            current = pending.pop()
+            current, path = pending.pop()
             children = child_map.get(current, [])
             if not isinstance(children, list):
                 raise _clean(LabVerificationError("manifest child_map 无效"))
+            seen_children: set[str] = set()
             for child in children:
                 if not isinstance(child, str):
                     raise _clean(LabVerificationError("manifest child_map 无效"))
+                if child in seen_children:
+                    raise _clean(LabVerificationError("manifest child_map 节点重复"))
+                seen_children.add(child)
                 node = nodes.get(child)
                 if node is None:
                     raise _clean(LabVerificationError("manifest child_map 节点不存在"))
                 if not isinstance(node, dict):
                     raise _clean(LabVerificationError("manifest model 节点无效"))
-                if node.get("resource_type") == "model" and child not in found:
+                if node.get("resource_type") != "model":
+                    continue
+                if child in path:
+                    raise _clean(LabVerificationError("manifest child_map 存在循环"))
+                if child not in found:
                     found.add(child)
-                    pending.append(child)
+                    pending.append((child, (*path, child)))
         return found
 
     @staticmethod
@@ -140,6 +148,16 @@ class IncidentVerifier:
         error: LabVerificationError | None = None
         try:
             committed_truth = load_ground_truth(case_id, project_root)
+            committed_text = (
+                project_root
+                / "config"
+                / "incidents"
+                / f"{committed_truth.incident_case_id}.json"
+            ).read_text(encoding="utf-8")
+            json.loads(
+                committed_text,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
             snapshot_text = (run_root / "ground_truth.json").read_text(encoding="utf-8")
             json.loads(
                 snapshot_text,

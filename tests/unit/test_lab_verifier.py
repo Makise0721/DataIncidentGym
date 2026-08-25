@@ -217,6 +217,59 @@ def test_verifier_rejects_duplicate_run_result_ids(
         IncidentVerifier(tmp_path).verify(RUN_ID)
 
 
+def test_verifier_rejects_duplicate_manifest_child_ids(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    manifest_path = run_root / "dbt/target/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["child_map"]["model.jaffle_shop.stg_payments"].append(
+        "model.jaffle_shop.orders"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="节点重复"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
+def test_verifier_rejects_cyclic_manifest_lineage(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    manifest_path = run_root / "dbt/target/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["child_map"]["model.jaffle_shop.orders"].append(
+        "model.jaffle_shop.stg_payments"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="存在循环"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
+def test_verifier_rejects_duplicate_committed_ground_truth_key(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    _write_valid_run(tmp_path, project_root)
+    config_path = tmp_path / "config/incidents/schema_rename_payment_amount.json"
+    config = config_path.read_text(encoding="utf-8")
+    config_path.write_text(
+        config.replace(
+            '"root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED"',
+            '"root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED", '
+            '"root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LabVerificationError, match="Ground Truth 快照无效"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
 def test_verifier_rejects_unknown_schema_field(
     tmp_path: Path,
     project_root: Path,
