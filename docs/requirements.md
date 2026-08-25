@@ -170,6 +170,7 @@ P0 通过固定 Git submodule 复用下列 Apache-2.0 项目，并在本项目�
 - `reset → build` 能恢复健康状态。
 - 故障注入不修改第三方模型源码。
 - Ground Truth 能被独立验证器读取。
+- M2 的稳定错误类别固定为 `DBT_MODEL_ERROR`，由 dbt `run_results.json` 中直接模型节点的 `status=error` 推导；不得依赖完整自然语言错误文本。
 
 ### 7.3 M3：证据工具闭环
 
@@ -292,6 +293,7 @@ data-incident-gym
 uv run data-incident-gym doctor
 uv run data-incident-gym lab reset schema_rename_payment_amount
 uv run data-incident-gym lab inject schema_rename_payment_amount
+uv run data-incident-gym lab build schema_rename_payment_amount
 uv run data-incident-gym pipeline build
 uv run data-incident-gym diagnose schema_rename_payment_amount
 uv run data-incident-gym eval run schema_rename_payment_amount
@@ -304,6 +306,8 @@ uv run data-incident-gym eval run schema_rename_payment_amount
 - 命令失败必须使用非零退出码。
 - `eval run` 是完整闭环的一键入口。
 - P0 不接受自由文本问题。
+- `pipeline build` 保持健康基线语义，始终执行 `seed --full-refresh` 后再执行健康 `dbt build`。
+- `lab build` 只在已注入状态执行不含 seed 的故障构建。底层 dbt 非零且独立验证符合 Ground Truth 时，实验命令成功并返回 `EXPECTED_FAILURE`；非预期结果返回非零退出码。
 
 ## 10. 模型与 Agent 要求
 
