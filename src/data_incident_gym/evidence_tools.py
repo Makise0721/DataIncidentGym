@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import re
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal
+
+import psycopg
 
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evidence import (
@@ -21,8 +24,14 @@ from data_incident_gym.evidence import (
     InvalidRunIdError,
     NodeErrorNotFoundError,
     NodeNotFoundError,
+    ReadOnlyDatabaseError,
+    RelationNotAllowedError,
+    RelationNotFoundError,
+    RelationSchemaColumn,
+    RelationSchemaFact,
     RunContextMismatchError,
     RunNotFoundError,
+    RunStateDriftError,
     raise_without_context,
 )
 
@@ -49,6 +58,12 @@ _RUN_FILES = {
     "manifest": Path("dbt/target/manifest.json"),
 }
 _STATUSES = {"error", "fail", "pass", "skipped", "success", "warn"}
+_CATALOG_COLUMNS_QUERY = (
+    "SELECT column_name, data_type, is_nullable, ordinal_position\n"
+    "FROM information_schema.columns\n"
+    "WHERE table_schema = %s AND table_name = %s\n"
+    "ORDER BY ordinal_position"
+)
 
 
 class _DuplicateJsonKey(ValueError):
@@ -284,9 +299,17 @@ class _RunArtifacts:
 class EvidenceTools:
     _PROJECT_ROOT: ClassVar[Path] = PROJECT_ROOT
 
-    def __init__(self, run_id: str, artifacts: _RunArtifacts) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        artifacts: _RunArtifacts,
+        settings: DiagnosticSettings,
+        db_connect: Callable[..., Any],
+    ) -> None:
         self._run_id = run_id
         self._artifacts = artifacts
+        self._settings = settings
+        self._db_connect = db_connect
 
     @classmethod
     def for_run(
@@ -294,12 +317,13 @@ class EvidenceTools:
         run_id: str,
         settings: DiagnosticSettings,
         project_root: Path = PROJECT_ROOT,
+        *,
+        db_connect: Callable[..., Any] | None = None,
     ) -> EvidenceTools:
-        del settings
         if not isinstance(run_id, str) or RUN_ID_PATTERN.fullmatch(run_id) is None:
             raise_without_context(InvalidRunIdError("Invalid run identifier"))
         artifacts = _RunArtifacts(project_root, run_id)
-        return cls(run_id, artifacts)
+        return cls(run_id, artifacts, settings, db_connect or psycopg.connect)
 
     def _validate_context(self, run_id: str) -> None:
         if not isinstance(run_id, str) or RUN_ID_PATTERN.fullmatch(run_id) is None:
@@ -464,6 +488,106 @@ class EvidenceTools:
                 content=content,
             ),
         )
+
+    def get_relation_schema(self, relation_name: str) -> tuple[EvidenceRecord, ...]:
+        if not isinstance(relation_name, str):
+            raise_without_context(RelationNotAllowedError("Relation is not allowed"))
+
+        relation = next(
+            (
+                item
+                for item in self._artifacts.schema["relations"]
+                if isinstance(item, dict) and item.get("name") == relation_name
+            ),
+            None,
+        )
+        if relation is None:
+            raise_without_context(RelationNotAllowedError("Relation is not allowed"))
+        configured_schema = self._settings.postgres_schema
+        if self._artifacts.schema.get("schema") != configured_schema:
+            raise_without_context(RunStateDriftError("Run schema does not match configuration"))
+
+        password = self._settings.postgres_password.get_secret_value()
+        try:
+            with self._db_connect(
+                host=self._settings.postgres_host,
+                port=self._settings.postgres_port,
+                dbname=self._settings.postgres_database,
+                user=self._settings.postgres_user,
+                password=password,
+            ) as connection, connection.cursor() as cursor:
+                cursor.execute("SET TRANSACTION READ ONLY")
+                cursor.execute("SHOW transaction_read_only")
+                read_only = cursor.fetchone()
+                if read_only != ("on",):
+                    raise RuntimeError("database did not enable read-only transaction")
+
+                cursor.execute(
+                    _CATALOG_COLUMNS_QUERY,
+                    (configured_schema, relation_name),
+                )
+                rows = cursor.fetchall()
+                if not rows:
+                    raise_without_context(RelationNotFoundError("Relation was not found"))
+                live_columns = tuple(
+                    (
+                        row[0],
+                        row[1],
+                        row[2] == "YES",
+                        row[3],
+                    )
+                    for row in rows
+                    if len(row) == 4 and row[2] in {"YES", "NO"}
+                )
+                if len(live_columns) != len(rows):
+                    raise RuntimeError("invalid information_schema column metadata")
+                snapshot_columns = tuple(
+                    (
+                        column["name"],
+                        column["data_type"],
+                        column["nullable"],
+                        column["ordinal_position"],
+                    )
+                    for column in relation["columns"]
+                )
+                if live_columns != snapshot_columns:
+                    raise_without_context(RunStateDriftError("Run schema state drifted"))
+
+                cursor.execute("SELECT CURRENT_TIMESTAMP")
+                observed = cursor.fetchone()
+                if not observed or not isinstance(observed[0], datetime):
+                    raise RuntimeError("database timestamp was not returned")
+                content = RelationSchemaFact(
+                    kind="RELATION_SCHEMA",
+                    run_id=self._run_id,
+                    schema_name=configured_schema,
+                    relation_name=relation_name,
+                    columns=tuple(
+                        RelationSchemaColumn(
+                            name=name,
+                            data_type=data_type,
+                            nullable=nullable,
+                            ordinal_position=ordinal_position,
+                        )
+                        for name, data_type, nullable, ordinal_position in live_columns
+                    ),
+                )
+                return (
+                    EvidenceRecord.create(
+                        run_id=self._run_id,
+                        evidence_type=EvidenceType.RELATION_SCHEMA,
+                        source=EvidenceSource.POSTGRES_CATALOG,
+                        subject=f"{configured_schema}.{relation_name}",
+                        observed_at=observed[0],
+                        content=content,
+                    ),
+                )
+        except (RelationNotFoundError, RunStateDriftError):
+            raise
+        except Exception as exc:
+            message = str(exc).replace(password, "***") if password else str(exc)
+            error = ReadOnlyDatabaseError(f"Read-only database query failed: {message}")
+            raise_without_context(error)
 
     @staticmethod
     def _normalize_message(message: str) -> str:

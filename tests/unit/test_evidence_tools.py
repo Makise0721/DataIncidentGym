@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,8 +11,12 @@ from data_incident_gym.evidence import (
     InvalidRunIdError,
     NodeErrorNotFoundError,
     NodeNotFoundError,
+    ReadOnlyDatabaseError,
+    RelationNotAllowedError,
+    RelationNotFoundError,
     RunContextMismatchError,
     RunNotFoundError,
+    RunStateDriftError,
 )
 from data_incident_gym.evidence_tools import EvidenceTools
 
@@ -334,3 +339,133 @@ def test_artifact_reader_rejects_invalid_generated_at_and_duplicate_node_ids(
 
     with pytest.raises(InvalidArtifactError):
         EvidenceTools.for_run(RUN_ID, DiagnosticSettings(_env_file=None), tmp_path)
+
+
+class _ReaderCursor:
+    def __init__(self, columns: list[tuple[object, ...]] | None = None) -> None:
+        self.columns = columns if columns is not None else [("id", "integer", "YES", 1)]
+        self.executions: list[tuple[object, object]] = []
+        self.last_query = ""
+
+    def __enter__(self) -> "_ReaderCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, query: object, params: object = None) -> None:
+        self.executions.append((query, params))
+        self.last_query = str(query)
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        if "transaction_read_only" in self.last_query:
+            return ("on",)
+        if "CURRENT_TIMESTAMP" in self.last_query:
+            return (datetime(2026, 8, 25, 12, tzinfo=UTC),)
+        return None
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self.columns
+
+
+class _ReaderConnection:
+    def __init__(self, cursor: _ReaderCursor) -> None:
+        self.cursor_value = cursor
+
+    def __enter__(self) -> "_ReaderConnection":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> _ReaderCursor:
+        return self.cursor_value
+
+
+def _reader_tools(tmp_path: Path, cursor: _ReaderCursor) -> tuple[EvidenceTools, dict[str, object]]:
+    _write_run(tmp_path)
+    settings = DiagnosticSettings(_env_file=None, postgres_password="TEST_REDACTED_VALUE")
+    connect_kwargs: dict[str, object] = {}
+
+    def connect(**kwargs: object) -> _ReaderConnection:
+        connect_kwargs.update(kwargs)
+        return _ReaderConnection(cursor)
+
+    return (
+        EvidenceTools.for_run(RUN_ID, settings, tmp_path, db_connect=connect),
+        connect_kwargs,
+    )
+
+
+def test_get_relation_schema_uses_reader_and_returns_live_columns(tmp_path: Path) -> None:
+    cursor = _ReaderCursor(
+        columns=[
+            ("id", "integer", "YES", 1),
+            ("total_amount", "integer", "YES", 4),
+        ]
+    )
+    tools, kwargs = _reader_tools(tmp_path, cursor)
+    record = tools.get_relation_schema("raw_payments")[0]
+
+    assert record.evidence_type.value == "RELATION_SCHEMA"
+    assert record.source.value == "postgres_catalog"
+    assert tuple(column.name for column in record.content.columns) == ("id", "total_amount")
+    assert kwargs["user"] == "dig_reader"
+    assert kwargs["password"] == "TEST_REDACTED_VALUE"
+    assert [str(query).strip().upper() for query, _ in cursor.executions] == [
+        "SET TRANSACTION READ ONLY",
+        "SHOW TRANSACTION_READ_ONLY",
+        (
+            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, ORDINAL_POSITION\n"
+            "FROM INFORMATION_SCHEMA.COLUMNS\n"
+            "WHERE TABLE_SCHEMA = %S AND TABLE_NAME = %S\n"
+            "ORDER BY ORDINAL_POSITION"
+        ),
+        "SELECT CURRENT_TIMESTAMP",
+    ]
+    assert cursor.executions[2][1] == ("analytics", "raw_payments")
+
+
+def test_get_relation_schema_rejects_relation_not_in_run_snapshot(tmp_path: Path) -> None:
+    cursor = _ReaderCursor()
+    tools, _ = _reader_tools(tmp_path, cursor)
+
+    with pytest.raises(RelationNotAllowedError):
+        tools.get_relation_schema("orders")
+
+    assert cursor.executions == []
+
+
+def test_get_relation_schema_rejects_missing_relation(tmp_path: Path) -> None:
+    cursor = _ReaderCursor(columns=[])
+    tools, _ = _reader_tools(tmp_path, cursor)
+
+    with pytest.raises(RelationNotFoundError):
+        tools.get_relation_schema("raw_payments")
+
+
+def test_get_relation_schema_rejects_live_schema_different_from_run_snapshot(
+    tmp_path: Path,
+) -> None:
+    cursor = _ReaderCursor(columns=[("id", "bigint", "YES", 1)])
+    tools, _ = _reader_tools(tmp_path, cursor)
+
+    with pytest.raises(RunStateDriftError):
+        tools.get_relation_schema("raw_payments")
+
+
+def test_get_relation_schema_redacts_reader_database_errors(tmp_path: Path) -> None:
+    cursor = _ReaderCursor()
+
+    def fail_execute(query: object, params: object = None) -> None:
+        raise RuntimeError("database failed with TEST_REDACTED_VALUE")
+
+    cursor.execute = fail_execute  # type: ignore[method-assign]
+    tools, _ = _reader_tools(tmp_path, cursor)
+
+    with pytest.raises(ReadOnlyDatabaseError) as error:
+        tools.get_relation_schema("raw_payments")
+
+    assert "TEST_REDACTED_VALUE" not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None

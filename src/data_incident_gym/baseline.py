@@ -18,6 +18,8 @@ from data_incident_gym.dbt_runner import (
     DbtRunner,
     raise_without_context,
 )
+from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.read_only_db import ReadOnlyProvisioningError, ReadOnlyRoleProvisioner
 
 RunCommand = Callable[..., CompletedProcess[str]]
 DatabaseConnect = Callable[..., Any]
@@ -150,11 +152,17 @@ class BaselineBuilder:
         project_root: Path = PROJECT_ROOT,
         run_command: RunCommand = subprocess.run,
         db_connect: DatabaseConnect | None = None,
+        provisioner: ReadOnlyRoleProvisioner | None = None,
     ) -> None:
         self.settings = settings
         self.project_root = project_root
         self.run_command = run_command
         self.db_connect = db_connect or psycopg.connect
+        self.read_only_provisioner = provisioner or ReadOnlyRoleProvisioner(
+            settings,
+            DiagnosticSettings(),
+            db_connect=self.db_connect,
+        )
         self.dbt_target = project_root / ".dig" / "dbt" / "target"
         self.dbt_logs = project_root / ".dig" / "dbt" / "logs"
         self.dbt_runner = DbtRunner(settings, project_root, run_command)
@@ -310,6 +318,12 @@ class BaselineBuilder:
 
         return make_baseline_summary(self.settings.postgres_schema, relations)
 
+    def provision_read_only_role(self) -> None:
+        try:
+            self.read_only_provisioner.provision()
+        except ReadOnlyProvisioningError as exc:
+            raise_without_context(BaselineError(str(exc)))
+
     def write_summary(self, summary: BaselineSummary) -> None:
         summary_path = self.project_root / ".dig" / "baseline-summary.json"
         try:
@@ -325,6 +339,7 @@ class BaselineBuilder:
         self.start_postgres()
         self.run_dbt()
         self.validate_dbt_artifacts()
+        self.provision_read_only_role()
         summary = self.inspect_database()
         self.write_summary(summary)
         return summary

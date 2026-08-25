@@ -286,6 +286,11 @@ def test_build_calls_stages_in_fixed_order(monkeypatch: pytest.MonkeyPatch, tmp_
         )
     monkeypatch.setattr(
         builder,
+        "provision_read_only_role",
+        lambda: calls.append("provision_read_only_role"),
+    )
+    monkeypatch.setattr(
+        builder,
         "inspect_database",
         lambda: calls.append("inspect_database") or summary,
     )
@@ -297,9 +302,40 @@ def test_build_calls_stages_in_fixed_order(monkeypatch: pytest.MonkeyPatch, tmp_
         "start_postgres",
         "run_dbt",
         "validate_dbt_artifacts",
+        "provision_read_only_role",
         "inspect_database",
         "write_summary",
     ]
+
+
+def test_build_does_not_inspect_or_write_when_provisioning_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    builder = BaselineBuilder(Settings(_env_file=None), tmp_path)
+    monkeypatch.setattr(baseline_module, "validate_upstream_fixture", lambda _: "commit")
+    for stage in ("start_postgres", "run_dbt", "validate_dbt_artifacts"):
+        monkeypatch.setattr(builder, stage, lambda stage=stage: calls.append(stage))
+
+    def fail_provision() -> None:
+        calls.append("provision_read_only_role")
+        raise BaselineError("reader provisioning failed")
+
+    monkeypatch.setattr(builder, "provision_read_only_role", fail_provision)
+    monkeypatch.setattr(builder, "inspect_database", lambda: calls.append("inspect_database"))
+    monkeypatch.setattr(builder, "write_summary", lambda _: calls.append("write_summary"))
+
+    with pytest.raises(BaselineError, match="reader provisioning failed"):
+        builder.build()
+
+    assert calls == [
+        "start_postgres",
+        "run_dbt",
+        "validate_dbt_artifacts",
+        "provision_read_only_role",
+    ]
+    assert not (tmp_path / ".dig" / "baseline-summary.json").exists()
 
 
 def test_build_runs_compose_seed_then_dbt_build_without_shell(
