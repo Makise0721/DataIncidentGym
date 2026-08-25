@@ -151,8 +151,6 @@ class BaselineBuilder:
         self.project_root = project_root
         self.run_command = run_command
         self.db_connect = db_connect or psycopg.connect
-        self.dbt_project = project_root / "third_party" / "jaffle_shop"
-        self.dbt_profiles = project_root / "config" / "dbt"
         self.dbt_target = project_root / ".dig" / "dbt" / "target"
         self.dbt_logs = project_root / ".dig" / "dbt" / "logs"
         self.dbt_runner = DbtRunner(settings, project_root, run_command)
