@@ -13,7 +13,11 @@ import psycopg
 from psycopg import sql
 
 from data_incident_gym.config import PROJECT_ROOT, Settings
-from data_incident_gym.dbt_runner import DbtExecutionError, DbtRunner
+from data_incident_gym.dbt_runner import (
+    DbtExecutionError,
+    DbtRunner,
+    raise_without_context,
+)
 
 RunCommand = Callable[..., CompletedProcess[str]]
 DatabaseConnect = Callable[..., Any]
@@ -169,7 +173,9 @@ class BaselineBuilder:
                 timeout=self.settings.command_timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise BaselineError(f"{stage} 无法执行：{self._redact(str(exc))}") from None
+            raise_without_context(
+                BaselineError(f"{stage} 无法执行：{self._redact(str(exc))}")
+            )
         if result.returncode != 0:
             raise BaselineError(
                 f"{stage} 失败（exit={result.returncode}）\n"
@@ -202,7 +208,7 @@ class BaselineBuilder:
         try:
             self.dbt_runner.run_healthy(self.dbt_target, self.dbt_logs)
         except DbtExecutionError as exc:
-            raise BaselineError(str(exc)) from None
+            raise_without_context(BaselineError(str(exc)))
 
     def validate_dbt_artifacts(self) -> None:
         artifact_paths = {

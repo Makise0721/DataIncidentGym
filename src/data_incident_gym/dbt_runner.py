@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import CompletedProcess
+from typing import NoReturn
 
 from data_incident_gym.config import PROJECT_ROOT, Settings
 
@@ -20,6 +21,14 @@ class DbtRunResult:
 
 class DbtExecutionError(RuntimeError):
     """Raised when dbt cannot execute or a healthy dbt stage fails."""
+
+
+def raise_without_context(error: Exception) -> NoReturn:
+    try:
+        raise error from None
+    except Exception as raised:
+        raised.__context__ = None
+        raise
 
 
 class DbtRunner:
@@ -77,9 +86,9 @@ class DbtRunner:
                 timeout=self.settings.command_timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise DbtExecutionError(
-                f"{stage} 无法执行：{self._redact(str(exc))}"
-            ) from None
+            raise_without_context(
+                DbtExecutionError(f"{stage} 无法执行：{self._redact(str(exc))}")
+            )
         return DbtRunResult(
             return_code=result.returncode,
             stdout=self._redact(result.stdout or ""),
@@ -100,9 +109,9 @@ class DbtRunner:
             target_path.mkdir(parents=True, exist_ok=True)
             log_path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise DbtExecutionError(
-                f"无法创建 dbt 产物目录：{self._redact(str(exc))}"
-            ) from None
+            raise_without_context(
+                DbtExecutionError(f"无法创建 dbt 产物目录：{self._redact(str(exc))}")
+            )
 
     def run_healthy(self, target_path: Path, log_path: Path) -> None:
         self._prepare(target_path, log_path)

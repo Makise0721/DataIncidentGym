@@ -11,13 +11,14 @@ from data_incident_gym.dbt_runner import DbtExecutionError, DbtRunner
 def test_healthy_run_seeds_then_builds_while_incident_run_never_seeds(
     tmp_path: Path,
 ) -> None:
-    calls: list[list[str]] = []
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    settings = Settings(_env_file=None, postgres_password="runner-secret")
 
-    def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
-        calls.append(command)
+    def fake_run(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+        calls.append((command, kwargs))
         return CompletedProcess(command, 0, stdout="ok", stderr="")
 
-    runner = DbtRunner(Settings(_env_file=None), tmp_path, fake_run)
+    runner = DbtRunner(settings, tmp_path, fake_run)
 
     runner.run_healthy(tmp_path / "healthy/target", tmp_path / "healthy/logs")
     incident = runner.run_incident(
@@ -25,16 +26,71 @@ def test_healthy_run_seeds_then_builds_while_incident_run_never_seeds(
         tmp_path / "incident/logs",
     )
 
-    assert [command[:2] for command in calls] == [
+    commands = [command for command, _ in calls]
+    assert [command[:2] for command in commands] == [
         ["dbt", "seed"],
         ["dbt", "build"],
         ["dbt", "build"],
     ]
-    assert "--full-refresh" in calls[0]
-    assert "--full-refresh" not in calls[2]
-    assert calls[2][1] == "build"
-    exclude_index = calls[2].index("--exclude-resource-type")
-    assert calls[2][exclude_index + 1] == "seed"
+    assert commands[0] == [
+        "dbt",
+        "seed",
+        "--project-dir",
+        str(tmp_path / "third_party" / "jaffle_shop"),
+        "--profiles-dir",
+        str(tmp_path / "config" / "dbt"),
+        "--target",
+        "dev",
+        "--target-path",
+        str(tmp_path / "healthy/target"),
+        "--log-path",
+        str(tmp_path / "healthy/logs"),
+        "--no-use-colors",
+        "--full-refresh",
+    ]
+    assert commands[1] == [
+        "dbt",
+        "build",
+        "--project-dir",
+        str(tmp_path / "third_party" / "jaffle_shop"),
+        "--profiles-dir",
+        str(tmp_path / "config" / "dbt"),
+        "--target",
+        "dev",
+        "--target-path",
+        str(tmp_path / "healthy/target"),
+        "--log-path",
+        str(tmp_path / "healthy/logs"),
+        "--no-use-colors",
+    ]
+    assert commands[2] == [
+        "dbt",
+        "build",
+        "--project-dir",
+        str(tmp_path / "third_party" / "jaffle_shop"),
+        "--profiles-dir",
+        str(tmp_path / "config" / "dbt"),
+        "--target",
+        "dev",
+        "--target-path",
+        str(tmp_path / "incident/target"),
+        "--log-path",
+        str(tmp_path / "incident/logs"),
+        "--no-use-colors",
+        "--exclude-resource-type",
+        "seed",
+    ]
+    for _, kwargs in calls:
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["timeout"] == settings.command_timeout_seconds
+        assert kwargs["check"] is False
+        assert kwargs["capture_output"] is True
+        assert kwargs["text"] is True
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert env["DIG_POSTGRES_PASSWORD"] == "runner-secret"
     assert incident.return_code == 0
 
 
@@ -103,4 +159,5 @@ def test_execution_failures_do_not_retain_unredacted_cause(
         )
 
     assert error.value.__cause__ is None
+    assert error.value.__context__ is None
     assert "database-secret" not in str(error.value)

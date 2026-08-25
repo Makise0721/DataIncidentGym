@@ -385,6 +385,25 @@ def test_command_execution_failures_are_wrapped(
     with pytest.raises(BaselineError, match="执行") as error:
         builder.start_postgres()
     assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_baseline_error_conversion_does_not_retain_dbt_context(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(_env_file=None, postgres_password="database-secret")
+
+    def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
+        raise OSError("dbt failed with database-secret")
+
+    builder = BaselineBuilder(settings, tmp_path, fake_run)
+
+    with pytest.raises(BaselineError) as error:
+        builder.run_dbt()
+
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert "database-secret" not in str(error.value)
 
 
 @pytest.mark.parametrize(
