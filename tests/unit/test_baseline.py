@@ -462,6 +462,64 @@ def test_validate_dbt_artifacts_rejects_missing_files(
         builder.validate_dbt_artifacts()
 
 
+def test_validate_dbt_artifact_read_error_redacts_exception_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret = "database-secret"
+    builder = BaselineBuilder(
+        Settings(_env_file=None, postgres_password=secret),
+        tmp_path,
+    )
+    builder.dbt_target.mkdir(parents=True)
+    builder.dbt_logs.mkdir(parents=True)
+    for path in (
+        builder.dbt_target / "manifest.json",
+        builder.dbt_target / "run_results.json",
+        builder.dbt_logs / "dbt.log",
+    ):
+        path.write_text("{}", encoding="utf-8")
+
+    def fail_read_text(*_: object, **__: object) -> str:
+        raise OSError(f"read failed: {secret}")
+
+    monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+    with pytest.raises(BaselineError) as error:
+        builder.validate_dbt_artifacts()
+
+    assert secret not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
+def test_write_summary_error_redacts_exception_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    secret = "database-secret"
+    builder = BaselineBuilder(
+        Settings(_env_file=None, postgres_password=secret),
+        tmp_path,
+    )
+    summary = make_baseline_summary(
+        "analytics",
+        (_relation("customers", 100, ("id", "integer", False, 1)),),
+    )
+
+    def fail_write_text(*_: object, **__: object) -> None:
+        raise OSError(f"write failed: {secret}")
+
+    monkeypatch.setattr(Path, "write_text", fail_write_text)
+
+    with pytest.raises(BaselineError) as error:
+        builder.write_summary(summary)
+
+    assert secret not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
 def test_validate_dbt_artifacts_rejects_empty_results(tmp_path: Path) -> None:
     builder = BaselineBuilder(Settings(_env_file=None), tmp_path)
     builder.dbt_target.mkdir(parents=True)

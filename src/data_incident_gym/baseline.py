@@ -225,7 +225,11 @@ class BaselineBuilder:
             run_results_text = artifact_paths["run_results.json"].read_text(encoding="utf-8")
             dbt_log_text = artifact_paths["dbt.log"].read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
-            raise BaselineError(f"无法读取 dbt artifact（{exc}）") from exc
+            raise_without_context(
+                BaselineError(
+                    f"无法读取 dbt artifact（{self._redact(str(exc))}）"
+                )
+            )
 
         if not manifest_text.strip():
             raise BaselineError("dbt artifact 为空：manifest.json")
@@ -238,7 +242,9 @@ class BaselineBuilder:
             manifest = json.loads(manifest_text)
             run_results = json.loads(run_results_text)
         except json.JSONDecodeError as exc:
-            raise BaselineError(f"无法解析 dbt artifact：{exc}") from exc
+            raise_without_context(
+                BaselineError(f"无法解析 dbt artifact：{self._redact(str(exc))}")
+            )
 
         if not isinstance(manifest, dict) or not manifest:
             raise BaselineError("manifest.json 内容无效")
@@ -310,7 +316,9 @@ class BaselineBuilder:
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             summary_path.write_text(summary.to_json(), encoding="utf-8")
         except OSError as exc:
-            raise BaselineError(f"无法写入基线摘要：{self._redact(str(exc))}") from exc
+            raise_without_context(
+                BaselineError(f"无法写入基线摘要：{self._redact(str(exc))}")
+            )
 
     def build(self) -> BaselineSummary:
         validate_upstream_fixture(self.project_root)
