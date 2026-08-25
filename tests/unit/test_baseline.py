@@ -372,7 +372,18 @@ def test_nonzero_command_is_wrapped_and_password_is_redacted(
     assert "***" in message
 
 
-@pytest.mark.parametrize("failure", [subprocess.TimeoutExpired("dbt", 3), OSError("not found")])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.TimeoutExpired(
+            "dbt",
+            3,
+            output="database-secret",
+            stderr="database-secret",
+        ),
+        OSError("not found: database-secret"),
+    ],
+)
 def test_command_execution_failures_are_wrapped(
     tmp_path: Path,
     failure: BaseException,
@@ -380,21 +391,39 @@ def test_command_execution_failures_are_wrapped(
     def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
         raise failure
 
-    builder = BaselineBuilder(Settings(_env_file=None), tmp_path, fake_run)
+    builder = BaselineBuilder(
+        Settings(_env_file=None, postgres_password="database-secret"),
+        tmp_path,
+        fake_run,
+    )
 
     with pytest.raises(BaselineError, match="执行") as error:
         builder.start_postgres()
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
+    assert "database-secret" not in str(error.value)
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("dbt failed with database-secret"),
+        subprocess.TimeoutExpired(
+            "dbt",
+            1,
+            output="database-secret",
+            stderr="database-secret",
+        ),
+    ],
+)
 def test_baseline_error_conversion_does_not_retain_dbt_context(
     tmp_path: Path,
+    failure: BaseException,
 ) -> None:
     settings = Settings(_env_file=None, postgres_password="database-secret")
 
     def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
-        raise OSError("dbt failed with database-secret")
+        raise failure
 
     builder = BaselineBuilder(settings, tmp_path, fake_run)
 

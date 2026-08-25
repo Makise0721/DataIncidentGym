@@ -129,6 +129,8 @@ def test_healthy_run_rejects_nonzero_and_redacts_password(tmp_path: Path) -> Non
     assert "加载固定 seeds" in str(error.value)
     assert "exit=17" in str(error.value)
     assert "database-secret" not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
 
 
 @pytest.mark.parametrize(
