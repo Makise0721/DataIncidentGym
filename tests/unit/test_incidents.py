@@ -168,3 +168,34 @@ def test_ground_truth_rejects_fault_or_healthy_metadata_drift(
 
     with pytest.raises(IncidentCaseError, match="Ground Truth 无效"):
         load_ground_truth(CASE_ID, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        ("metadata", "nullable", 1),
+        ("metadata", "ordinal_position", "1"),
+        ("metadata", "data_type", 1),
+        ("metadata", "name", 1),
+        ("schema", "row_count", "113"),
+    ],
+)
+def test_ground_truth_rejects_coercible_json_types(
+    tmp_path: Path,
+    project_root: Path,
+    target: str,
+    field: str,
+    value: object,
+) -> None:
+    source = project_root / "config/incidents/schema_rename_payment_amount.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if target == "metadata":
+        payload["expected_schema"]["healthy_column_metadata"][0][field] = value
+    else:
+        payload["expected_schema"][field] = value
+    target_path = tmp_path / "config/incidents/schema_rename_payment_amount.json"
+    target_path.parent.mkdir(parents=True)
+    target_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(IncidentCaseError, match="Ground Truth 无效"):
+        load_ground_truth(CASE_ID, tmp_path)
