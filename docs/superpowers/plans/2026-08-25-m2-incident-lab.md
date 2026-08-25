@@ -245,6 +245,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -283,6 +284,13 @@ class ExpectedSchema(BaseModel):
     healthy_column_metadata: tuple[ExpectedColumn, ...]
     fault_column_metadata: tuple[ExpectedColumn, ...]
     row_count: Literal[113]
+
+    @field_validator("row_count", mode="before")
+    @classmethod
+    def validate_row_count_type(cls, value: object) -> object:
+        if type(value) is not int or value != 113:
+            raise ValueError("row_count 必须是原生 int 且为 113")
+        return value
 
 
 class GroundTruth(BaseModel):
