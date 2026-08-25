@@ -238,7 +238,15 @@ import json
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    ValidationError,
+    model_validator,
+)
 
 from data_incident_gym.config import PROJECT_ROOT
 
@@ -260,10 +268,10 @@ class InjectionSpec(BaseModel):
 class ExpectedColumn(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    name: str
-    data_type: str
-    nullable: bool
-    ordinal_position: int
+    name: StrictStr
+    data_type: StrictStr
+    nullable: StrictBool
+    ordinal_position: StrictInt
 
 
 class ExpectedSchema(BaseModel):
