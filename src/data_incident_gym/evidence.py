@@ -1,0 +1,287 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from datetime import datetime
+from enum import StrEnum
+from typing import Annotated, Literal, NoReturn
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
+
+
+class EvidenceType(StrEnum):
+    DBT_RUN_RESULTS = "DBT_RUN_RESULTS"
+    DBT_NODE_ERROR = "DBT_NODE_ERROR"
+    RELATION_SCHEMA = "RELATION_SCHEMA"
+    DBT_LINEAGE = "DBT_LINEAGE"
+
+
+class EvidenceSource(StrEnum):
+    DBT_RUN_RESULTS = "dbt_artifact:run_results.json"
+    DBT_MANIFEST = "dbt_artifact:manifest.json"
+    POSTGRES_CATALOG = "postgres_catalog"
+
+
+class RelationSchemaColumn(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    data_type: str
+    nullable: bool
+    ordinal_position: int
+
+
+class DbtRunResultsFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["DBT_RUN_RESULTS"]
+    run_id: str = Field(pattern=RUN_ID_PATTERN)
+    run_status: Literal["FAILED", "SUCCEEDED"]
+    dbt_exit_code: int
+    failed_nodes: tuple[str, ...]
+    skipped_nodes: tuple[str, ...]
+
+
+class DbtNodeErrorFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["DBT_NODE_ERROR"]
+    run_id: str = Field(pattern=RUN_ID_PATTERN)
+    node_id: str
+    resource_type: str
+    status: str
+    message: str
+
+
+class RelationSchemaFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["RELATION_SCHEMA"]
+    run_id: str = Field(pattern=RUN_ID_PATTERN)
+    schema_name: str
+    relation_name: str
+    columns: tuple[RelationSchemaColumn, ...]
+
+
+class DbtLineageNode(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    node_id: str
+    resource_type: str
+    name: str
+    distance: int
+
+
+class DbtLineageFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["DBT_LINEAGE"]
+    run_id: str = Field(pattern=RUN_ID_PATTERN)
+    node_id: str
+    direction: Literal["upstream", "downstream"]
+    related_nodes: tuple[DbtLineageNode, ...]
+
+
+SchemaColumn = RelationSchemaColumn
+LineageNode = DbtLineageNode
+
+type EvidenceContent = Annotated[
+    DbtRunResultsFact | DbtNodeErrorFact | RelationSchemaFact | DbtLineageFact,
+    Field(discriminator="kind"),
+]
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+_CONTENT_TYPES: dict[EvidenceType, type[BaseModel]] = {
+    EvidenceType.DBT_RUN_RESULTS: DbtRunResultsFact,
+    EvidenceType.DBT_NODE_ERROR: DbtNodeErrorFact,
+    EvidenceType.RELATION_SCHEMA: RelationSchemaFact,
+    EvidenceType.DBT_LINEAGE: DbtLineageFact,
+}
+
+_SOURCE_TYPES: dict[EvidenceType, EvidenceSource] = {
+    EvidenceType.DBT_RUN_RESULTS: EvidenceSource.DBT_RUN_RESULTS,
+    EvidenceType.DBT_NODE_ERROR: EvidenceSource.DBT_RUN_RESULTS,
+    EvidenceType.RELATION_SCHEMA: EvidenceSource.POSTGRES_CATALOG,
+    EvidenceType.DBT_LINEAGE: EvidenceSource.DBT_MANIFEST,
+}
+
+
+class EvidenceRecord(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str = Field(pattern=RUN_ID_PATTERN)
+    evidence_id: str = Field(pattern=r"^ev_[0-9a-f]{64}$")
+    evidence_type: EvidenceType
+    source: EvidenceSource
+    subject: str
+    observed_at: datetime
+    content: EvidenceContent
+    content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        run_id: str,
+        evidence_type: EvidenceType,
+        source: EvidenceSource,
+        subject: str,
+        observed_at: datetime,
+        content: EvidenceContent,
+    ) -> EvidenceRecord:
+        content_payload = content.model_dump(mode="json")
+        content_digest = hashlib.sha256(_canonical_bytes(content_payload)).hexdigest()
+        identity = {
+            "content_digest": content_digest,
+            "evidence_type": evidence_type.value,
+            "run_id": run_id,
+            "source": source.value,
+            "subject": subject,
+        }
+        evidence_id = "ev_" + hashlib.sha256(_canonical_bytes(identity)).hexdigest()
+        return cls(
+            run_id=run_id,
+            evidence_id=evidence_id,
+            evidence_type=evidence_type,
+            source=source,
+            subject=subject,
+            observed_at=observed_at,
+            content=content,
+            content_digest=content_digest,
+        )
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> EvidenceRecord:
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        if self.content.run_id != self.run_id:
+            raise ValueError("content run_id must match record run_id")
+        expected_content_type = _CONTENT_TYPES[self.evidence_type]
+        if not isinstance(self.content, expected_content_type):
+            raise ValueError("evidence_type does not match content kind")
+        if self.source != _SOURCE_TYPES[self.evidence_type]:
+            raise ValueError("source does not match evidence_type")
+
+        content_payload = self.content.model_dump(mode="json")
+        expected_digest = hashlib.sha256(_canonical_bytes(content_payload)).hexdigest()
+        if self.content_digest != expected_digest:
+            raise ValueError("content_digest does not match content")
+        identity = {
+            "content_digest": expected_digest,
+            "evidence_type": self.evidence_type.value,
+            "run_id": self.run_id,
+            "source": self.source.value,
+            "subject": self.subject,
+        }
+        expected_id = "ev_" + hashlib.sha256(_canonical_bytes(identity)).hexdigest()
+        if self.evidence_id != expected_id:
+            raise ValueError("evidence_id does not match record identity")
+        return self
+
+
+def _safe_message(message: object) -> str:
+    text = str(message)
+    text = re.sub(
+        r"(?i)\b(?:password|passwd|secret|token)\s*[:=]\s*[^\s,;]+",
+        "[redacted credential]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(?:select|insert|update|delete|alter|create|drop|grant|revoke)\b.*",
+        "[redacted SQL]",
+        text,
+    )
+    text = re.sub(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|/)[^\r\n\s]*", "[redacted path]", text)
+    return text
+
+
+class EvidenceToolError(RuntimeError):
+    code = "EVIDENCE_TOOL_ERROR"
+
+    def __init__(self, message: object = "Evidence tool failed") -> None:
+        super().__init__(_safe_message(message))
+        self.__cause__ = None
+        self.__context__ = None
+
+
+class InvalidRunIdError(EvidenceToolError):
+    code = "INVALID_RUN_ID"
+
+
+class RunNotFoundError(EvidenceToolError):
+    code = "RUN_NOT_FOUND"
+
+
+class RunContextMismatchError(EvidenceToolError):
+    code = "RUN_CONTEXT_MISMATCH"
+
+
+class InvalidArtifactError(EvidenceToolError):
+    code = "INVALID_ARTIFACT"
+
+
+class NodeNotFoundError(EvidenceToolError):
+    code = "NODE_NOT_FOUND"
+
+
+class NodeErrorNotFoundError(EvidenceToolError):
+    code = "NODE_ERROR_NOT_FOUND"
+
+
+class InvalidDirectionError(EvidenceToolError):
+    code = "INVALID_DIRECTION"
+
+
+class RelationNotAllowedError(EvidenceToolError):
+    code = "RELATION_NOT_ALLOWED"
+
+
+class RelationNotFoundError(EvidenceToolError):
+    code = "RELATION_NOT_FOUND"
+
+
+class RunStateDriftError(EvidenceToolError):
+    code = "RUN_STATE_DRIFT"
+
+
+class ReadOnlyDatabaseError(EvidenceToolError):
+    code = "READ_ONLY_DATABASE_ERROR"
+
+
+InvalidRunId = InvalidRunIdError
+RunNotFound = RunNotFoundError
+RunContextMismatch = RunContextMismatchError
+InvalidArtifact = InvalidArtifactError
+NodeNotFound = NodeNotFoundError
+NodeErrorNotFound = NodeErrorNotFoundError
+InvalidDirection = InvalidDirectionError
+RelationNotAllowed = RelationNotAllowedError
+RelationNotFound = RelationNotFoundError
+RunStateDrift = RunStateDriftError
+ReadOnlyDatabase = ReadOnlyDatabaseError
+
+
+def _clean(error: EvidenceToolError) -> EvidenceToolError:
+    error.__cause__ = None
+    error.__context__ = None
+    return error
+
+
+def raise_without_context(error: EvidenceToolError) -> NoReturn:
+    try:
+        raise error from None
+    except EvidenceToolError as raised:
+        raised.__context__ = None
+        raise
