@@ -1,10 +1,11 @@
 from datetime import UTC, datetime
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from data_incident_gym.evidence import (
     DbtLineageFact,
+    DbtLineageNode,
     DbtNodeErrorFact,
     DbtRunResultsFact,
     EvidenceRecord,
@@ -177,6 +178,62 @@ def test_all_fact_variants_are_frozen_and_have_exact_discriminators() -> None:
 
 
 @pytest.mark.parametrize(
+    ("model", "payload", "field"),
+    [
+        (
+            DbtRunResultsFact,
+            {
+                "kind": "DBT_RUN_RESULTS",
+                "run_id": RUN_ID,
+                "run_status": "FAILED",
+                "dbt_exit_code": "1",
+                "failed_nodes": (),
+                "skipped_nodes": (),
+            },
+            "dbt_exit_code",
+        ),
+        (
+            RelationSchemaColumn,
+            {
+                "name": "amount",
+                "data_type": "integer",
+                "nullable": 1,
+                "ordinal_position": 4,
+            },
+            "nullable",
+        ),
+        (
+            RelationSchemaColumn,
+            {
+                "name": "amount",
+                "data_type": "integer",
+                "nullable": True,
+                "ordinal_position": "4",
+            },
+            "ordinal_position",
+        ),
+        (
+            DbtLineageNode,
+            {
+                "node_id": "model.jaffle_shop.orders",
+                "resource_type": "model",
+                "name": "orders",
+                "distance": "1",
+            },
+            "distance",
+        ),
+    ],
+)
+def test_fact_models_reject_coercible_primitive_types(
+    model: type[BaseModel], payload: dict[str, object], field: str
+) -> None:
+    with pytest.raises(ValidationError) as error:
+        model.model_validate(payload)
+
+    assert field in str(error.value)
+
+
+@pytest.mark.parametrize(
     ("error_type", "code"),
     [
         (InvalidRunIdError, "INVALID_RUN_ID"),
@@ -197,7 +254,8 @@ def test_error_subclasses_expose_stable_codes_and_redact_details(
 ) -> None:
     error = error_type(
         "password=TEST_REDACTED_VALUE SELECT * FROM TEST_REDACTED_VALUE "
-        "C:\\TEST_REDACTED_VALUE\\artifact.json"
+        "C:\\TEST_REDACTED_VALUE\\artifact.json "
+        r"\\TEST_REDACTED_VALUE\share\artifact.json"
     )
 
     assert error.code == code

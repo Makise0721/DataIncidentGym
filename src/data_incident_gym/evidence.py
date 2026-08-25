@@ -7,7 +7,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated, Literal, NoReturn
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 
@@ -28,59 +36,59 @@ class EvidenceSource(StrEnum):
 class RelationSchemaColumn(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    name: str
-    data_type: str
-    nullable: bool
-    ordinal_position: int
+    name: StrictStr
+    data_type: StrictStr
+    nullable: StrictBool
+    ordinal_position: StrictInt
 
 
 class DbtRunResultsFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["DBT_RUN_RESULTS"]
-    run_id: str = Field(pattern=RUN_ID_PATTERN)
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
     run_status: Literal["FAILED", "SUCCEEDED"]
-    dbt_exit_code: int
-    failed_nodes: tuple[str, ...]
-    skipped_nodes: tuple[str, ...]
+    dbt_exit_code: StrictInt
+    failed_nodes: tuple[StrictStr, ...]
+    skipped_nodes: tuple[StrictStr, ...]
 
 
 class DbtNodeErrorFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["DBT_NODE_ERROR"]
-    run_id: str = Field(pattern=RUN_ID_PATTERN)
-    node_id: str
-    resource_type: str
-    status: str
-    message: str
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
+    node_id: StrictStr
+    resource_type: StrictStr
+    status: StrictStr
+    message: StrictStr
 
 
 class RelationSchemaFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["RELATION_SCHEMA"]
-    run_id: str = Field(pattern=RUN_ID_PATTERN)
-    schema_name: str
-    relation_name: str
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
+    schema_name: StrictStr
+    relation_name: StrictStr
     columns: tuple[RelationSchemaColumn, ...]
 
 
 class DbtLineageNode(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    node_id: str
-    resource_type: str
-    name: str
-    distance: int
+    node_id: StrictStr
+    resource_type: StrictStr
+    name: StrictStr
+    distance: StrictInt
 
 
 class DbtLineageFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["DBT_LINEAGE"]
-    run_id: str = Field(pattern=RUN_ID_PATTERN)
-    node_id: str
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
+    node_id: StrictStr
     direction: Literal["upstream", "downstream"]
     related_nodes: tuple[DbtLineageNode, ...]
 
@@ -121,14 +129,14 @@ _SOURCE_TYPES: dict[EvidenceType, EvidenceSource] = {
 class EvidenceRecord(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    run_id: str = Field(pattern=RUN_ID_PATTERN)
-    evidence_id: str = Field(pattern=r"^ev_[0-9a-f]{64}$")
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
+    evidence_id: StrictStr = Field(pattern=r"^ev_[0-9a-f]{64}$")
     evidence_type: EvidenceType
     source: EvidenceSource
-    subject: str
+    subject: StrictStr
     observed_at: datetime
     content: EvidenceContent
-    content_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
 
     @classmethod
     def create(
@@ -203,7 +211,11 @@ def _safe_message(message: object) -> str:
         "[redacted SQL]",
         text,
     )
-    text = re.sub(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|/)[^\r\n\s]*", "[redacted path]", text)
+    text = re.sub(
+        r'(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\|/)[^\r\n\s]*',
+        "[redacted path]",
+        text,
+    )
     return text
 
 
