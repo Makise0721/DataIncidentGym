@@ -302,10 +302,10 @@ def test_schema_read_error_redacts_password_and_exception_chain(tmp_path: Path) 
     _prepare_ground_truth(tmp_path)
 
     def connect(**_: object) -> None:
-        raise RuntimeError("failed with database-secret")
+        raise RuntimeError("failed with TEST_REDACTED_VALUE")
 
     lab = IncidentLab(
-        Settings(_env_file=None, postgres_password="database-secret"),
+        Settings(_env_file=None, postgres_password="TEST_REDACTED_VALUE"),
         tmp_path,
         baseline_builder=SimpleNamespace(start_postgres=lambda: None),
         db_connect=connect,
@@ -314,15 +314,15 @@ def test_schema_read_error_redacts_password_and_exception_chain(tmp_path: Path) 
     with pytest.raises(IncidentExecutionError) as error:
         lab.inject(CASE_ID)
 
-    assert "database-secret" not in str(error.value)
+    assert "TEST_REDACTED_VALUE" not in str(error.value)
     assert "***" in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
-    assert "database-secret" not in "".join(traceback.format_exception(error.value))
+    assert "TEST_REDACTED_VALUE" not in "".join(traceback.format_exception(error.value))
 
 
 def test_rename_error_redacts_password_and_exception_chain(tmp_path: Path) -> None:
-    secret = "database-secret"
+    secret = "TEST_REDACTED_VALUE"
 
     class Cursor:
         def __enter__(self):
@@ -374,7 +374,7 @@ def test_rename_error_redacts_password_and_exception_chain(tmp_path: Path) -> No
 
 def test_baseline_error_redacts_password_and_exception_chain(tmp_path: Path) -> None:
     _prepare_ground_truth(tmp_path)
-    secret = "database-secret"
+    secret = "TEST_REDACTED_VALUE"
 
     def start_postgres() -> None:
         raise BaselineError(f"runner failed with {secret}")
@@ -388,7 +388,7 @@ def test_baseline_error_redacts_password_and_exception_chain(tmp_path: Path) -> 
     with pytest.raises(IncidentExecutionError) as error:
         lab.inject(CASE_ID)
 
-    assert "database-secret" not in str(error.value)
+    assert "TEST_REDACTED_VALUE" not in str(error.value)
     assert "***" in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
@@ -400,7 +400,7 @@ def test_reset_postcondition_error_has_no_database_secret_or_context(
     tmp_path: Path,
 ) -> None:
     _prepare_ground_truth(tmp_path)
-    secret = "database-secret"
+    secret = "TEST_REDACTED_VALUE"
     baseline = FakeBaseline(make_baseline_summary("analytics", (DRIFTED,)))
     lab = IncidentLab(
         Settings(_env_file=None, postgres_password=secret),
