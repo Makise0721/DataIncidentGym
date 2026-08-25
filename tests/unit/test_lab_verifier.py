@@ -268,6 +268,20 @@ def test_verifier_rejects_cross_branch_manifest_cycle(
         IncidentVerifier(tmp_path).verify(RUN_ID)
 
 
+def test_verifier_rejects_missing_manifest_child_map_entry(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    manifest_path = run_root / "dbt/target/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["child_map"]["model.jaffle_shop.customers"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="缺少节点"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
 def test_verifier_rejects_duplicate_committed_ground_truth_key(
     tmp_path: Path,
     project_root: Path,

@@ -129,7 +129,9 @@ class IncidentVerifier:
                 continue
             visiting.add(current)
             pending.append((current, True))
-            children = child_map.get(current, [])
+            if current not in child_map:
+                raise _clean(LabVerificationError("manifest child_map 缺少节点"))
+            children = child_map[current]
             if not isinstance(children, list):
                 raise _clean(LabVerificationError("manifest child_map 无效"))
             seen_children: set[str] = set()
