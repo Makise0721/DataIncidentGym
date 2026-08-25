@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 import data_incident_gym.cli as cli
 from data_incident_gym.baseline import BaselineError, make_baseline_summary
+from data_incident_gym.incidents import IncidentCaseError
 from data_incident_gym.lab import InvalidIncidentState
 
 runner = CliRunner()
@@ -119,6 +120,24 @@ def test_lab_error_is_chinese_stderr_with_nonzero_exit(monkeypatch) -> None:
     assert "Traceback" not in result.stdout
 
 
+def test_incident_case_error_uses_stable_error_code(monkeypatch) -> None:
+    class FakeLab:
+        def reset(self, case_id: str):
+            raise IncidentCaseError("TEST_REDACTED_VALUE")
+
+    monkeypatch.setattr(cli, "create_incident_lab", lambda: FakeLab())
+
+    result = runner.invoke(
+        cli.app,
+        ["lab", "reset", "schema_rename_payment_amount"],
+    )
+
+    assert result.exit_code != 0
+    assert "INCIDENT_CASE_ERROR" in result.stderr
+    assert "TEST_REDACTED_VALUE" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_lab_help_is_chinese_and_lists_only_m2_actions() -> None:
     lab_help = runner.invoke(cli.app, ["lab", "--help"])
 
@@ -127,5 +146,16 @@ def test_lab_help_is_chinese_and_lists_only_m2_actions() -> None:
     assert "reset" in lab_help.stdout
     assert "inject" in lab_help.stdout
     assert "build" in lab_help.stdout
-    for forbidden in ("replay", "evidence", "diagnose", "eval"):
+    for forbidden in (
+        "replay",
+        "evidence",
+        "diagnose",
+        "eval",
+        "--sql",
+        "--table",
+        "--column",
+        "--skip-seed",
+        "--run-id",
+        "--path",
+    ):
         assert forbidden not in lab_help.stdout
