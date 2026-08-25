@@ -19,6 +19,20 @@ from data_incident_gym.incidents import (
 )
 
 RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_EXPECTED_ARTIFACTS = {
+    "manifest": "dbt/target/manifest.json",
+    "run_results": "dbt/target/run_results.json",
+    "dbt_log": "dbt/logs/dbt.log",
+    "schema": "schema.json",
+}
+_EXPECTED_METADATA_KEYS = {
+    "schema_version",
+    "run_id",
+    "incident_case_id",
+    "dbt_exit_code",
+    "ground_truth_digest",
+    "artifacts",
+}
 
 
 class LabVerificationError(RuntimeError):
@@ -52,10 +66,13 @@ class IncidentVerifier:
 
     @staticmethod
     def _read_object(path: Path) -> dict[str, Any]:
+        error: LabVerificationError | None = None
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            raise _clean(LabVerificationError(f"无法读取验证产物：{path.name}")) from None
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            error = LabVerificationError(f"无法读取验证产物：{path.name}")
+        if error is not None:
+            raise _clean(error)
         if not isinstance(payload, dict):
             raise _clean(
                 LabVerificationError(f"验证产物必须是 JSON object：{path.name}")
@@ -94,12 +111,15 @@ class IncidentVerifier:
 
     @staticmethod
     def _read_ground_truth(run_root: Path, case_id: str, project_root: Path):
+        error: LabVerificationError | None = None
         try:
             committed_truth = load_ground_truth(case_id, project_root)
             snapshot_text = (run_root / "ground_truth.json").read_text(encoding="utf-8")
             snapshot_truth = parse_ground_truth(snapshot_text, "ground_truth.json")
-        except (OSError, IncidentCaseError):
-            raise _clean(LabVerificationError("Ground Truth 快照无效")) from None
+        except (OSError, UnicodeError, IncidentCaseError):
+            error = LabVerificationError("Ground Truth 快照无效")
+        if error is not None:
+            raise _clean(error)
         if snapshot_truth.digest() != committed_truth.digest():
             raise _clean(LabVerificationError("Ground Truth 快照与提交版本不一致"))
         return committed_truth
@@ -109,6 +129,8 @@ class IncidentVerifier:
             raise _clean(LabVerificationError(f"非法 run_id：{run_id}"))
         run_root = self.project_root / ".dig" / "lab" / "runs" / run_id
         metadata = self._read_object(run_root / "metadata.json")
+        if set(metadata) != _EXPECTED_METADATA_KEYS:
+            raise _clean(LabVerificationError("metadata 字段集合无效"))
         if metadata.get("schema_version") != "m2.run.v1":
             raise _clean(LabVerificationError("metadata schema_version 无效"))
         if metadata.get("run_id") != run_id:
@@ -121,6 +143,8 @@ class IncidentVerifier:
         truth_digest = committed_truth.digest()
         if metadata.get("ground_truth_digest") != truth_digest:
             raise _clean(LabVerificationError("metadata Ground Truth digest 不一致"))
+        if metadata.get("artifacts") != _EXPECTED_ARTIFACTS:
+            raise _clean(LabVerificationError("metadata artifacts 清单无效"))
 
         dbt_exit_code = metadata.get("dbt_exit_code")
         if (
@@ -134,16 +158,20 @@ class IncidentVerifier:
         results = run_results.get("results")
         if not isinstance(results, list):
             raise _clean(LabVerificationError("run_results 缺少 results"))
-        failed_nodes = tuple(
-            sorted(
-                result["unique_id"]
-                for result in results
-                if isinstance(result, dict)
-                and result.get("status") == "error"
-                and isinstance(result.get("unique_id"), str)
-                and result["unique_id"].startswith("model.")
-            )
-        )
+        failed_node_ids: list[str] = []
+        for result in results:
+            if not isinstance(result, dict):
+                raise _clean(LabVerificationError("run_results 结果项无效"))
+            if (
+                not isinstance(result.get("unique_id"), str)
+                or not isinstance(result.get("status"), str)
+            ):
+                raise _clean(LabVerificationError("run_results 结果项无效"))
+            if result.get("status") != "error":
+                continue
+            unique_id = result.get("unique_id")
+            failed_node_ids.append(unique_id)
+        failed_nodes = tuple(sorted(failed_node_ids))
         if failed_nodes != (committed_truth.direct_failure,):
             raise _clean(LabVerificationError(f"直接失败节点不匹配：{failed_nodes}"))
 
@@ -164,6 +192,16 @@ class IncidentVerifier:
         columns = relation.get("columns")
         if not isinstance(columns, list):
             raise _clean(LabVerificationError("Schema columns 无效"))
+        for column in columns:
+            if not isinstance(column, dict):
+                raise _clean(LabVerificationError("Schema column 内容无效"))
+            if (
+                not isinstance(column.get("name"), str)
+                or not isinstance(column.get("data_type"), str)
+                or type(column.get("nullable")) is not bool
+                or type(column.get("ordinal_position")) is not int
+            ):
+                raise _clean(LabVerificationError("Schema column 类型无效"))
         try:
             column_summaries = tuple(
                 ColumnSummary(
@@ -189,7 +227,10 @@ class IncidentVerifier:
         )
         if actual_columns != expected_columns:
             raise _clean(LabVerificationError("故障 Schema 列元数据不匹配"))
-        if relation.get("row_count") != committed_truth.expected_schema.row_count:
+        if (
+            type(relation.get("row_count")) is not int
+            or relation.get("row_count") != committed_truth.expected_schema.row_count
+        ):
             raise _clean(LabVerificationError("故障 Schema 行数不匹配"))
         fingerprint = schema.get("fingerprint")
         if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
@@ -211,12 +252,18 @@ class IncidentVerifier:
             raise _clean(LabVerificationError("Schema fingerprint 与内容不一致"))
 
         dbt_log = run_root / "dbt/logs/dbt.log"
+        log_error: LabVerificationError | None = None
         try:
             log_is_valid = dbt_log.is_file() and dbt_log.stat().st_size > 0
         except OSError:
-            raise _clean(LabVerificationError("无法检查 dbt.log")) from None
+            log_error = LabVerificationError("无法检查 dbt.log")
+        if log_error is not None:
+            raise _clean(log_error)
         if not log_is_valid:
             raise _clean(LabVerificationError("缺少 dbt.log"))
+        for capture in (run_root / "dbt/stdout.log", run_root / "dbt/stderr.log"):
+            if not capture.is_file():
+                raise _clean(LabVerificationError(f"缺少 {capture.name}"))
 
         verification = LabVerification(
             status="EXPECTED_FAILURE",
@@ -228,11 +275,14 @@ class IncidentVerifier:
             schema_fingerprint=fingerprint,
             ground_truth_digest=truth_digest,
         )
+        write_error: LabVerificationError | None = None
         try:
             (run_root / "verification.json").write_text(
                 verification.to_json(),
                 encoding="utf-8",
             )
         except OSError:
-            raise _clean(LabVerificationError("无法写入 verification.json")) from None
+            write_error = LabVerificationError("无法写入 verification.json")
+        if write_error is not None:
+            raise _clean(write_error)
         return verification

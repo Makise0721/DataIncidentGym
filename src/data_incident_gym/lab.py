@@ -262,17 +262,19 @@ class IncidentLab:
         ).fingerprint
 
     def _write_text(self, path: Path, text: str) -> None:
+        error: IncidentExecutionError | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
         except OSError as exc:
-            raise self._clean(
-                IncidentExecutionError(
-                    f"无法写入故障运行产物：{self._redact(str(exc))}"
-                )
-            ) from None
+            error = IncidentExecutionError(
+                f"无法写入故障运行产物：{self._redact(str(exc))}"
+            )
+        if error is not None:
+            raise self._clean(error)
 
     def _redact_file(self, path: Path) -> None:
+        error: IncidentExecutionError | None = None
         try:
             if not path.is_file():
                 return
@@ -281,11 +283,11 @@ class IncidentLab:
             if redacted != text:
                 path.write_text(redacted, encoding="utf-8")
         except OSError as exc:
-            raise self._clean(
-                IncidentExecutionError(
-                    f"无法脱敏故障运行产物：{self._redact(str(exc))}"
-                )
-            ) from None
+            error = IncidentExecutionError(
+                f"无法脱敏故障运行产物：{self._redact(str(exc))}"
+            )
+        if error is not None:
+            raise self._clean(error)
 
     def _start_postgres(self) -> None:
         error: IncidentExecutionError | None = None
@@ -372,26 +374,28 @@ class IncidentLab:
         if not isinstance(run_id, str) or RUN_ID_PATTERN.fullmatch(run_id) is None:
             raise self._clean(IncidentExecutionError("run_id 生成器返回非法值"))
         run_root = self.project_root / ".dig" / "lab" / "runs" / run_id
+        error: IncidentExecutionError | None = None
         try:
             run_root.mkdir(parents=True, exist_ok=False)
         except OSError as exc:
-            raise self._clean(
-                IncidentExecutionError(
-                    f"无法创建故障运行目录：{self._redact(str(exc))}"
-                )
-            ) from None
+            error = IncidentExecutionError(
+                f"无法创建故障运行目录：{self._redact(str(exc))}"
+            )
+        if error is not None:
+            raise self._clean(error)
 
         self._write_text(run_root / "ground_truth.json", truth.to_json())
         target = run_root / "dbt" / "target"
         logs = run_root / "dbt" / "logs"
+        dbt_error: IncidentExecutionError | None = None
         try:
             dbt_result = self.dbt_runner.run_incident(target, logs)
         except DbtExecutionError as exc:
-            raise self._clean(
-                IncidentExecutionError(self._redact(str(exc)))
-            ) from None
-        self._write_text(run_root / "dbt/stdout.log", dbt_result.stdout)
-        self._write_text(run_root / "dbt/stderr.log", dbt_result.stderr)
+            dbt_error = IncidentExecutionError(self._redact(str(exc)))
+        if dbt_error is not None:
+            raise self._clean(dbt_error)
+        self._write_text(run_root / "dbt/stdout.log", self._redact(dbt_result.stdout))
+        self._write_text(run_root / "dbt/stderr.log", self._redact(dbt_result.stderr))
         self._redact_file(logs / "dbt.log")
 
         after_build = self._inspect_relation(truth)
@@ -417,10 +421,25 @@ class IncidentLab:
             run_root / "metadata.json",
             json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         )
+        for artifact in (
+            run_root / "ground_truth.json",
+            run_root / "dbt/target/manifest.json",
+            run_root / "dbt/target/run_results.json",
+            run_root / "dbt/logs/dbt.log",
+            run_root / "schema.json",
+            run_root / "metadata.json",
+            run_root / "dbt/stdout.log",
+            run_root / "dbt/stderr.log",
+        ):
+            self._redact_file(artifact)
+        verification_error: FaultVerificationError | None = None
         try:
             verification = self.verifier.verify(run_id)
         except LabVerificationError as exc:
-            raise self._clean(FaultVerificationError(self._redact(str(exc)))) from None
+            verification_error = FaultVerificationError(self._redact(str(exc)))
+        if verification_error is not None:
+            raise self._clean(verification_error)
+        assert verification is not None
         return FaultRun(
             case_id=case_id,
             run_id=run_id,

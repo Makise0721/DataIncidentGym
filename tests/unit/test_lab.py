@@ -15,10 +15,12 @@ from data_incident_gym.baseline import (
 from data_incident_gym.config import Settings
 from data_incident_gym.incidents import CASE_ID, load_ground_truth
 from data_incident_gym.lab import (
+    FaultVerificationError,
     IncidentExecutionError,
     IncidentLab,
     InvalidIncidentState,
 )
+from data_incident_gym.lab_verifier import LabVerificationError
 
 
 def _relation(*names: str) -> RelationSummary:
@@ -405,13 +407,23 @@ def test_build_uses_unique_run_paths_and_returns_expected_failure(
         def run_incident(self, target: Path, logs: Path):
             target.mkdir(parents=True)
             logs.mkdir(parents=True)
-            (target / "manifest.json").write_text("{}", encoding="utf-8")
-            (target / "run_results.json").write_text("{}", encoding="utf-8")
+            (target / "manifest.json").write_text(
+                '{"message": "TEST_REDACTED_VALUE"}',
+                encoding="utf-8",
+            )
+            (target / "run_results.json").write_text(
+                '{"message": "TEST_REDACTED_VALUE"}',
+                encoding="utf-8",
+            )
             (logs / "dbt.log").write_text(
                 "failure TEST_REDACTED_VALUE",
                 encoding="utf-8",
             )
-            return SimpleNamespace(return_code=1, stdout="out", stderr="err")
+            return SimpleNamespace(
+                return_code=1,
+                stdout="out TEST_REDACTED_VALUE",
+                stderr="err TEST_REDACTED_VALUE",
+            )
 
     verification = SimpleNamespace(status="EXPECTED_FAILURE")
 
@@ -437,11 +449,26 @@ def test_build_uses_unique_run_paths_and_returns_expected_failure(
         tmp_path / ".dig/lab/runs/0123456789abcdef0123456789abcdef"
     )
     assert (result.artifact_dir / "metadata.json").is_file()
-    assert (result.artifact_dir / "dbt/stdout.log").read_text(encoding="utf-8") == "out"
+    assert "TEST_REDACTED_VALUE" not in (
+        result.artifact_dir / "dbt/stdout.log"
+    ).read_text(encoding="utf-8")
+    assert "TEST_REDACTED_VALUE" not in (
+        result.artifact_dir / "dbt/stderr.log"
+    ).read_text(encoding="utf-8")
     assert "TEST_REDACTED_VALUE" not in (
         result.artifact_dir / "dbt/logs/dbt.log"
     ).read_text(encoding="utf-8")
+    assert "TEST_REDACTED_VALUE" not in (
+        result.artifact_dir / "dbt/target/manifest.json"
+    ).read_text(encoding="utf-8")
+    assert "TEST_REDACTED_VALUE" not in (
+        result.artifact_dir / "dbt/target/run_results.json"
+    ).read_text(encoding="utf-8")
     assert not (tmp_path / ".dig/dbt/target/run_results.json").exists()
+
+    with pytest.raises(IncidentExecutionError):
+        lab.build(CASE_ID)
+    assert (result.artifact_dir / "metadata.json").is_file()
 
 
 def test_build_rejects_noninjected_schema(
@@ -453,3 +480,49 @@ def test_build_rejects_noninjected_schema(
 
     with pytest.raises(InvalidIncidentState, match="要求已注入状态"):
         lab.build(CASE_ID)
+
+
+def test_build_preserves_scene_when_verification_fails_without_secret_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    lab.settings = Settings(_env_file=None, postgres_password="TEST_REDACTED_VALUE")
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
+
+    class FakeDbtRunner:
+        def run_incident(self, target: Path, logs: Path):
+            target.mkdir(parents=True)
+            logs.mkdir(parents=True)
+            (target / "manifest.json").write_text("{}", encoding="utf-8")
+            (target / "run_results.json").write_text("{}", encoding="utf-8")
+            (logs / "dbt.log").write_text(
+                "failure TEST_REDACTED_VALUE",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(
+                return_code=1,
+                stdout="stdout TEST_REDACTED_VALUE",
+                stderr="stderr TEST_REDACTED_VALUE",
+            )
+
+    class FailingVerifier:
+        def verify(self, _: str):
+            raise LabVerificationError("invalid TEST_REDACTED_VALUE")
+
+    lab.dbt_runner = FakeDbtRunner()
+    lab.verifier = FailingVerifier()
+    lab.run_id_factory = lambda: "0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(FaultVerificationError) as error:
+        lab.build(CASE_ID)
+
+    assert "TEST_REDACTED_VALUE" not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    run_root = tmp_path / ".dig/lab/runs/0123456789abcdef0123456789abcdef"
+    assert (run_root / "ground_truth.json").is_file()
+    assert (run_root / "metadata.json").is_file()
+    assert "TEST_REDACTED_VALUE" not in (
+        run_root / "dbt/stdout.log"
+    ).read_text(encoding="utf-8")
