@@ -178,6 +178,8 @@ def test_ground_truth_rejects_fault_or_healthy_metadata_drift(
         ("metadata", "data_type", 1),
         ("metadata", "name", 1),
         ("schema", "row_count", "113"),
+        ("schema", "row_count", 113.0),
+        ("schema", "row_count", True),
     ],
 )
 def test_ground_truth_rejects_coercible_json_types(
