@@ -122,6 +122,50 @@ def test_reset_rejects_unknown_drift_without_build(
     assert baseline.calls == ["start_postgres"]
 
 
+def test_reset_clears_old_active_run_before_health_recovery_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    pointer = tmp_path / ".dig/lab/active_fault_run.json"
+    temporary = tmp_path / ".dig/lab/active_fault_run.json.tmp"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text("stale", encoding="utf-8")
+    temporary.write_text("stale temp", encoding="utf-8")
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: None)
+    monkeypatch.setattr(
+        lab,
+        "_build_healthy_baseline",
+        lambda: (_ for _ in ()).throw(IncidentExecutionError("health recovery failed")),
+    )
+
+    with pytest.raises(IncidentExecutionError, match="health recovery failed"):
+        lab.reset(CASE_ID)
+
+    assert not pointer.exists()
+    assert not temporary.exists()
+
+
+def test_reset_cleanup_failure_blocks_database_state_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        lab,
+        "_clear_active_run",
+        lambda: (_ for _ in ()).throw(IncidentExecutionError("cleanup failed")),
+    )
+    monkeypatch.setattr(lab, "_start_postgres", lambda: calls.append("start_postgres"))
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: calls.append("inspect"))
+
+    with pytest.raises(IncidentExecutionError, match="cleanup failed"):
+        lab.reset(CASE_ID)
+
+    assert calls == []
+
+
 def test_inject_requires_healthy_state_and_verifies_postcondition(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

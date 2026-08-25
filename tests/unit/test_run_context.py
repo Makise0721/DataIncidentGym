@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from data_incident_gym.run_context import (
+    ACTIVE_RUN_PATH,
+    ACTIVE_RUN_TEMP_PATH,
     ActiveRun,
     RunContextError,
     clear_active_run,
@@ -37,6 +39,21 @@ def _write_metadata(project_root: Path, *, case_id: str = CASE_ID, run_id: str =
     path = run_root / "metadata.json"
     path.write_text(json.dumps(metadata), encoding="utf-8")
     return path
+
+
+def _active_pointer(project_root: Path) -> Path:
+    path = project_root / ".dig" / "lab" / ACTIVE_RUN_PATH.name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _active_payload() -> dict[str, object]:
+    return {
+        "incident_case_id": CASE_ID,
+        "run_id": RUN_ID,
+        "schema_version": "m4.active_fault_run.v1",
+        "verification_status": "EXPECTED_FAILURE",
+    }
 
 
 def test_publish_and_resolve_active_run_requires_matching_metadata(tmp_path: Path) -> None:
@@ -102,6 +119,101 @@ def test_active_run_write_is_atomic_and_rejects_symlink(tmp_path: Path) -> None:
             verification_status="EXPECTED_FAILURE",
         )
     assert pointer.is_symlink()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate_key",
+        "extra_field",
+        "invalid_utf8",
+        "invalid_schema",
+        "invalid_status",
+        "invalid_type",
+    ],
+)
+def test_active_pointer_rejects_invalid_json_contract(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _write_metadata(tmp_path)
+    pointer = _active_pointer(tmp_path)
+    payload = _active_payload()
+    if mutation == "duplicate_key":
+        pointer.write_text(
+            '{"incident_case_id":"synthetic_case","run_id":"0123456789abcdef0123456789abcdef",'
+            '"schema_version":"m4.active_fault_run.v1","schema_version":"m4.active_fault_run.v1",'
+            '"verification_status":"EXPECTED_FAILURE"}',
+            encoding="utf-8",
+        )
+    elif mutation == "extra_field":
+        payload["extra"] = "TEST_REDACTED_VALUE"
+        pointer.write_text(json.dumps(payload), encoding="utf-8")
+    elif mutation == "invalid_utf8":
+        pointer.write_bytes(b"{\xff")
+    elif mutation == "invalid_schema":
+        payload["schema_version"] = "m4.other.v1"
+        pointer.write_text(json.dumps(payload), encoding="utf-8")
+    elif mutation == "invalid_status":
+        payload["verification_status"] = "SUCCEEDED"
+        pointer.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        payload["run_id"] = 1
+        pointer.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RunContextError):
+        resolve_active_run(tmp_path, CASE_ID)
+
+
+@pytest.mark.parametrize("fixed_name", [ACTIVE_RUN_PATH.name, ACTIVE_RUN_TEMP_PATH.name])
+def test_publish_rejects_fixed_symlink_without_following_it(
+    tmp_path: Path,
+    fixed_name: str,
+) -> None:
+    _write_metadata(tmp_path)
+    fixed_path = tmp_path / ".dig" / "lab" / fixed_name
+    try:
+        fixed_path.symlink_to(tmp_path / "outside.json")
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is unavailable")
+        raise
+
+    with pytest.raises(RunContextError):
+        publish_active_run(
+            tmp_path,
+            incident_case_id=CASE_ID,
+            run_id=RUN_ID,
+            verification_status="EXPECTED_FAILURE",
+        )
+    assert fixed_path.is_symlink()
+
+
+def test_publish_cleans_fixed_temp_after_replace_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_metadata(tmp_path)
+    pointer = tmp_path / ".dig" / "lab" / ACTIVE_RUN_PATH.name
+    temporary = tmp_path / ".dig" / "lab" / ACTIVE_RUN_TEMP_PATH.name
+    original_replace = Path.replace
+
+    def fail_replace(self: Path, target: Path) -> Path:
+        if self == temporary and target == pointer:
+            raise OSError("TEST_REDACTED_VALUE")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(RunContextError):
+        publish_active_run(
+            tmp_path,
+            incident_case_id=CASE_ID,
+            run_id=RUN_ID,
+            verification_status="EXPECTED_FAILURE",
+        )
+
+    assert not pointer.exists()
+    assert not temporary.exists()
 
 
 def test_context_rejects_duplicate_keys_extra_fields_and_case_mismatch(tmp_path: Path) -> None:

@@ -356,6 +356,7 @@ class IncidentLab:
 
     def reset(self, case_id: str) -> ResetResult:
         truth = self._load_case(case_id)
+        self._clear_active_run()
         self._start_postgres()
         current = self._inspect_relation(truth)
         state = self._classify_state(current, truth)
@@ -381,7 +382,6 @@ class IncidentLab:
         )
         if self._classify_state(relation, truth) != "HEALTHY":
             raise InvalidIncidentState("重置后未恢复健康 Schema")
-        self._clear_active_run()
         return ResetResult(case_id, "HEALTHY", summary.fingerprint)
 
     def inject(self, case_id: str) -> InjectionResult:
