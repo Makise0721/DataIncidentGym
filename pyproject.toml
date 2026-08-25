@@ -32,7 +32,7 @@ packages = ["src/data_incident_gym"]
 testpaths = ["tests"]
 markers = [
   "integration: requires Docker and PostgreSQL",
-  "e2e: runs the complete M1 build repeatedly",
+  "e2e: runs repeated real PostgreSQL and dbt workflows",
 ]
 
 [tool.ruff]
