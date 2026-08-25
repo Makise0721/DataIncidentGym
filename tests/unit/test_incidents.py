@@ -31,6 +31,34 @@ def test_committed_ground_truth_is_strict_and_canonical(project_root: Path) -> N
         "DBT_LINEAGE",
     )
     assert truth.expected_failure_category == "DBT_MODEL_ERROR"
+    assert tuple(
+        (
+            column.name,
+            column.data_type,
+            column.nullable,
+            column.ordinal_position,
+        )
+        for column in truth.expected_schema.healthy_column_metadata
+    ) == (
+        ("id", "integer", True, 1),
+        ("order_id", "integer", True, 2),
+        ("payment_method", "text", True, 3),
+        ("amount", "integer", True, 4),
+    )
+    assert tuple(
+        (
+            column.name,
+            column.data_type,
+            column.nullable,
+            column.ordinal_position,
+        )
+        for column in truth.expected_schema.fault_column_metadata
+    ) == (
+        ("id", "integer", True, 1),
+        ("order_id", "integer", True, 2),
+        ("payment_method", "text", True, 3),
+        ("total_amount", "integer", True, 4),
+    )
     assert len(truth.digest()) == 64
     assert truth.to_json().endswith("\n")
 
@@ -85,6 +113,48 @@ def test_ground_truth_rejects_contract_drift(
     source = project_root / "config/incidents/schema_rename_payment_amount.json"
     payload = json.loads(source.read_text(encoding="utf-8"))
     payload["root_cause_code"] = "WRONG_ROOT_CAUSE"
+    target = tmp_path / "config/incidents/schema_rename_payment_amount.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(IncidentCaseError, match="Ground Truth 无效"):
+        load_ground_truth(CASE_ID, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("data_type", "bigint"),
+        ("nullable", False),
+        ("ordinal_position", 5),
+    ],
+)
+def test_ground_truth_rejects_schema_metadata_drift(
+    tmp_path: Path,
+    project_root: Path,
+    field: str,
+    value: object,
+) -> None:
+    source = project_root / "config/incidents/schema_rename_payment_amount.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["expected_schema"]["healthy_column_metadata"][0][field] = value
+    target = tmp_path / "config/incidents/schema_rename_payment_amount.json"
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(IncidentCaseError, match="Ground Truth 无效"):
+        load_ground_truth(CASE_ID, tmp_path)
+
+
+@pytest.mark.parametrize("metadata_key", ["healthy_column_metadata", "fault_column_metadata"])
+def test_ground_truth_rejects_fault_or_healthy_metadata_drift(
+    tmp_path: Path,
+    project_root: Path,
+    metadata_key: str,
+) -> None:
+    source = project_root / "config/incidents/schema_rename_payment_amount.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    payload["expected_schema"][metadata_key][0]["ordinal_position"] = 5
     target = tmp_path / "config/incidents/schema_rename_payment_amount.json"
     target.parent.mkdir(parents=True)
     target.write_text(json.dumps(payload), encoding="utf-8")

@@ -45,6 +45,7 @@ uv run data-incident-gym lab build schema_rename_payment_amount
 - `lab build` 永远保持 M2 语义：检查已注入状态后，只运行 `dbt build --exclude-resource-type seed`。
 - dbt 子进程的非零退出码会写入 `metadata.json`。若独立验证得到 `EXPECTED_FAILURE`，实验室命令整体 exit 0；dbt 意外成功、失败节点错误、Schema 不符或 artifact 无效时 exit 非零。
 - 不使用隐藏的 `.dig` 状态标记决定行为。每个命令都从真实 PostgreSQL Schema 判断当前状态，避免状态文件与数据库漂移。
+- Schema 状态只在固定 Ground Truth 的关系名、列名及顺序、`data_type`、`nullable`、`ordinal_position` 和 `row_count` 全部精确匹配时判定为 `HEALTHY` 或 `INJECTED`；任一漂移均为 `DRIFTED` 并 fail closed。
 
 ## 固定产物结构
 
@@ -221,6 +222,8 @@ Expected: exit 非零，collection 因 `data_incident_gym.incidents` 不存在�
 }
 ```
 
+其中 `expected_schema` 还必须包含 `healthy_column_metadata` 与 `fault_column_metadata`；每项固定记录 `name`、`data_type`、`nullable`、`ordinal_position`，与 `.dig/baseline-summary.json` 的真实 M1 `raw_payments` 摘要一致。
+
 该 JSON 只描述事实，不包含 SQL 字符串、脚本路径或可供用户替换的任意 identifier。
 
 - [x] **Step 4: 实现严格类型、加载与 digest**
@@ -254,12 +257,23 @@ class InjectionSpec(BaseModel):
     to_column: Literal["total_amount"]
 
 
+class ExpectedColumn(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    data_type: str
+    nullable: bool
+    ordinal_position: int
+
+
 class ExpectedSchema(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     relation: Literal["raw_payments"]
     healthy_columns: tuple[str, ...]
     fault_columns: tuple[str, ...]
+    healthy_column_metadata: tuple[ExpectedColumn, ...]
+    fault_column_metadata: tuple[ExpectedColumn, ...]
     row_count: Literal[113]
 
 
@@ -304,6 +318,20 @@ class GroundTruth(BaseModel):
             "total_amount",
         ):
             raise ValueError("fault_columns 不匹配固定案例")
+        if self.expected_schema.healthy_column_metadata != (
+            ExpectedColumn(name="id", data_type="integer", nullable=True, ordinal_position=1),
+            ExpectedColumn(name="order_id", data_type="integer", nullable=True, ordinal_position=2),
+            ExpectedColumn(name="payment_method", data_type="text", nullable=True, ordinal_position=3),
+            ExpectedColumn(name="amount", data_type="integer", nullable=True, ordinal_position=4),
+        ):
+            raise ValueError("healthy_column_metadata 不匹配固定案例")
+        if self.expected_schema.fault_column_metadata != (
+            ExpectedColumn(name="id", data_type="integer", nullable=True, ordinal_position=1),
+            ExpectedColumn(name="order_id", data_type="integer", nullable=True, ordinal_position=2),
+            ExpectedColumn(name="payment_method", data_type="text", nullable=True, ordinal_position=3),
+            ExpectedColumn(name="total_amount", data_type="integer", nullable=True, ordinal_position=4),
+        ):
+            raise ValueError("fault_column_metadata 不匹配固定案例")
         return self
 
     def canonical_json(self) -> str:
@@ -1007,14 +1035,25 @@ class IncidentLab:
     ) -> CaseState:
         if relation is None:
             return "MISSING"
-        columns = tuple(column.name for column in relation.columns)
+        columns = tuple(
+            (column.name, column.data_type, column.nullable, column.ordinal_position)
+            for column in relation.columns
+        )
+        healthy_columns = tuple(
+            (column.name, column.data_type, column.nullable, column.ordinal_position)
+            for column in truth.expected_schema.healthy_column_metadata
+        )
+        fault_columns = tuple(
+            (column.name, column.data_type, column.nullable, column.ordinal_position)
+            for column in truth.expected_schema.fault_column_metadata
+        )
         if (
-            columns == truth.expected_schema.healthy_columns
+            columns == healthy_columns
             and relation.row_count == truth.expected_schema.row_count
         ):
             return "HEALTHY"
         if (
-            columns == truth.expected_schema.fault_columns
+            columns == fault_columns
             and relation.row_count == truth.expected_schema.row_count
         ):
             return "INJECTED"
@@ -1131,7 +1170,7 @@ def test_schema_read_error_redacts_password(tmp_path: Path) -> None:
     assert "***" in str(error.value)
 ```
 
-Expected: 错误只暴露中文阶段和脱敏信息，不包含数据库密码。
+Expected: 查询、事务改名、BaselineError 和后置 Schema 校验路径的错误消息、`__cause__`、`__context__` 与格式化 traceback 均不包含数据库密码。
 
 - [ ] **Step 5: 运行单测与 M1 回归**
 

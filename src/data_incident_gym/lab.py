@@ -158,14 +158,42 @@ class IncidentLab:
     ) -> CaseState:
         if relation is None:
             return "MISSING"
-        columns = tuple(column.name for column in relation.columns)
+        if relation.name != truth.expected_schema.relation:
+            return "DRIFTED"
+        columns = tuple(
+            (
+                column.name,
+                column.data_type,
+                column.nullable,
+                column.ordinal_position,
+            )
+            for column in relation.columns
+        )
+        healthy_columns = tuple(
+            (
+                column.name,
+                column.data_type,
+                column.nullable,
+                column.ordinal_position,
+            )
+            for column in truth.expected_schema.healthy_column_metadata
+        )
+        fault_columns = tuple(
+            (
+                column.name,
+                column.data_type,
+                column.nullable,
+                column.ordinal_position,
+            )
+            for column in truth.expected_schema.fault_column_metadata
+        )
         if (
-            columns == truth.expected_schema.healthy_columns
+            columns == healthy_columns
             and relation.row_count == truth.expected_schema.row_count
         ):
             return "HEALTHY"
         if (
-            columns == truth.expected_schema.fault_columns
+            columns == fault_columns
             and relation.row_count == truth.expected_schema.row_count
         ):
             return "INJECTED"

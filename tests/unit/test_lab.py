@@ -1,3 +1,4 @@
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -5,6 +6,7 @@ import pytest
 from psycopg import sql
 
 from data_incident_gym.baseline import (
+    BaselineError,
     BaselineSummary,
     ColumnSummary,
     RelationSummary,
@@ -152,6 +154,67 @@ def test_inject_rejects_nonhealthy_state(
         lab.inject(CASE_ID)
 
 
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"data_type": "bigint"},
+        {"nullable": False},
+        {"ordinal_position": 5},
+    ],
+)
+def test_schema_state_rejects_metadata_drift(
+    tmp_path: Path,
+    changed: dict[str, object],
+) -> None:
+    lab, _ = _lab(tmp_path)
+    columns = list(HEALTHY.columns)
+    original = columns[0]
+    columns[0] = type(original)(
+        name=original.name,
+        data_type=changed.get("data_type", original.data_type),
+        nullable=changed.get("nullable", original.nullable),
+        ordinal_position=changed.get("ordinal_position", original.ordinal_position),
+    )
+
+    drifted = RelationSummary("raw_payments", 113, tuple(columns))
+
+    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
+
+
+def test_schema_state_rejects_relation_name_drift(tmp_path: Path) -> None:
+    lab, _ = _lab(tmp_path)
+    drifted = RelationSummary("other_relation", 113, HEALTHY.columns)
+
+    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"data_type": "bigint"},
+        {"nullable": False},
+        {"ordinal_position": 5},
+    ],
+)
+def test_injected_schema_state_rejects_metadata_drift(
+    tmp_path: Path,
+    changed: dict[str, object],
+) -> None:
+    lab, _ = _lab(tmp_path)
+    columns = list(INJECTED.columns)
+    original = columns[0]
+    columns[0] = type(original)(
+        name=original.name,
+        data_type=changed.get("data_type", original.data_type),
+        nullable=changed.get("nullable", original.nullable),
+        ordinal_position=changed.get("ordinal_position", original.ordinal_position),
+    )
+
+    drifted = RelationSummary("raw_payments", 113, tuple(columns))
+
+    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
+
+
 def test_rename_uses_fixed_quoted_identifiers(tmp_path: Path) -> None:
     executed: list[object] = []
 
@@ -222,15 +285,69 @@ def test_schema_read_error_redacts_password_and_exception_chain(tmp_path: Path) 
     assert "***" in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
+    assert "database-secret" not in "".join(traceback.format_exception(error.value))
+
+
+def test_rename_error_redacts_password_and_exception_chain(tmp_path: Path) -> None:
+    secret = "database-secret"
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def execute(self, _: object) -> None:
+            raise RuntimeError(f"rename failed with {secret}")
+
+    class Transaction:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def transaction(self) -> Transaction:
+            return Transaction()
+
+        def cursor(self) -> Cursor:
+            return Cursor()
+
+    lab = IncidentLab(
+        Settings(_env_file=None, postgres_password=secret),
+        tmp_path,
+        baseline_builder=SimpleNamespace(),
+        db_connect=lambda **_: Connection(),
+    )
+
+    with pytest.raises(IncidentExecutionError) as error:
+        lab._rename_column("raw_payments", "amount", "total_amount")
+
+    assert "故障字段改名失败" in str(error.value)
+    assert secret not in str(error.value)
+    assert "***" in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert secret not in "".join(traceback.format_exception(error.value))
+
 
 def test_baseline_error_redacts_password_and_exception_chain(tmp_path: Path) -> None:
     _prepare_ground_truth(tmp_path)
+    secret = "database-secret"
 
     def start_postgres() -> None:
-        raise RuntimeError("runner failed with database-secret")
+        raise BaselineError(f"runner failed with {secret}")
 
     lab = IncidentLab(
-        Settings(_env_file=None, postgres_password="database-secret"),
+        Settings(_env_file=None, postgres_password=secret),
         tmp_path,
         baseline_builder=SimpleNamespace(start_postgres=start_postgres),
     )
@@ -242,3 +359,28 @@ def test_baseline_error_redacts_password_and_exception_chain(tmp_path: Path) -> 
     assert "***" in str(error.value)
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
+    assert secret not in "".join(traceback.format_exception(error.value))
+
+
+def test_reset_postcondition_error_has_no_database_secret_or_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _prepare_ground_truth(tmp_path)
+    secret = "database-secret"
+    baseline = FakeBaseline(make_baseline_summary("analytics", (DRIFTED,)))
+    lab = IncidentLab(
+        Settings(_env_file=None, postgres_password=secret),
+        tmp_path,
+        baseline_builder=baseline,
+    )
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: None)
+
+    with pytest.raises(InvalidIncidentState) as error:
+        lab.reset(CASE_ID)
+
+    assert "重置后未恢复健康 Schema" in str(error.value)
+    assert secret not in str(error.value)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert secret not in "".join(traceback.format_exception(error.value))

@@ -24,12 +24,23 @@ class InjectionSpec(BaseModel):
     to_column: Literal["total_amount"]
 
 
+class ExpectedColumn(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str
+    data_type: str
+    nullable: bool
+    ordinal_position: int
+
+
 class ExpectedSchema(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     relation: Literal["raw_payments"]
     healthy_columns: tuple[str, ...]
     fault_columns: tuple[str, ...]
+    healthy_column_metadata: tuple[ExpectedColumn, ...]
+    fault_column_metadata: tuple[ExpectedColumn, ...]
     row_count: Literal[113]
 
 
@@ -74,6 +85,28 @@ class GroundTruth(BaseModel):
             "total_amount",
         ):
             raise ValueError("fault_columns 不匹配固定案例")
+        expected_healthy_metadata = (
+            ExpectedColumn(name="id", data_type="integer", nullable=True, ordinal_position=1),
+            ExpectedColumn(
+                name="order_id", data_type="integer", nullable=True, ordinal_position=2
+            ),
+            ExpectedColumn(
+                name="payment_method", data_type="text", nullable=True, ordinal_position=3
+            ),
+            ExpectedColumn(
+                name="amount", data_type="integer", nullable=True, ordinal_position=4
+            ),
+        )
+        expected_fault_metadata = (
+            *expected_healthy_metadata[:3],
+            ExpectedColumn(
+                name="total_amount", data_type="integer", nullable=True, ordinal_position=4
+            ),
+        )
+        if self.expected_schema.healthy_column_metadata != expected_healthy_metadata:
+            raise ValueError("healthy_column_metadata 不匹配固定案例")
+        if self.expected_schema.fault_column_metadata != expected_fault_metadata:
+            raise ValueError("fault_column_metadata 不匹配固定案例")
         return self
 
     def canonical_json(self) -> str:

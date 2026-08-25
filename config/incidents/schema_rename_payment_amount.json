@@ -13,11 +13,63 @@
       "payment_method",
       "total_amount"
     ],
+    "fault_column_metadata": [
+      {
+        "data_type": "integer",
+        "name": "id",
+        "nullable": true,
+        "ordinal_position": 1
+      },
+      {
+        "data_type": "integer",
+        "name": "order_id",
+        "nullable": true,
+        "ordinal_position": 2
+      },
+      {
+        "data_type": "text",
+        "name": "payment_method",
+        "nullable": true,
+        "ordinal_position": 3
+      },
+      {
+        "data_type": "integer",
+        "name": "total_amount",
+        "nullable": true,
+        "ordinal_position": 4
+      }
+    ],
     "healthy_columns": [
       "id",
       "order_id",
       "payment_method",
       "amount"
+    ],
+    "healthy_column_metadata": [
+      {
+        "data_type": "integer",
+        "name": "id",
+        "nullable": true,
+        "ordinal_position": 1
+      },
+      {
+        "data_type": "integer",
+        "name": "order_id",
+        "nullable": true,
+        "ordinal_position": 2
+      },
+      {
+        "data_type": "text",
+        "name": "payment_method",
+        "nullable": true,
+        "ordinal_position": 3
+      },
+      {
+        "data_type": "integer",
+        "name": "amount",
+        "nullable": true,
+        "ordinal_position": 4
+      }
     ],
     "relation": "raw_payments",
     "row_count": 113

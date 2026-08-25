@@ -167,6 +167,7 @@ P0 通过固定 Git submodule 复用下列 Apache-2.0 项目，并在本项目�
 **完成定义**
 
 - `reset → inject → build` 连续 10 次产生相同失败节点、错误类别和 Schema 状态。
+- Schema 状态必须与固定 Ground Truth 精确匹配关系名、列名及顺序、`data_type`、可空性、`ordinal_position` 和行数；任一类型、可空性、序号、列或行数漂移都必须 fail closed，不得判定为健康或已注入。
 - `reset → build` 能恢复健康状态。
 - 故障注入不修改第三方模型源码。
 - Ground Truth 能被独立验证器读取。
@@ -247,6 +248,8 @@ order_id
 payment_method
 amount
 ```
+
+固定 Ground Truth 同时锁定上述列的 `data_type`、`nullable` 和 `ordinal_position`，以及行数 113。故障改名只允许把最后一列从 `amount` 改为 `total_amount`，其余 Schema 元数据必须保持一致；任意漂移都属于未知状态并拒绝继续。
 
 `stg_payments` 读取 `amount` 并将其从分转换为金额单位。`orders` 和 `customers` 均依赖 `stg_payments` 的金额字段。
 
