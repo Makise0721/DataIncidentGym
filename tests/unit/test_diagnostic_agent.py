@@ -912,6 +912,35 @@ async def test_trace_contains_no_prompt_completion_hidden_reasoning_secret_path_
 
 
 @pytest.mark.asyncio
+async def test_trace_redacts_uri_api_key_and_bearer_credentials(tmp_path: Path) -> None:
+    sensitive = (
+        "postgresql://synthetic:TEST_REDACTED_VALUE@host "
+        "api_key=TEST_REDACTED_VALUE Bearer TEST_REDACTED_VALUE"
+    )
+    tools = _MappedEvidenceTools({f"get_relation_schema:{sensitive}": ()})
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        if not any(isinstance(message, ModelResponse) for message in messages):
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_relation_schema",
+                        {"relation_name": sensitive},
+                        tool_call_id="credentials",
+                    )
+                ]
+            )
+        return _output_call(agent_info, _diagnosis_payload())
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    serialized = result.model_dump_json()
+    assert "TEST_REDACTED_VALUE" not in serialized
+    assert "postgresql://synthetic" not in serialized
+    assert "Bearer" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_tool_calls_are_executed_sequentially_in_model_emission_order(tmp_path: Path) -> None:
     tools = _MappedEvidenceTools(
         {

@@ -56,7 +56,9 @@ _SQL_PATTERN = re.compile(
     r"(?is)\b(?:select|insert|update|delete|alter|create|drop|grant|revoke)\b.*"
 )
 _CREDENTIAL_PATTERN = re.compile(
-    r"(?i)\b(?:password|passwd|secret|token)\s*[:=]\s*[^\s,;]+"
+    r"(?i)(?:\b(?:password|passwd|secret|token|api[_-]?key|authorization)\s*[:=]\s*[^\s,;]+"
+    r"|\bBearer\s+[^\s,;]+"
+    r"|\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^@\s]+@[^\s,;]+)"
 )
 
 
