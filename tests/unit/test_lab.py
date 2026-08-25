@@ -188,6 +188,13 @@ def test_schema_state_rejects_relation_name_drift(tmp_path: Path) -> None:
     assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
 
 
+def test_schema_state_rejects_row_count_drift(tmp_path: Path) -> None:
+    lab, _ = _lab(tmp_path)
+    drifted = RelationSummary("raw_payments", 114, HEALTHY.columns)
+
+    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
+
+
 @pytest.mark.parametrize(
     "changed",
     [

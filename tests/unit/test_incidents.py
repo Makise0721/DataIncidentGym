@@ -86,7 +86,10 @@ def test_unknown_case_is_rejected_before_path_construction(tmp_path: Path) -> No
         load_ground_truth("../../outside", tmp_path)
 
 
-@pytest.mark.parametrize("extra_target", ["top-level", "injection"])
+@pytest.mark.parametrize(
+    "extra_target",
+    ["top-level", "injection", "expected_schema", "expected_column"],
+)
 def test_ground_truth_rejects_extra_fields(
     tmp_path: Path,
     project_root: Path,
@@ -96,8 +99,12 @@ def test_ground_truth_rejects_extra_fields(
     payload = json.loads(source.read_text(encoding="utf-8"))
     if extra_target == "top-level":
         payload["unexpected"] = True
-    else:
+    elif extra_target == "injection":
         payload["injection"]["unexpected"] = True
+    elif extra_target == "expected_schema":
+        payload["expected_schema"]["unexpected"] = True
+    else:
+        payload["expected_schema"]["healthy_column_metadata"][0]["unexpected"] = True
     target = tmp_path / "config/incidents/schema_rename_payment_amount.json"
     target.parent.mkdir(parents=True)
     target.write_text(json.dumps(payload), encoding="utf-8")
