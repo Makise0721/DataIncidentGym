@@ -116,14 +116,24 @@ class IncidentVerifier:
             raise _clean(LabVerificationError("manifest 缺少直接失败模型"))
 
         found = {start}
-        pending: list[tuple[str, tuple[str, ...]]] = [(start, (start,))]
+        visited: set[str] = set()
+        visiting: set[str] = set()
+        pending: list[tuple[str, bool]] = [(start, False)]
         while pending:
-            current, path = pending.pop()
+            current, exiting = pending.pop()
+            if exiting:
+                visiting.remove(current)
+                visited.add(current)
+                continue
+            if current in visited:
+                continue
+            visiting.add(current)
+            pending.append((current, True))
             children = child_map.get(current, [])
             if not isinstance(children, list):
                 raise _clean(LabVerificationError("manifest child_map 无效"))
             seen_children: set[str] = set()
-            for child in children:
+            for child in reversed(children):
                 if not isinstance(child, str):
                     raise _clean(LabVerificationError("manifest child_map 无效"))
                 if child in seen_children:
@@ -136,11 +146,11 @@ class IncidentVerifier:
                     raise _clean(LabVerificationError("manifest model 节点无效"))
                 if node.get("resource_type") != "model":
                     continue
-                if child in path:
+                if child in visiting:
                     raise _clean(LabVerificationError("manifest child_map 存在循环"))
-                if child not in found:
+                if child not in visited:
                     found.add(child)
-                    pending.append((child, (*path, child)))
+                    pending.append((child, False))
         return found
 
     @staticmethod

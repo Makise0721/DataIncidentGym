@@ -249,6 +249,25 @@ def test_verifier_rejects_cyclic_manifest_lineage(
         IncidentVerifier(tmp_path).verify(RUN_ID)
 
 
+def test_verifier_rejects_cross_branch_manifest_cycle(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    manifest_path = run_root / "dbt/target/manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["child_map"]["model.jaffle_shop.orders"].append(
+        "model.jaffle_shop.customers"
+    )
+    manifest["child_map"]["model.jaffle_shop.customers"].append(
+        "model.jaffle_shop.orders"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="存在循环"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
 def test_verifier_rejects_duplicate_committed_ground_truth_key(
     tmp_path: Path,
     project_root: Path,
