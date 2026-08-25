@@ -33,10 +33,28 @@ _EXPECTED_METADATA_KEYS = {
     "ground_truth_digest",
     "artifacts",
 }
+_EXPECTED_SCHEMA_KEYS = {"schema", "relations", "fingerprint"}
+_EXPECTED_RELATION_KEYS = {"name", "row_count", "columns"}
+_EXPECTED_COLUMN_KEYS = {"name", "data_type", "nullable", "ordinal_position"}
 
 
 class LabVerificationError(RuntimeError):
     """Raised when persisted lab facts do not match Ground Truth."""
+
+
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
+def _reject_duplicate_json_keys(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise _DuplicateJsonKeyError
+        payload[key] = value
+    return payload
 
 
 @dataclass(frozen=True)
@@ -68,8 +86,16 @@ class IncidentVerifier:
     def _read_object(path: Path) -> dict[str, Any]:
         error: LabVerificationError | None = None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            payload = json.loads(
+                path.read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            _DuplicateJsonKeyError,
+        ):
             error = LabVerificationError(f"无法读取验证产物：{path.name}")
         if error is not None:
             raise _clean(error)
@@ -115,8 +141,18 @@ class IncidentVerifier:
         try:
             committed_truth = load_ground_truth(case_id, project_root)
             snapshot_text = (run_root / "ground_truth.json").read_text(encoding="utf-8")
+            json.loads(
+                snapshot_text,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
             snapshot_truth = parse_ground_truth(snapshot_text, "ground_truth.json")
-        except (OSError, UnicodeError, IncidentCaseError):
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            _DuplicateJsonKeyError,
+            IncidentCaseError,
+        ):
             error = LabVerificationError("Ground Truth 快照无效")
         if error is not None:
             raise _clean(error)
@@ -159,6 +195,7 @@ class IncidentVerifier:
         if not isinstance(results, list):
             raise _clean(LabVerificationError("run_results 缺少 results"))
         failed_node_ids: list[str] = []
+        seen_result_ids: set[str] = set()
         for result in results:
             if not isinstance(result, dict):
                 raise _clean(LabVerificationError("run_results 结果项无效"))
@@ -167,9 +204,12 @@ class IncidentVerifier:
                 or not isinstance(result.get("status"), str)
             ):
                 raise _clean(LabVerificationError("run_results 结果项无效"))
+            unique_id = result["unique_id"]
+            if unique_id in seen_result_ids:
+                raise _clean(LabVerificationError("run_results unique_id 重复"))
+            seen_result_ids.add(unique_id)
             if result.get("status") != "error":
                 continue
-            unique_id = result.get("unique_id")
             failed_node_ids.append(unique_id)
         failed_nodes = tuple(sorted(failed_node_ids))
         if failed_nodes != (committed_truth.direct_failure,):
@@ -181,12 +221,16 @@ class IncidentVerifier:
             raise _clean(LabVerificationError(f"影响模型不匹配：{sorted(affected)}"))
 
         schema = self._read_object(run_root / "schema.json")
+        if set(schema) != _EXPECTED_SCHEMA_KEYS:
+            raise _clean(LabVerificationError("Schema 字段集合无效"))
         relations = schema.get("relations")
         if not isinstance(relations, list) or len(relations) != 1:
             raise _clean(LabVerificationError("Schema 快照必须只包含故障关系"))
         relation = relations[0]
         if not isinstance(relation, dict):
             raise _clean(LabVerificationError("Schema relation 无效"))
+        if set(relation) != _EXPECTED_RELATION_KEYS:
+            raise _clean(LabVerificationError("Schema relation 字段集合无效"))
         if relation.get("name") != committed_truth.expected_schema.relation:
             raise _clean(LabVerificationError("故障 Schema 关系不匹配"))
         columns = relation.get("columns")
@@ -195,6 +239,8 @@ class IncidentVerifier:
         for column in columns:
             if not isinstance(column, dict):
                 raise _clean(LabVerificationError("Schema column 内容无效"))
+            if set(column) != _EXPECTED_COLUMN_KEYS:
+                raise _clean(LabVerificationError("Schema column 字段集合无效"))
             if (
                 not isinstance(column.get("name"), str)
                 or not isinstance(column.get("data_type"), str)

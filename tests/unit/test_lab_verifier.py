@@ -181,6 +181,56 @@ def test_verifier_rejects_unknown_metadata_field(
         IncidentVerifier(tmp_path).verify(RUN_ID)
 
 
+def test_verifier_rejects_duplicate_json_keys(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    metadata_path = run_root / "metadata.json"
+    metadata = metadata_path.read_text(encoding="utf-8")
+    metadata_path.write_text(
+        metadata.replace(
+            f'"run_id": "{RUN_ID}"',
+            f'"run_id": "{RUN_ID}", "run_id": "{RUN_ID}"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LabVerificationError, match="读取验证产物"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
+def test_verifier_rejects_duplicate_run_result_ids(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    results_path = run_root / "dbt/target/run_results.json"
+    results = json.loads(results_path.read_text(encoding="utf-8"))
+    results["results"].append(
+        {"unique_id": "model.jaffle_shop.orders", "status": "success"}
+    )
+    results_path.write_text(json.dumps(results), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="unique_id 重复"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
+def test_verifier_rejects_unknown_schema_field(
+    tmp_path: Path,
+    project_root: Path,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root)
+    schema_path = run_root / "schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema["TEST_REDACTED_VALUE"] = "TEST_REDACTED_VALUE"
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
+
+    with pytest.raises(LabVerificationError, match="Schema 字段集合"):
+        IncidentVerifier(tmp_path).verify(RUN_ID)
+
+
 @pytest.mark.parametrize("capture", ["stdout.log", "stderr.log"])
 def test_verifier_rejects_missing_process_capture(
     tmp_path: Path,
