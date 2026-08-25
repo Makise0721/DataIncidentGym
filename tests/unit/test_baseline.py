@@ -382,8 +382,9 @@ def test_command_execution_failures_are_wrapped(
 
     builder = BaselineBuilder(Settings(_env_file=None), tmp_path, fake_run)
 
-    with pytest.raises(BaselineError, match="执行"):
+    with pytest.raises(BaselineError, match="执行") as error:
         builder.start_postgres()
+    assert error.value.__cause__ is None
 
 
 @pytest.mark.parametrize(

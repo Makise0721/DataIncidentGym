@@ -171,7 +171,7 @@ class BaselineBuilder:
                 timeout=self.settings.command_timeout_seconds,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise BaselineError(f"{stage} 无法执行：{self._redact(str(exc))}") from exc
+            raise BaselineError(f"{stage} 无法执行：{self._redact(str(exc))}") from None
         if result.returncode != 0:
             raise BaselineError(
                 f"{stage} 失败（exit={result.returncode}）\n"
