@@ -13,6 +13,7 @@ import psycopg
 from psycopg import sql
 
 from data_incident_gym.config import PROJECT_ROOT, Settings
+from data_incident_gym.dbt_runner import DbtExecutionError, DbtRunner
 
 RunCommand = Callable[..., CompletedProcess[str]]
 DatabaseConnect = Callable[..., Any]
@@ -154,6 +155,7 @@ class BaselineBuilder:
         self.dbt_profiles = project_root / "config" / "dbt"
         self.dbt_target = project_root / ".dig" / "dbt" / "target"
         self.dbt_logs = project_root / ".dig" / "dbt" / "logs"
+        self.dbt_runner = DbtRunner(settings, project_root, run_command)
 
     def _run(self, stage: str, command: Sequence[str], cwd: Path) -> CompletedProcess[str]:
         try:
@@ -198,33 +200,11 @@ class BaselineBuilder:
             self.project_root,
         )
 
-    def _dbt_command(self, command: str, *extra: str) -> list[str]:
-        return [
-            "dbt",
-            command,
-            "--project-dir",
-            str(self.dbt_project),
-            "--profiles-dir",
-            str(self.dbt_profiles),
-            "--target",
-            "dev",
-            "--target-path",
-            str(self.dbt_target),
-            "--log-path",
-            str(self.dbt_logs),
-            "--no-use-colors",
-            *extra,
-        ]
-
     def run_dbt(self) -> None:
-        self.dbt_target.mkdir(parents=True, exist_ok=True)
-        self.dbt_logs.mkdir(parents=True, exist_ok=True)
-        self._run(
-            "加载固定 seeds",
-            self._dbt_command("seed", "--full-refresh"),
-            self.project_root,
-        )
-        self._run("执行 dbt build", self._dbt_command("build"), self.project_root)
+        try:
+            self.dbt_runner.run_healthy(self.dbt_target, self.dbt_logs)
+        except DbtExecutionError as exc:
+            raise BaselineError(str(exc)) from None
 
     def validate_dbt_artifacts(self) -> None:
         artifact_paths = {
