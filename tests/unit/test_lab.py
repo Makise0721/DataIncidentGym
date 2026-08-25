@@ -391,3 +391,65 @@ def test_reset_postcondition_error_has_no_database_secret_or_context(
     assert error.value.__cause__ is None
     assert error.value.__context__ is None
     assert secret not in "".join(traceback.format_exception(error.value))
+
+
+def test_build_uses_unique_run_paths_and_returns_expected_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    lab.settings = Settings(_env_file=None, postgres_password="TEST_REDACTED_VALUE")
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
+
+    class FakeDbtRunner:
+        def run_incident(self, target: Path, logs: Path):
+            target.mkdir(parents=True)
+            logs.mkdir(parents=True)
+            (target / "manifest.json").write_text("{}", encoding="utf-8")
+            (target / "run_results.json").write_text("{}", encoding="utf-8")
+            (logs / "dbt.log").write_text(
+                "failure TEST_REDACTED_VALUE",
+                encoding="utf-8",
+            )
+            return SimpleNamespace(return_code=1, stdout="out", stderr="err")
+
+    verification = SimpleNamespace(status="EXPECTED_FAILURE")
+
+    class FakeVerifier:
+        def __init__(self) -> None:
+            self.run_ids: list[str] = []
+
+        def verify(self, run_id: str):
+            self.run_ids.append(run_id)
+            return verification
+
+    fake_verifier = FakeVerifier()
+    lab.dbt_runner = FakeDbtRunner()
+    lab.verifier = fake_verifier
+    lab.run_id_factory = lambda: "0123456789abcdef0123456789abcdef"
+
+    result = lab.build(CASE_ID)
+
+    assert result.dbt_exit_code == 1
+    assert result.verification.status == "EXPECTED_FAILURE"
+    assert fake_verifier.run_ids == [result.run_id]
+    assert result.artifact_dir == (
+        tmp_path / ".dig/lab/runs/0123456789abcdef0123456789abcdef"
+    )
+    assert (result.artifact_dir / "metadata.json").is_file()
+    assert (result.artifact_dir / "dbt/stdout.log").read_text(encoding="utf-8") == "out"
+    assert "TEST_REDACTED_VALUE" not in (
+        result.artifact_dir / "dbt/logs/dbt.log"
+    ).read_text(encoding="utf-8")
+    assert not (tmp_path / ".dig/dbt/target/run_results.json").exists()
+
+
+def test_build_rejects_noninjected_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: HEALTHY)
+
+    with pytest.raises(InvalidIncidentState, match="要求已注入状态"):
+        lab.build(CASE_ID)

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 import psycopg
 from psycopg import sql
@@ -17,7 +20,13 @@ from data_incident_gym.baseline import (
     make_baseline_summary,
 )
 from data_incident_gym.config import PROJECT_ROOT, Settings
+from data_incident_gym.dbt_runner import DbtExecutionError, DbtRunner
 from data_incident_gym.incidents import GroundTruth, IncidentCaseError, load_ground_truth
+from data_incident_gym.lab_verifier import (
+    IncidentVerifier,
+    LabVerification,
+    LabVerificationError,
+)
 
 DatabaseConnect = Callable[..., Any]
 CaseState = Literal["MISSING", "HEALTHY", "INJECTED", "DRIFTED"]
@@ -26,6 +35,8 @@ _ALLOWED_RENAMES = {
     ("raw_payments", "amount", "total_amount"),
     ("raw_payments", "total_amount", "amount"),
 }
+RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+RunIdFactory = Callable[[], str]
 
 
 class LabError(RuntimeError):
@@ -38,6 +49,10 @@ class InvalidIncidentState(LabError):
 
 class IncidentExecutionError(LabError):
     code = "INCIDENT_EXECUTION_ERROR"
+
+
+class FaultVerificationError(LabError):
+    code = "FAULT_VERIFICATION_ERROR"
 
 
 @dataclass(frozen=True)
@@ -54,6 +69,15 @@ class InjectionResult:
     fingerprint: str
 
 
+@dataclass(frozen=True)
+class FaultRun:
+    case_id: str
+    run_id: str
+    artifact_dir: Path
+    dbt_exit_code: int
+    verification: LabVerification
+
+
 class IncidentLab:
     def __init__(
         self,
@@ -62,6 +86,9 @@ class IncidentLab:
         *,
         baseline_builder: BaselineBuilder | None = None,
         db_connect: DatabaseConnect | None = None,
+        dbt_runner: DbtRunner | None = None,
+        verifier: IncidentVerifier | None = None,
+        run_id_factory: RunIdFactory | None = None,
     ) -> None:
         self.settings = settings
         self.project_root = project_root
@@ -71,6 +98,9 @@ class IncidentLab:
             project_root,
             db_connect=self.db_connect,
         )
+        self.dbt_runner = dbt_runner or DbtRunner(settings, project_root)
+        self.verifier = verifier or IncidentVerifier(project_root)
+        self.run_id_factory = run_id_factory or (lambda: uuid4().hex)
 
     def _connection_kwargs(self) -> dict[str, object]:
         return {
@@ -231,6 +261,32 @@ class IncidentLab:
             (relation,),
         ).fingerprint
 
+    def _write_text(self, path: Path, text: str) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            raise self._clean(
+                IncidentExecutionError(
+                    f"无法写入故障运行产物：{self._redact(str(exc))}"
+                )
+            ) from None
+
+    def _redact_file(self, path: Path) -> None:
+        try:
+            if not path.is_file():
+                return
+            text = path.read_text(encoding="utf-8", errors="replace")
+            redacted = self._redact(text)
+            if redacted != text:
+                path.write_text(redacted, encoding="utf-8")
+        except OSError as exc:
+            raise self._clean(
+                IncidentExecutionError(
+                    f"无法脱敏故障运行产物：{self._redact(str(exc))}"
+                )
+            ) from None
+
     def _start_postgres(self) -> None:
         error: IncidentExecutionError | None = None
         try:
@@ -303,3 +359,72 @@ class IncidentLab:
         if self._classify_state(after, truth) != "INJECTED" or after is None:
             raise InvalidIncidentState("故障注入后 Schema 不符合预期")
         return InjectionResult(case_id, "INJECTED", self._fingerprint(after))
+
+    def build(self, case_id: str) -> FaultRun:
+        truth = self._load_case(case_id)
+        self._start_postgres()
+        relation = self._inspect_relation(truth)
+        state = self._classify_state(relation, truth)
+        if state != "INJECTED" or relation is None:
+            raise InvalidIncidentState(f"故障构建要求已注入状态，当前状态：{state}")
+
+        run_id = self.run_id_factory()
+        if not isinstance(run_id, str) or RUN_ID_PATTERN.fullmatch(run_id) is None:
+            raise self._clean(IncidentExecutionError("run_id 生成器返回非法值"))
+        run_root = self.project_root / ".dig" / "lab" / "runs" / run_id
+        try:
+            run_root.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            raise self._clean(
+                IncidentExecutionError(
+                    f"无法创建故障运行目录：{self._redact(str(exc))}"
+                )
+            ) from None
+
+        self._write_text(run_root / "ground_truth.json", truth.to_json())
+        target = run_root / "dbt" / "target"
+        logs = run_root / "dbt" / "logs"
+        try:
+            dbt_result = self.dbt_runner.run_incident(target, logs)
+        except DbtExecutionError as exc:
+            raise self._clean(
+                IncidentExecutionError(self._redact(str(exc)))
+            ) from None
+        self._write_text(run_root / "dbt/stdout.log", dbt_result.stdout)
+        self._write_text(run_root / "dbt/stderr.log", dbt_result.stderr)
+        self._redact_file(logs / "dbt.log")
+
+        after_build = self._inspect_relation(truth)
+        schema = make_baseline_summary(
+            self.settings.postgres_schema,
+            () if after_build is None else (after_build,),
+        )
+        self._write_text(run_root / "schema.json", schema.to_json())
+        metadata = {
+            "schema_version": "m2.run.v1",
+            "run_id": run_id,
+            "incident_case_id": case_id,
+            "dbt_exit_code": dbt_result.return_code,
+            "ground_truth_digest": truth.digest(),
+            "artifacts": {
+                "manifest": "dbt/target/manifest.json",
+                "run_results": "dbt/target/run_results.json",
+                "dbt_log": "dbt/logs/dbt.log",
+                "schema": "schema.json",
+            },
+        }
+        self._write_text(
+            run_root / "metadata.json",
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        )
+        try:
+            verification = self.verifier.verify(run_id)
+        except LabVerificationError as exc:
+            raise self._clean(FaultVerificationError(self._redact(str(exc)))) from None
+        return FaultRun(
+            case_id=case_id,
+            run_id=run_id,
+            artifact_dir=run_root,
+            dbt_exit_code=dbt_result.return_code,
+            verification=verification,
+        )
