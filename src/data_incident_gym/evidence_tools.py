@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evidence import (
+    DbtLineageFact,
+    DbtLineageNode,
     DbtNodeErrorFact,
     DbtRunResultsFact,
     EvidenceRecord,
     EvidenceSource,
     EvidenceType,
     InvalidArtifactError,
+    InvalidDirectionError,
     InvalidRunIdError,
     NodeErrorNotFoundError,
+    NodeNotFoundError,
     RunContextMismatchError,
     RunNotFoundError,
     raise_without_context,
@@ -76,6 +81,7 @@ class _RunArtifacts:
         self._validate_manifest()
         self._validate_run_results()
         self.generated_at = self._read_generated_at()
+        self.manifest_generated_at = self._read_manifest_generated_at()
 
     @staticmethod
     def _resolve_run_root(project_root: Path, run_id: str) -> Path:
@@ -262,6 +268,18 @@ class _RunArtifacts:
             _invalid_artifact()
         return value
 
+    def _read_manifest_generated_at(self) -> datetime:
+        metadata = self.manifest.get("metadata")
+        if not isinstance(metadata, dict) or type(metadata.get("generated_at")) is not str:
+            _invalid_artifact()
+        try:
+            value = datetime.fromisoformat(metadata["generated_at"].replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            _invalid_artifact()
+        if value.tzinfo is None or value.utcoffset() is None:
+            _invalid_artifact()
+        return value
+
 
 class EvidenceTools:
     _PROJECT_ROOT: ClassVar[Path] = PROJECT_ROOT
@@ -357,6 +375,92 @@ class EvidenceTools:
                 source=EvidenceSource.DBT_RUN_RESULTS,
                 subject=node_id,
                 observed_at=self._artifacts.generated_at,
+                content=content,
+            ),
+        )
+
+    def get_dbt_lineage(
+        self,
+        node_id: str,
+        direction: Literal["upstream", "downstream"],
+    ) -> tuple[EvidenceRecord, ...]:
+        if not isinstance(direction, str) or direction not in {"upstream", "downstream"}:
+            raise_without_context(InvalidDirectionError("Invalid lineage direction"))
+
+        nodes = self._artifacts.manifest["nodes"]
+        sources = self._artifacts.manifest.get("sources", {})
+        catalog = {**nodes, **sources}
+        if not isinstance(node_id, str) or node_id not in catalog:
+            raise_without_context(NodeNotFoundError("Lineage node was not found"))
+
+        mapping_name = "parent_map" if direction == "upstream" else "child_map"
+        mapping = self._artifacts.manifest[mapping_name]
+        colors: dict[str, int] = {}
+
+        def visit(current_id: str) -> None:
+            color = colors.get(current_id, 0)
+            if color == 1:
+                _invalid_artifact()
+            if color == 2:
+                return
+            entry = catalog[current_id]
+            if (
+                not isinstance(entry, dict)
+                or type(entry.get("resource_type")) is not str
+                or type(entry.get("name")) is not str
+            ):
+                _invalid_artifact()
+            colors[current_id] = 1
+            if current_id not in mapping or not isinstance(mapping[current_id], list):
+                _invalid_artifact()
+            references = mapping[current_id]
+            if len(references) != len(set(references)):
+                _invalid_artifact()
+            for reference in references:
+                if not isinstance(reference, str) or reference not in catalog:
+                    _invalid_artifact()
+                visit(reference)
+            colors[current_id] = 2
+
+        visit(node_id)
+
+        distances: dict[str, int] = {node_id: 0}
+        queue: deque[tuple[str, int]] = deque([(node_id, 0)])
+        while queue:
+            current_id, distance = queue.popleft()
+            for reference in mapping[current_id]:
+                if reference not in distances:
+                    next_distance = distance + 1
+                    distances[reference] = next_distance
+                    queue.append((reference, next_distance))
+
+        related_nodes = tuple(
+            DbtLineageNode(
+                node_id=related_id,
+                resource_type=catalog[related_id]["resource_type"],
+                name=catalog[related_id]["name"],
+                distance=distance,
+            )
+            for related_id, distance in sorted(
+                distances.items(), key=lambda item: (item[1], item[0])
+            )
+            if related_id != node_id
+            and catalog[related_id].get("resource_type") in {"model", "seed", "source"}
+        )
+        content = DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=self._run_id,
+            node_id=node_id,
+            direction=direction,
+            related_nodes=related_nodes,
+        )
+        return (
+            EvidenceRecord.create(
+                run_id=self._run_id,
+                evidence_type=EvidenceType.DBT_LINEAGE,
+                source=EvidenceSource.DBT_MANIFEST,
+                subject=node_id,
+                observed_at=self._artifacts.manifest_generated_at,
                 content=content,
             ),
         )

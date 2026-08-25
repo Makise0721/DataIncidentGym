@@ -6,8 +6,10 @@ import pytest
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evidence import (
     InvalidArtifactError,
+    InvalidDirectionError,
     InvalidRunIdError,
     NodeErrorNotFoundError,
+    NodeNotFoundError,
     RunContextMismatchError,
     RunNotFoundError,
 )
@@ -16,8 +18,11 @@ from data_incident_gym.evidence_tools import EvidenceTools
 RUN_ID = "0123456789abcdef0123456789abcdef"
 OTHER_RUN_ID = "fedcba9876543210fedcba9876543210"
 FAILURE_NODE = "model.jaffle_shop.stg_payments"
-SUCCESS_NODE = "model.jaffle_shop.seed_payments"
+SUCCESS_NODE = "seed.jaffle_shop.raw_payments"
 SKIPPED_NODE = "model.jaffle_shop.orders"
+CUSTOMERS_NODE = "model.jaffle_shop.customers"
+TEST_NODE = "test.jaffle_shop.not_null_payments"
+SOURCE_NODE = "source.jaffle_shop.raw_payments"
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -91,15 +96,33 @@ def _write_run(tmp_path: Path, run_id: str = RUN_ID) -> Path:
     nodes = {
         FAILURE_NODE: {"resource_type": "model", "name": "stg_payments"},
         SKIPPED_NODE: {"resource_type": "model", "name": "orders"},
-        SUCCESS_NODE: {"resource_type": "seed", "name": "seed_payments"},
-        "test.jaffle_shop.not_null_payments": {"resource_type": "test", "name": "not_null"},
+        CUSTOMERS_NODE: {"resource_type": "model", "name": "customers"},
+        SUCCESS_NODE: {"resource_type": "seed", "name": "raw_payments"},
+        TEST_NODE: {"resource_type": "test", "name": "not_null"},
     }
+    sources = {SOURCE_NODE: {"resource_type": "source", "name": "raw_payments"}}
     _write_json(
         run_root / "dbt" / "target" / "manifest.json",
         {
             "nodes": nodes,
-            "parent_map": {node_id: [] for node_id in nodes},
-            "child_map": {node_id: [] for node_id in nodes},
+            "sources": sources,
+            "metadata": {"generated_at": "2026-08-25T10:00:00Z"},
+            "parent_map": {
+                FAILURE_NODE: [SUCCESS_NODE],
+                SKIPPED_NODE: [FAILURE_NODE],
+                CUSTOMERS_NODE: [SKIPPED_NODE],
+                SUCCESS_NODE: [],
+                TEST_NODE: [],
+                SOURCE_NODE: [],
+            },
+            "child_map": {
+                FAILURE_NODE: [SKIPPED_NODE],
+                SKIPPED_NODE: [CUSTOMERS_NODE],
+                CUSTOMERS_NODE: [],
+                SUCCESS_NODE: [FAILURE_NODE],
+                TEST_NODE: [],
+                SOURCE_NODE: [],
+            },
         },
     )
     return run_root
@@ -154,6 +177,94 @@ def test_get_dbt_node_error_rejects_successful_or_missing_node(
 
     with pytest.raises(NodeErrorNotFoundError):
         tools.get_dbt_node_error(RUN_ID, node_id)
+
+
+def test_get_dbt_lineage_returns_stable_transitive_downstream_models(
+    tmp_path: Path,
+) -> None:
+    tools = _tools(tmp_path)
+
+    records = tools.get_dbt_lineage(FAILURE_NODE, "downstream")
+
+    assert len(records) == 1
+    lineage = records[0]
+    assert lineage.evidence_type.value == "DBT_LINEAGE"
+    assert lineage.source.value == "dbt_artifact:manifest.json"
+    assert lineage.observed_at.isoformat() == "2026-08-25T10:00:00+00:00"
+    assert tuple(node.node_id for node in lineage.content.related_nodes) == (
+        SKIPPED_NODE,
+        CUSTOMERS_NODE,
+    )
+    assert tuple(node.distance for node in lineage.content.related_nodes) == (1, 2)
+    assert tuple(node.resource_type for node in lineage.content.related_nodes) == (
+        "model",
+        "model",
+    )
+    assert tuple(node.name for node in lineage.content.related_nodes) == (
+        "orders",
+        "customers",
+    )
+    assert records == tools.get_dbt_lineage(FAILURE_NODE, "downstream")
+
+
+def test_get_dbt_lineage_returns_upstream_seed(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+
+    lineage = tools.get_dbt_lineage(FAILURE_NODE, "upstream")[0].content
+
+    assert tuple(node.node_id for node in lineage.related_nodes) == (SUCCESS_NODE,)
+    assert tuple(node.distance for node in lineage.related_nodes) == (1,)
+
+
+def test_get_dbt_lineage_returns_record_for_valid_leaf_with_no_descendants(
+    tmp_path: Path,
+) -> None:
+    tools = _tools(tmp_path)
+
+    records = tools.get_dbt_lineage(CUSTOMERS_NODE, "downstream")
+
+    assert len(records) == 1
+    assert records[0].content.related_nodes == ()
+
+
+@pytest.mark.parametrize("direction", ["", "UPSTREAM", "downstream ", "upstream\n"])
+def test_get_dbt_lineage_rejects_unknown_direction(
+    tmp_path: Path,
+    direction: str,
+) -> None:
+    tools = _tools(tmp_path)
+
+    with pytest.raises(InvalidDirectionError):
+        tools.get_dbt_lineage(FAILURE_NODE, direction)
+
+
+def test_get_dbt_lineage_rejects_unknown_node(tmp_path: Path) -> None:
+    tools = _tools(tmp_path)
+
+    with pytest.raises(NodeNotFoundError):
+        tools.get_dbt_lineage("model.jaffle_shop.missing", "downstream")
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "dangling", "cycle"])
+def test_get_dbt_lineage_rejects_duplicate_dangling_and_cyclic_edges(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root = _write_run(tmp_path)
+    manifest_path = run_root / "dbt" / "target" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "duplicate":
+        manifest["child_map"][FAILURE_NODE].append(SKIPPED_NODE)
+    elif mutation == "dangling":
+        manifest["child_map"][FAILURE_NODE].append("model.jaffle_shop.missing")
+    else:
+        manifest["child_map"][FAILURE_NODE].append(TEST_NODE)
+        manifest["child_map"][TEST_NODE].append(TEST_NODE)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(InvalidArtifactError):
+        tools = EvidenceTools.for_run(RUN_ID, DiagnosticSettings(_env_file=None), tmp_path)
+        tools.get_dbt_lineage(FAILURE_NODE, "downstream")
 
 
 def test_toolset_rejects_invalid_missing_or_mismatched_run(tmp_path: Path) -> None:
