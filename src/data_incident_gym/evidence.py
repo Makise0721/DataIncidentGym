@@ -9,6 +9,7 @@ from typing import Annotated, Literal, NoReturn
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StrictBool,
@@ -111,6 +112,12 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _strict_datetime_input(value: object) -> object:
+    if not isinstance(value, (str, datetime)):
+        raise ValueError("observed_at must be an ISO string or datetime")
+    return value
+
+
 _CONTENT_TYPES: dict[EvidenceType, type[BaseModel]] = {
     EvidenceType.DBT_RUN_RESULTS: DbtRunResultsFact,
     EvidenceType.DBT_NODE_ERROR: DbtNodeErrorFact,
@@ -134,7 +141,7 @@ class EvidenceRecord(BaseModel):
     evidence_type: EvidenceType
     source: EvidenceSource
     subject: StrictStr
-    observed_at: datetime
+    observed_at: Annotated[datetime, BeforeValidator(_strict_datetime_input)]
     content: EvidenceContent
     content_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -209,6 +216,11 @@ def _safe_message(message: object) -> str:
     text = re.sub(
         r"(?i)\b(?:select|insert|update|delete|alter|create|drop|grant|revoke)\b.*",
         "[redacted SQL]",
+        text,
+    )
+    text = re.sub(
+        r'(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\|/)[^\r\n,;:()\[\]]*?\.[^\r\n\s,;:()\[\]]+',
+        "[redacted path]",
         text,
     )
     text = re.sub(

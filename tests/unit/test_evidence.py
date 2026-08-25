@@ -138,6 +138,15 @@ def test_record_rejects_naive_and_invalid_run_id() -> None:
         make_run_results_record(run_id="../../outside")
 
 
+@pytest.mark.parametrize("observed_at", [0, 0.0, True])
+def test_record_rejects_nonstrict_json_datetime_types(observed_at: object) -> None:
+    payload = make_run_results_record().model_dump(mode="json")
+    payload["observed_at"] = observed_at
+
+    with pytest.raises(ValidationError):
+        EvidenceRecord.model_validate(payload)
+
+
 def test_all_fact_variants_are_frozen_and_have_exact_discriminators() -> None:
     node_error = DbtNodeErrorFact(
         kind="DBT_NODE_ERROR",
@@ -272,6 +281,9 @@ def test_error_subclasses_expose_stable_codes_and_redact_details(
         r"C:\TEST_REDACTED_VALUE Folder\artifact.json",
         r"\\TEST_REDACTED_VALUE\share\TEST_REDACTED_VALUE Folder\artifact.json",
         r"/var/TEST_REDACTED_VALUE Folder/artifact.json",
+        r"C:\TEST_REDACTED_VALUE\artifact file.json",
+        r"\\TEST_REDACTED_VALUE\share\artifact file.json",
+        r"/var/TEST_REDACTED_VALUE/artifact file.json",
     ],
 )
 def test_error_redacts_absolute_paths_with_spaces(path: str) -> None:
