@@ -114,6 +114,7 @@ def test_lab_error_is_chinese_stderr_with_nonzero_exit(monkeypatch) -> None:
     )
 
     assert result.exit_code != 0
+    assert "故障实验失败" in result.stderr
     assert "INVALID_INCIDENT_STATE" in result.stderr
     assert "当前状态：INJECTED" in result.stderr
     assert "Traceback" not in result.stderr
@@ -133,6 +134,7 @@ def test_incident_case_error_uses_stable_error_code(monkeypatch) -> None:
     )
 
     assert result.exit_code != 0
+    assert "故障实验失败" in result.stderr
     assert "INCIDENT_CASE_ERROR" in result.stderr
     assert "TEST_REDACTED_VALUE" in result.stderr
     assert "Traceback" not in result.stderr
@@ -159,3 +161,31 @@ def test_lab_help_is_chinese_and_lists_only_m2_actions() -> None:
         "--path",
     ):
         assert forbidden not in lab_help.stdout
+
+
+def test_lab_registers_only_reset_inject_and_build() -> None:
+    assert {
+        command.name for command in cli.lab_app.registered_commands
+    } == {"reset", "inject", "build"}
+
+
+def test_lab_rejects_unscoped_options_and_extra_arguments_before_delegation(
+    monkeypatch,
+) -> None:
+    def fail_if_called():
+        raise AssertionError("CLI parser should reject the invocation first")
+
+    monkeypatch.setattr(cli, "create_incident_lab", fail_if_called)
+    invalid_invocations = (
+        ["lab", "reset", "schema_rename_payment_amount", "--sql", "select 1"],
+        ["lab", "inject", "schema_rename_payment_amount", "--table", "raw_payments"],
+        ["lab", "build", "schema_rename_payment_amount", "--column", "amount"],
+        ["lab", "reset", "schema_rename_payment_amount", "--skip-seed"],
+        ["lab", "reset", "schema_rename_payment_amount", "--run-id", "run"],
+        ["lab", "reset", "schema_rename_payment_amount", "--path", "run"],
+        ["lab", "reset", "schema_rename_payment_amount", "extra"],
+    )
+
+    for invocation in invalid_invocations:
+        result = runner.invoke(cli.app, invocation)
+        assert result.exit_code == 2
