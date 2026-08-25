@@ -1,3 +1,4 @@
+import json
 import traceback
 from pathlib import Path
 from types import SimpleNamespace
@@ -493,6 +494,81 @@ def test_build_uses_unique_run_paths_and_returns_expected_failure(
     with pytest.raises(IncidentExecutionError):
         lab.build(CASE_ID)
     assert (result.artifact_dir / "metadata.json").is_file()
+
+
+def test_build_publishes_active_run_only_after_expected_failure_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
+    lab.dbt_runner = SimpleNamespace(
+        run_incident=lambda target, logs: SimpleNamespace(
+            return_code=1,
+            stdout="",
+            stderr="",
+        )
+    )
+    lab.verifier = SimpleNamespace(verify=lambda _: SimpleNamespace(status="EXPECTED_FAILURE"))
+    lab.run_id_factory = lambda: "0123456789abcdef0123456789abcdef"
+
+    result = lab.build(CASE_ID)
+
+    pointer = tmp_path / ".dig/lab/active_fault_run.json"
+    assert pointer.is_file()
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == result.run_id
+
+
+def test_failed_verification_never_publishes_active_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
+    lab.dbt_runner = SimpleNamespace(
+        run_incident=lambda target, logs: SimpleNamespace(
+            return_code=1,
+            stdout="",
+            stderr="",
+        )
+    )
+    lab.verifier = SimpleNamespace(
+        verify=lambda _: (_ for _ in ()).throw(LabVerificationError("bad"))
+    )
+    lab.run_id_factory = lambda: "0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(FaultVerificationError):
+        lab.build(CASE_ID)
+
+    assert not (tmp_path / ".dig/lab/active_fault_run.json").exists()
+
+
+@pytest.mark.parametrize("method", ["reset", "inject"])
+def test_reset_and_inject_clear_stale_active_run_before_state_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    method: str,
+) -> None:
+    lab, _ = _lab(tmp_path)
+    pointer = tmp_path / ".dig/lab/active_fault_run.json"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text("stale", encoding="utf-8")
+    state = HEALTHY if method == "inject" else None
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: state)
+    if method == "reset":
+        monkeypatch.setattr(
+            lab,
+            "_build_healthy_baseline",
+            lambda: make_baseline_summary("analytics", (HEALTHY,)),
+        )
+    else:
+        monkeypatch.setattr(lab, "_rename_column", lambda *_: None)
+        states = iter((HEALTHY, INJECTED))
+        monkeypatch.setattr(lab, "_inspect_relation", lambda _: next(states))
+
+    getattr(lab, method)(CASE_ID)
+
+    assert not pointer.exists()
 
 
 def test_build_rejects_noninjected_schema(

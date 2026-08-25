@@ -27,6 +27,11 @@ from data_incident_gym.lab_verifier import (
     LabVerification,
     LabVerificationError,
 )
+from data_incident_gym.run_context import (
+    RunContextError,
+    clear_active_run,
+    publish_active_run,
+)
 
 DatabaseConnect = Callable[..., Any]
 CaseState = Literal["MISSING", "HEALTHY", "INJECTED", "DRIFTED"]
@@ -326,6 +331,29 @@ class IncidentLab:
         assert summary is not None
         return summary
 
+    def _clear_active_run(self) -> None:
+        error: IncidentExecutionError | None = None
+        try:
+            clear_active_run(self.project_root)
+        except RunContextError as exc:
+            error = IncidentExecutionError(self._redact(str(exc)))
+        if error is not None:
+            raise self._clean(error)
+
+    def _publish_active_run(self, case_id: str, run_id: str, status: str) -> None:
+        error: IncidentExecutionError | None = None
+        try:
+            publish_active_run(
+                self.project_root,
+                incident_case_id=case_id,
+                run_id=run_id,
+                verification_status=status,
+            )
+        except RunContextError as exc:
+            error = IncidentExecutionError(self._redact(str(exc)))
+        if error is not None:
+            raise self._clean(error)
+
     def reset(self, case_id: str) -> ResetResult:
         truth = self._load_case(case_id)
         self._start_postgres()
@@ -353,6 +381,7 @@ class IncidentLab:
         )
         if self._classify_state(relation, truth) != "HEALTHY":
             raise InvalidIncidentState("重置后未恢复健康 Schema")
+        self._clear_active_run()
         return ResetResult(case_id, "HEALTHY", summary.fingerprint)
 
     def inject(self, case_id: str) -> InjectionResult:
@@ -364,6 +393,7 @@ class IncidentLab:
             raise InvalidIncidentState(
                 f"故障注入要求健康状态，当前状态：{state}"
             )
+        self._clear_active_run()
         self._rename_column(
             truth.injection.relation,
             truth.injection.from_column,
@@ -381,6 +411,7 @@ class IncidentLab:
         state = self._classify_state(relation, truth)
         if state != "INJECTED" or relation is None:
             raise InvalidIncidentState(f"故障构建要求已注入状态，当前状态：{state}")
+        self._clear_active_run()
 
         run_id = self.run_id_factory()
         if not isinstance(run_id, str) or RUN_ID_PATTERN.fullmatch(run_id) is None:
@@ -452,6 +483,7 @@ class IncidentLab:
         if verification_error is not None:
             raise self._clean(verification_error)
         assert verification is not None
+        self._publish_active_run(case_id, run_id, verification.status)
         return FaultRun(
             case_id=case_id,
             run_id=run_id,
