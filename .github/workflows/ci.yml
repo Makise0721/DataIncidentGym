@@ -23,4 +23,64 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest tests/unit -q
       - run: uv run pytest tests/integration -q
+      - name: Collect PostgreSQL diagnostics after test failure
+        if: ${{ failure() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          diagnostics_dir="postgres-diagnostics"
+          mkdir -p "$diagnostics_dir"
+          log_file="$diagnostics_dir/docker-diagnostics.log"
+          ids_file="$diagnostics_dir/postgres-container-ids.txt"
+          state_file="$diagnostics_dir/postgres-safe-state.txt"
+
+          {
+            echo "PostgreSQL CI diagnostics"
+            echo "compose_project=data-incident-gym"
+            echo "compose_service=postgres"
+            echo "collected_at=$(date --iso-8601=seconds)"
+            echo ""
+            echo "This artifact contains compose status, PostgreSQL logs, container IDs, and selected container state fields only."
+          } > "$diagnostics_dir/README.txt"
+
+          {
+            echo "### docker compose -f compose.yaml ps -a"
+            docker compose -f compose.yaml ps -a
+            echo "exit=$?"
+            echo
+            echo "### docker compose -f compose.yaml logs --timestamps --no-color postgres"
+            docker compose -f compose.yaml logs --timestamps --no-color postgres
+            echo "exit=$?"
+          } > "$log_file" 2>&1
+
+          docker compose -f compose.yaml ps -aq postgres > "$ids_file" 2>> "$log_file"
+          ids_exit=$?
+          {
+            echo "### docker compose -f compose.yaml ps -aq postgres"
+            echo "exit=$ids_exit"
+          } >> "$log_file"
+
+          if [ ! -s "$ids_file" ]; then
+            echo "No postgres container ID was returned; docker inspect was not run." > "$state_file"
+          else
+            : > "$state_file"
+            while IFS= read -r container_id; do
+              [ -n "$container_id" ] || continue
+              echo "### container_id=$container_id" >> "$state_file"
+              docker inspect --format 'State.Status={{.State.Status}} Health.Status={{if .State.Health}}{{.State.Health.Status}}{{else}}unavailable{{end}} ExitCode={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}} RestartCount={{.RestartCount}} StartedAt={{.State.StartedAt}} FinishedAt={{.State.FinishedAt}} Health.Log={{if .State.Health}}{{json .State.Health.Log}}{{else}}[]{{end}}' "$container_id" >> "$state_file" 2>&1
+              echo "inspect_exit=$?" >> "$state_file"
+            done < "$ids_file"
+          fi
+
+          exit 0
+      - name: Upload PostgreSQL diagnostics
+        if: ${{ always() && hashFiles('postgres-diagnostics/**') != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-diagnostics
+          path: postgres-diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
       - run: uv run pytest tests/e2e -q
