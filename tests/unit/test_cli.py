@@ -1,12 +1,16 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 import data_incident_gym.cli as cli
 from data_incident_gym.baseline import BaselineError, make_baseline_summary
+from data_incident_gym.diagnosis import Diagnosis, DiagnosisMetrics, DiagnosisRunResult
 from data_incident_gym.incidents import IncidentCaseError
 from data_incident_gym.lab import InvalidIncidentState
+from data_incident_gym.run_context import ActiveRun, RunContextError
 
 runner = CliRunner()
 
@@ -189,3 +193,201 @@ def test_lab_rejects_unscoped_options_and_extra_arguments_before_delegation(
     for invocation in invalid_invocations:
         result = runner.invoke(cli.app, invocation)
         assert result.exit_code == 2
+
+
+def _diagnosis(status: str) -> Diagnosis:
+    if status == "CONFIRMED":
+        return Diagnosis(
+            status=status,
+            incident_case_id="schema_rename_payment_amount",
+            run_id="a" * 32,
+            root_cause_code="SOURCE_SCHEMA_COLUMN_RENAMED",
+            summary="Evidence confirms the incident.",
+            affected_assets=("stg_payments",),
+            evidence_ids=("ev_" + "b" * 64,),
+            recommended_actions=("Collect additional evidence before making a change.",),
+            confidence=0.9,
+        )
+    if status == "INSUFFICIENT_EVIDENCE":
+        return Diagnosis(
+            status=status,
+            incident_case_id="schema_rename_payment_amount",
+            run_id="a" * 32,
+            root_cause_code=None,
+            summary="INSUFFICIENT_EVIDENCE",
+            affected_assets=(),
+            evidence_ids=(),
+            recommended_actions=("Collect additional evidence before making a change.",),
+            confidence=0.0,
+        )
+    return Diagnosis(
+        status="MODEL_ERROR",
+        incident_case_id="schema_rename_payment_amount",
+        run_id="a" * 32,
+        root_cause_code=None,
+        summary="MODEL_RUNTIME_ERROR",
+        affected_assets=(),
+        evidence_ids=(),
+        recommended_actions=("Collect additional evidence before making a change.",),
+        confidence=0.0,
+    )
+
+
+def _diagnosis_result(status: str) -> DiagnosisRunResult:
+    return DiagnosisRunResult(
+        diagnosis=_diagnosis(status),
+        evidence_records=(),
+        trace=(),
+        metrics=DiagnosisMetrics(
+            provider="openai-compatible",
+            model="gemma4:e4b",
+            model_requests=1,
+            input_tokens=0,
+            output_tokens=0,
+            tool_call_attempts=0,
+            successful_tool_calls=0,
+            elapsed_ms=1,
+        ),
+    )
+
+
+def test_top_level_help_adds_only_diagnose_and_diagnose_options_are_bounded() -> None:
+    app_help = runner.invoke(cli.app, ["--help"])
+    diagnose_help = runner.invoke(cli.app, ["diagnose", "--help"])
+
+    assert app_help.exit_code == 0
+    assert "diagnose" in app_help.stdout
+    assert {command.name for command in cli.app.registered_commands} == {"diagnose"}
+    assert diagnose_help.exit_code == 0
+    assert "case_id" in diagnose_help.stdout
+    assert "--run-id" in diagnose_help.stdout
+    for forbidden in (
+        "--path",
+        "--sql",
+        "--table",
+        "--prompt",
+        "--model",
+        "--base-url",
+        "--budget",
+    ):
+        assert forbidden not in diagnose_help.stdout
+
+
+def test_diagnose_active_and_explicit_run_use_only_case_and_optional_run_id(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeRunner:
+        async def diagnose(self, case_id: str):
+            calls.append(("diagnose", case_id))
+            return _diagnosis_result("INSUFFICIENT_EVIDENCE")
+
+    def fake_factory(run_id: str):
+        calls.append(("runner", run_id))
+        return FakeRunner()
+
+    monkeypatch.setattr(cli, "create_diagnosis_runner", fake_factory)
+    monkeypatch.setattr(
+        cli,
+        "resolve_active_run",
+        lambda **_: ActiveRun(
+            "schema_rename_payment_amount", "a" * 32, "m4.active_fault_run.v1", "EXPECTED_FAILURE"
+        ),
+    )
+
+    active = runner.invoke(cli.app, ["diagnose", "schema_rename_payment_amount"])
+    explicit = runner.invoke(
+        cli.app,
+        ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32],
+    )
+
+    assert active.exit_code == 2
+    assert explicit.exit_code == 2
+    assert calls == [
+        ("runner", "a" * 32),
+        ("diagnose", "schema_rename_payment_amount"),
+        ("runner", "a" * 32),
+        ("diagnose", "schema_rename_payment_amount"),
+    ]
+
+
+def test_diagnose_confirmed_prints_chinese_message_and_strict_json(monkeypatch) -> None:
+    class FakeRunner:
+        async def diagnose(self, case_id: str):
+            return _diagnosis_result("CONFIRMED")
+
+    monkeypatch.setattr(cli, "create_diagnosis_runner", lambda _: FakeRunner())
+    result = runner.invoke(
+        cli.app, ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32]
+    )
+
+    assert result.exit_code == 0
+    assert "诊断完成" in result.stdout
+    payload = json.loads(result.stdout[result.stdout.index("{") :])
+    assert payload == _diagnosis("CONFIRMED").model_dump(mode="json")
+    assert "trace" not in payload
+    assert "metrics" not in payload
+
+
+def test_diagnose_insufficient_is_structured_exit_2(monkeypatch) -> None:
+    class FakeRunner:
+        async def diagnose(self, case_id: str):
+            return _diagnosis_result("INSUFFICIENT_EVIDENCE")
+
+    monkeypatch.setattr(cli, "create_diagnosis_runner", lambda _: FakeRunner())
+    result = runner.invoke(
+        cli.app, ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32]
+    )
+
+    assert result.exit_code == 2
+    assert "INSUFFICIENT_EVIDENCE" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("status", ["MODEL_ERROR"])
+def test_diagnose_model_error_is_safe_exit_1(monkeypatch, status: str) -> None:
+    class FakeRunner:
+        async def diagnose(self, case_id: str):
+            return _diagnosis_result(status)
+
+    monkeypatch.setattr(cli, "create_diagnosis_runner", lambda _: FakeRunner())
+    result = runner.invoke(
+        cli.app, ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32]
+    )
+
+    assert result.exit_code == 1
+    assert "MODEL_RUNTIME_ERROR" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+def test_diagnose_preflight_and_provider_errors_are_redacted(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "resolve_active_run",
+        lambda **_: (_ for _ in ()).throw(
+            RunContextError("provider=raw password=TEST_REDACTED_VALUE C:\\secret\\run.json")
+        ),
+    )
+    preflight = runner.invoke(cli.app, ["diagnose", "schema_rename_payment_amount"])
+
+    assert preflight.exit_code == 1
+    assert "诊断失败" in preflight.stderr
+    assert "TEST_REDACTED_VALUE" not in preflight.stdout + preflight.stderr
+    assert "C:\\secret\\run.json" not in preflight.stdout + preflight.stderr
+    assert "Traceback" not in preflight.stdout + preflight.stderr
+
+    class FailingRunner:
+        async def diagnose(self, case_id: str):
+            raise RuntimeError(
+                "provider raw exception api_key=TEST_REDACTED_VALUE C:\\secret\\trace.log"
+            )
+
+    monkeypatch.setattr(cli, "create_diagnosis_runner", lambda _: FailingRunner())
+    provider = runner.invoke(
+        cli.app,
+        ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32],
+    )
+    assert provider.exit_code == 1
+    assert "TEST_REDACTED_VALUE" not in provider.stdout + provider.stderr
+    assert "C:\\secret\\trace.log" not in provider.stdout + provider.stderr
+    assert "provider raw exception" not in provider.stdout + provider.stderr
+    assert "Traceback" not in provider.stdout + provider.stderr

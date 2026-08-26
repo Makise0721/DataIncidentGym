@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+
 import typer
 
 from data_incident_gym.baseline import BaselineBuilder, BaselineError
 from data_incident_gym.config import Settings
+from data_incident_gym.diagnosis import DiagnosisStatus
+from data_incident_gym.diagnostic_agent import DiagnosisRunner
+from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.incidents import IncidentCaseError
 from data_incident_gym.lab import IncidentLab, LabError
+from data_incident_gym.run_context import RunContextError, resolve_active_run
 
 app = typer.Typer(help="可复现的数据事故诊断实验场。")
 pipeline_app = typer.Typer(help="构建并检查 dbt 数据管道。")
@@ -22,10 +28,19 @@ def create_incident_lab() -> IncidentLab:
     return IncidentLab(Settings())
 
 
+def create_diagnosis_runner(run_id: str) -> DiagnosisRunner:
+    return DiagnosisRunner.for_run(run_id, DiagnosticSettings())
+
+
 def _exit_lab_error(error: LabError | IncidentCaseError) -> None:
     code = getattr(error, "code", "INCIDENT_CASE_ERROR")
     typer.echo(f"故障实验失败 [{code}]：{error}", err=True)
     raise typer.Exit(code=1) from error
+
+
+def _exit_diagnosis_error() -> None:
+    typer.echo("诊断失败 [MODEL_ERROR]：无法建立安全的诊断运行上下文。", err=True)
+    raise typer.Exit(code=1)
 
 
 @pipeline_app.command("build")
@@ -42,6 +57,38 @@ def pipeline_build() -> None:
     typer.echo(f"relations: {len(summary.relations)}")
     typer.echo(f"fingerprint: {summary.fingerprint}")
     typer.echo("summary: .dig/baseline-summary.json")
+
+
+@app.command("diagnose")
+def diagnose(
+    case_id: str,
+    run_id: str | None = typer.Option(None, "--run-id"),
+) -> None:
+    """使用固定案例和已验证运行的只读证据进行诊断。"""
+    try:
+        selected_run_id = (
+            run_id
+            if run_id is not None
+            else resolve_active_run(incident_case_id=case_id).run_id
+        )
+        result = asyncio.run(create_diagnosis_runner(selected_run_id).diagnose(case_id))
+    except RunContextError:
+        _exit_diagnosis_error()
+    except Exception:
+        _exit_diagnosis_error()
+
+    typer.echo(
+        {
+            DiagnosisStatus.CONFIRMED: "诊断完成。",
+            DiagnosisStatus.INSUFFICIENT_EVIDENCE: "证据不足，拒绝确认。",
+            DiagnosisStatus.MODEL_ERROR: "诊断失败。",
+        }[result.diagnosis.status]
+    )
+    typer.echo(result.diagnosis.model_dump_json(indent=2))
+    if result.diagnosis.status == DiagnosisStatus.INSUFFICIENT_EVIDENCE:
+        raise typer.Exit(code=2)
+    if result.diagnosis.status == DiagnosisStatus.MODEL_ERROR:
+        raise typer.Exit(code=1)
 
 
 @lab_app.command("reset")

@@ -32,9 +32,11 @@ packages = ["src/data_incident_gym"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--import-mode=importlib"
 markers = [
   "integration: requires Docker and PostgreSQL",
   "e2e: runs repeated real PostgreSQL and dbt workflows",
+  "ollama: requires explicitly enabled local Ollama and gemma4:e4b",
 ]
 
 [tool.ruff]
