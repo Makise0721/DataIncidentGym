@@ -104,6 +104,8 @@ def _scripted_diagnosis(
         )
 
     all_records = run_results + node_errors + schemas + upstream + downstream
+    schema_fact = schemas[-1].content
+    root_cause_code = f"EVIDENCE_{schema_fact.relation_name.upper()}_SCHEMA_MISMATCH"
     evidence_ids = tuple(
         record.evidence_id
         for record in all_records
@@ -127,7 +129,7 @@ def _scripted_diagnosis(
                     "status": "CONFIRMED",
                     "incident_case_id": CASE_ID,
                     "run_id": node_errors[-1].run_id,
-                    "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
+                    "root_cause_code": root_cause_code,
                     "summary": "The collected evidence confirms the incident.",
                     "affected_assets": affected_assets,
                     "evidence_ids": evidence_ids,
@@ -167,6 +169,14 @@ async def test_real_m2_run_and_m3_tools_drive_confirmed_diagnosis() -> None:
         }
         assert result.diagnosis.evidence_ids
         assert set(result.diagnosis.evidence_ids) <= set(inventory)
+        schema_record = next(
+            record
+            for record in inventory.values()
+            if record.evidence_type == EvidenceType.RELATION_SCHEMA
+        )
+        assert result.diagnosis.root_cause_code == (
+            f"EVIDENCE_{schema_record.content.relation_name.upper()}_SCHEMA_MISMATCH"
+        )
         assert result.metrics.successful_tool_calls >= 4
         assert {event.tool_name for event in result.trace if event.event_type == "TOOL_CALL"} <= {
             "get_dbt_run_results",

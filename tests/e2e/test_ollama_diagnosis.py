@@ -42,8 +42,10 @@ async def test_default_ollama_diagnosis_uses_real_m3_tools_and_strict_output() -
         assert result.diagnosis.status in {
             DiagnosisStatus.CONFIRMED,
             DiagnosisStatus.INSUFFICIENT_EVIDENCE,
-            DiagnosisStatus.MODEL_ERROR,
         }
+        assert result.diagnosis.incident_case_id == CASE_ID
+        assert result.diagnosis.run_id == run.run_id
+        assert result.metrics.elapsed_ms <= 180_000
         assert Diagnosis.model_validate(result.diagnosis.model_dump()) == result.diagnosis
         assert {event.tool_name for event in result.trace if event.event_type == "TOOL_CALL"} <= {
             "get_dbt_run_results",
