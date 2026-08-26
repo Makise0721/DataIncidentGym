@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,11 @@ from data_incident_gym.lab import InvalidIncidentState
 from data_incident_gym.run_context import ActiveRun, RunContextError
 
 runner = CliRunner()
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _plain_help(text: str) -> str:
+    return _ANSI_ESCAPE.sub("", text)
 
 
 def _summary() -> SimpleNamespace:
@@ -254,13 +260,14 @@ def _diagnosis_result(status: str) -> DiagnosisRunResult:
 def test_top_level_help_adds_only_diagnose_and_diagnose_options_are_bounded() -> None:
     app_help = runner.invoke(cli.app, ["--help"])
     diagnose_help = runner.invoke(cli.app, ["diagnose", "--help"])
+    diagnose_help_text = _plain_help(diagnose_help.stdout)
 
     assert app_help.exit_code == 0
     assert "diagnose" in app_help.stdout
     assert {command.name for command in cli.app.registered_commands} == {"diagnose"}
     assert diagnose_help.exit_code == 0
-    assert "case_id" in diagnose_help.stdout
-    assert "--run-id" in diagnose_help.stdout
+    assert "case_id" in diagnose_help_text
+    assert "--run-id" in diagnose_help_text
     for forbidden in (
         "--path",
         "--sql",
@@ -270,7 +277,7 @@ def test_top_level_help_adds_only_diagnose_and_diagnose_options_are_bounded() ->
         "--base-url",
         "--budget",
     ):
-        assert forbidden not in diagnose_help.stdout
+        assert forbidden not in diagnose_help_text
 
 
 def test_diagnose_active_and_explicit_run_use_only_case_and_optional_run_id(monkeypatch) -> None:
