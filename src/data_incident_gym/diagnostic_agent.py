@@ -8,8 +8,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
-from typing import Literal
+from typing import Annotated, Literal
 
+from pydantic import Field
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
 from pydantic_ai.exceptions import ToolFailed, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.models import Model
@@ -36,18 +37,27 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import resolve_run_context
 
 SYSTEM_PROMPT = """
-You diagnose one data incident using only the four registered read-only evidence tools.
-Choose evidence based on the facts returned by tools; do not infer a root cause from the
-incident identifier. Do not repeat an identical tool call. Return the required Diagnosis
-object and cite only evidence IDs returned by tools. If evidence is insufficient, return
-INSUFFICIENT_EVIDENCE without guessing.
+Diagnose one data incident using only the four registered read-only evidence tools and the
+verified run context in the user request. Follow this order unless already satisfied:
+1. Get run results. Use its exact failed node IDs for node-error and lineage calls.
+2. Get the node error for an exact failed node ID returned by run results.
+3. Get lineage for an exact node ID returned by run results or another lineage result.
+4. Get relation schema only for an exact unqualified relation name returned in structured
+   lineage or schema evidence. A relation name is not a dbt node ID, SQL, a guessed name,
+   or a schema-qualified string.
+
+Never invent node IDs, relation names, column names, or evidence IDs. Every tool argument
+except the verified run ID must come from a previous tool's structured result. Do not repeat
+an identical tool call; one tool retry is allowed when a tool returns an error code. Cite
+only evidence IDs returned by tools. Return the required Diagnosis object. If the evidence
+does not support a conclusion, return INSUFFICIENT_EVIDENCE without guessing.
 
 Use the versioned root-cause ontology below only when compatible evidence supports it:
 - SOURCE_SCHEMA_COLUMN_RENAMED: a source relation column was renamed while a dbt consumer
   still references the former column.
 """.strip()
 
-SYSTEM_PROMPT_VERSION = "m5.diagnosis.v1"
+SYSTEM_PROMPT_VERSION = "m5.diagnosis.v2"
 SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 _MAX_TOOL_ATTEMPTS = 8
 _MODEL_ERROR_REASONS = {
@@ -314,8 +324,13 @@ class DiagnosisRunner:
 
         @agent.tool
         def get_dbt_run_results(
-            ctx: RunContext[_RunState], run_id: str
+            ctx: RunContext[_RunState],
+            run_id: Annotated[
+                str,
+                Field(description="The exact verified run_id from the diagnostic context."),
+            ],
         ) -> tuple[EvidenceRecord, ...]:
+            """Return run results; call this first and reuse its exact node IDs."""
             return execute(
                 ctx,
                 "get_dbt_run_results",
@@ -325,8 +340,17 @@ class DiagnosisRunner:
 
         @agent.tool
         def get_dbt_node_error(
-            ctx: RunContext[_RunState], run_id: str, node_id: str
+            ctx: RunContext[_RunState],
+            run_id: Annotated[
+                str,
+                Field(description="The exact verified run_id from the diagnostic context."),
+            ],
+            node_id: Annotated[
+                str,
+                Field(description="An exact failed node_id returned by get_dbt_run_results."),
+            ],
         ) -> tuple[EvidenceRecord, ...]:
+            """Return the error for an exact failed node_id from run-results evidence."""
             return execute(
                 ctx,
                 "get_dbt_node_error",
@@ -336,8 +360,18 @@ class DiagnosisRunner:
 
         @agent.tool
         def get_relation_schema(
-            ctx: RunContext[_RunState], relation_name: str
+            ctx: RunContext[_RunState],
+            relation_name: Annotated[
+                str,
+                Field(
+                    description=(
+                        "An exact unqualified relation name returned in structured lineage "
+                        "or schema evidence; never a dbt node_id or guessed name."
+                    )
+                ),
+            ],
         ) -> tuple[EvidenceRecord, ...]:
+            """Return read-only catalog metadata for an exact relation name from prior evidence."""
             return execute(
                 ctx,
                 "get_relation_schema",
@@ -347,8 +381,18 @@ class DiagnosisRunner:
 
         @agent.tool
         def get_dbt_lineage(
-            ctx: RunContext[_RunState], node_id: str, direction: Literal["upstream", "downstream"]
+            ctx: RunContext[_RunState],
+            node_id: Annotated[
+                str,
+                Field(
+                    description=(
+                        "An exact node_id returned by run-results or a prior lineage result."
+                    )
+                ),
+            ],
+            direction: Literal["upstream", "downstream"],
         ) -> tuple[EvidenceRecord, ...]:
+            """Return bounded upstream or downstream lineage for a prior structured node_id."""
             return execute(
                 ctx,
                 "get_dbt_lineage",
