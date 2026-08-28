@@ -41,8 +41,14 @@ Choose evidence based on the facts returned by tools; do not infer a root cause 
 incident identifier. Do not repeat an identical tool call. Return the required Diagnosis
 object and cite only evidence IDs returned by tools. If evidence is insufficient, return
 INSUFFICIENT_EVIDENCE without guessing.
+
+Use the versioned root-cause ontology below only when compatible evidence supports it:
+- SOURCE_SCHEMA_COLUMN_RENAMED: a source relation column was renamed while a dbt consumer
+  still references the former column.
 """.strip()
 
+SYSTEM_PROMPT_VERSION = "m5.diagnosis.v1"
+SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 _MAX_TOOL_ATTEMPTS = 8
 _MODEL_ERROR_REASONS = {
     "MODEL_DECLINED",
@@ -72,6 +78,10 @@ class _ToolCallLimitReached(RuntimeError):
     pass
 
 
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((monotonic() - started_at) * 1000))
+
+
 @dataclass
 class _RunState:
     run_id: str
@@ -99,6 +109,7 @@ class _RunState:
         fingerprint: str,
         evidence_ids: tuple[str, ...] = (),
         error_code: str | None = None,
+        elapsed_ms: int,
     ) -> None:
         self.trace.append(
             ToolTraceEvent(
@@ -108,6 +119,7 @@ class _RunState:
                 fingerprint=fingerprint,
                 evidence_ids=evidence_ids,
                 error_code=error_code,
+                elapsed_ms=elapsed_ms,
             )
         )
 
@@ -231,6 +243,7 @@ class DiagnosisRunner:
             call: Callable[[], tuple[EvidenceRecord, ...]],
         ) -> tuple[EvidenceRecord, ...]:
             state = ctx.deps
+            tool_started_at = monotonic()
             fingerprint = _canonical_fingerprint(state.run_id, tool_name, arguments)
             state.last_tool_name = tool_name
             state.last_arguments = dict(arguments)
@@ -240,6 +253,7 @@ class DiagnosisRunner:
                     arguments=arguments,
                     fingerprint=fingerprint,
                     error_code="TOOL_CALL_LIMIT",
+                    elapsed_ms=_elapsed_ms(tool_started_at),
                 )
                 state.accepted_tool_attempts.append(fingerprint)
                 raise _ToolCallLimitReached
@@ -250,6 +264,7 @@ class DiagnosisRunner:
                     arguments=arguments,
                     fingerprint=fingerprint,
                     error_code="DUPLICATE_TOOL_CALL",
+                    elapsed_ms=_elapsed_ms(tool_started_at),
                 )
                 raise ToolFailed("DUPLICATE_TOOL_CALL")
             state.fingerprints.add(fingerprint)
@@ -264,6 +279,7 @@ class DiagnosisRunner:
                     arguments=arguments,
                     fingerprint=fingerprint,
                     error_code=code,
+                    elapsed_ms=_elapsed_ms(tool_started_at),
                 )
                 raise ToolFailed(code) from None
             except Exception:
@@ -272,6 +288,7 @@ class DiagnosisRunner:
                     arguments=arguments,
                     fingerprint=fingerprint,
                     error_code="EVIDENCE_TOOL_ERROR",
+                    elapsed_ms=_elapsed_ms(tool_started_at),
                 )
                 raise ToolFailed("EVIDENCE_TOOL_ERROR") from None
             try:
@@ -282,6 +299,7 @@ class DiagnosisRunner:
                     arguments=arguments,
                     fingerprint=fingerprint,
                     error_code=error.code,
+                    elapsed_ms=_elapsed_ms(tool_started_at),
                 )
                 raise
             state.successful_calls += 1
@@ -290,6 +308,7 @@ class DiagnosisRunner:
                 arguments=arguments,
                 fingerprint=fingerprint,
                 evidence_ids=tuple(record.evidence_id for record in records),
+                elapsed_ms=_elapsed_ms(tool_started_at),
             )
             return records
 

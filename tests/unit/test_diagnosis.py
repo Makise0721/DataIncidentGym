@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from pydantic import ValidationError
 
-from data_incident_gym.diagnosis import Diagnosis, DiagnosisRunResult
+from data_incident_gym.diagnosis import (
+    Diagnosis,
+    DiagnosisRunResult,
+    ToolTraceEvent,
+)
+from data_incident_gym.diagnostic_agent import (
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_SHA256,
+    SYSTEM_PROMPT_VERSION,
+)
 
 RUN_ID = "0123456789abcdef0123456789abcdef"
 EVIDENCE_ID = "ev_" + "a" * 64
@@ -126,3 +137,37 @@ def test_diagnosis_is_frozen_and_run_result_has_exact_contract() -> None:
     assert set(result.model_dump()) == {"diagnosis", "evidence_records", "trace", "metrics"}
     with pytest.raises(ValidationError):
         DiagnosisRunResult.model_validate({**result.model_dump(), "unexpected": "value"})
+
+
+def test_tool_trace_event_requires_nonnegative_strict_elapsed_ms() -> None:
+    event = ToolTraceEvent(
+        event_type="TOOL_CALL",
+        tool_name="get_dbt_run_results",
+        arguments={"run_id": "a" * 32},
+        fingerprint="b" * 64,
+        evidence_ids=(),
+        elapsed_ms=0,
+    )
+    assert event.elapsed_ms == 0
+
+    with pytest.raises(ValidationError):
+        ToolTraceEvent.model_validate({**event.model_dump(), "elapsed_ms": -1})
+    with pytest.raises(ValidationError):
+        ToolTraceEvent.model_validate({**event.model_dump(), "elapsed_ms": 1.0})
+
+
+def test_diagnosis_prompt_is_versioned_hashed_and_case_agnostic() -> None:
+    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v1"
+    assert hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest() == SYSTEM_PROMPT_SHA256
+    assert "SOURCE_SCHEMA_COLUMN_RENAMED" in SYSTEM_PROMPT
+    assert "source relation column was renamed" in SYSTEM_PROMPT
+    for case_specific_value in (
+        "schema_rename_payment_amount",
+        "raw_payments",
+        "stg_payments",
+        "orders",
+        "customers",
+        "amount",
+        "total_amount",
+    ):
+        assert case_specific_value not in SYSTEM_PROMPT

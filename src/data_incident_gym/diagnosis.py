@@ -103,6 +103,7 @@ class ToolTraceEvent(BaseModel):
     fingerprint: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
     evidence_ids: tuple[EvidenceId, ...]
     error_code: NonBlankStr | None = None
+    elapsed_ms: Annotated[StrictInt, Field(ge=0)]
 
     @model_validator(mode="after")
     def reject_duplicate_evidence_ids(self) -> ToolTraceEvent:

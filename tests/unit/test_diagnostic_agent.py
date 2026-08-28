@@ -11,7 +11,11 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from data_incident_gym.diagnostic_agent import DiagnosisRunner
+from data_incident_gym.diagnostic_agent import (
+    SYSTEM_PROMPT_SHA256,
+    SYSTEM_PROMPT_VERSION,
+    DiagnosisRunner,
+)
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evidence import (
     DbtLineageFact,
@@ -344,6 +348,16 @@ async def test_runner_registers_exactly_the_four_m3_tools_and_returns_diagnosis(
         for name, arguments in tools.calls
         if name in {"get_dbt_run_results", "get_dbt_node_error"}
     ] == [RUN_ID, RUN_ID]
+    assert all(
+        isinstance(event.elapsed_ms, int) and event.elapsed_ms >= 0
+        for event in result.trace
+        if event.event_type == "TOOL_CALL"
+    )
+
+
+def test_diagnostic_agent_exports_the_frozen_prompt_contract() -> None:
+    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v1"
+    assert SYSTEM_PROMPT_SHA256
 
 
 @pytest.mark.asyncio
