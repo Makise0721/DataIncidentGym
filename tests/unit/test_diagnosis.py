@@ -124,7 +124,7 @@ def test_diagnosis_is_frozen_and_run_result_has_exact_contract() -> None:
             "trace": (),
             "metrics": {
                 "provider": "openai-compatible",
-                "model": "qwen3.5:9b",
+                "model": "mimo-v2.5",
                 "model_requests": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,

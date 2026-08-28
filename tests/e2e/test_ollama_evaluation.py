@@ -14,16 +14,16 @@ from data_incident_gym.lab import IncidentLab
 
 pytestmark = [
     pytest.mark.e2e,
-    pytest.mark.ollama,
+    pytest.mark.real_model,
     pytest.mark.skipif(
-        os.getenv("DIG_RUN_OLLAMA_TESTS") != "1",
-        reason="set DIG_RUN_OLLAMA_TESTS=1 to enable three real M5 samples",
+        os.getenv("DIG_RUN_REAL_MODEL_TESTS") != "1",
+        reason="set DIG_RUN_REAL_MODEL_TESTS=1 to enable three real M5 samples",
     ),
 ]
 
 
 @pytest.mark.asyncio
-async def test_default_ollama_passes_at_least_two_of_three_independent_evaluations() -> None:
+async def test_default_model_passes_at_least_two_of_three_independent_evaluations() -> None:
     settings = Settings(_env_file=None)
     diagnostic_settings = DiagnosticSettings(_env_file=None)
     attempts = []

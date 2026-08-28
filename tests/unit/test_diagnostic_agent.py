@@ -412,8 +412,8 @@ def test_default_adapter_is_openai_chat_completions_without_a_request(tmp_path: 
 
     assert isinstance(runner._model, OpenAIChatModel)
     assert isinstance(runner._model.provider, OpenAIProvider)
-    assert runner._model.model_name == "qwen3.5:9b"
-    assert str(runner._model.provider.client.base_url) == "http://127.0.0.1:11434/v1/"
+    assert runner._model.model_name == "mimo-v2.5"
+    assert str(runner._model.provider.client.base_url) == "https://api.xiaomimimo.com/v1/"
 
 
 @pytest.mark.asyncio

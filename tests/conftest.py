@@ -4,7 +4,7 @@ from pathlib import Path
 import pydantic_ai.models
 import pytest
 
-if os.getenv("DIG_RUN_OLLAMA_TESTS") != "1":
+if os.getenv("DIG_RUN_REAL_MODEL_TESTS") != "1":
     pydantic_ai.models.ALLOW_MODEL_REQUESTS = False
 
 

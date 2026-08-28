@@ -259,7 +259,7 @@ def _diagnosis_result(status: str) -> DiagnosisRunResult:
         trace=(),
         metrics=DiagnosisMetrics(
             provider="openai-compatible",
-            model="qwen3.5:9b",
+            model="mimo-v2.5",
             model_requests=1,
             input_tokens=0,
             output_tokens=0,
@@ -420,7 +420,7 @@ def _doctor_result(failed_code: DoctorCheckCode | None = None) -> DoctorResult:
             passed=code is not failed_code,
             observed="OK" if code is not failed_code else "UNAVAILABLE",
             reason_code=f"{code.value}_{'FAILED' if code is failed_code else 'PASSED'}",
-            recommendation_code=(None if code is not failed_code else "START_OLLAMA"),
+            recommendation_code=(None if code is not failed_code else "CHECK_MODEL_ENDPOINT"),
         )
         for code in DoctorCheckCode
     )
@@ -447,14 +447,14 @@ def test_doctor_success_prints_fixed_checks_and_explanation(monkeypatch) -> None
 def test_doctor_failure_prints_recommendation_and_exits_one(monkeypatch) -> None:
     class FakeDoctorRunner:
         async def run(self) -> DoctorResult:
-            return _doctor_result(DoctorCheckCode.OLLAMA_ENDPOINT)
+            return _doctor_result(DoctorCheckCode.MODEL_ENDPOINT)
 
     monkeypatch.setattr(cli, "create_doctor_runner", lambda: FakeDoctorRunner())
     result = runner.invoke(cli.app, ["doctor"])
 
     assert result.exit_code == 1
-    assert "[失败] OLLAMA_ENDPOINT: UNAVAILABLE" in result.stdout
-    assert "启动 Ollama" in result.stdout
+    assert "[失败] MODEL_ENDPOINT: UNAVAILABLE" in result.stdout
+    assert "模型服务 endpoint" in result.stdout
     assert "doctor 通过不代表 P0 评测通过" in result.stdout
     assert "Traceback" not in result.stdout + result.stderr
 

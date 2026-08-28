@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr, StrictStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, StrictStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -25,9 +25,16 @@ class DiagnosticSettings(BaseSettings):
     postgres_schema: str = "analytics"
     postgres_user: Literal["dig_reader"] = "dig_reader"
     postgres_password: SecretStr = SecretStr("dig_reader")
-    model_base_url: StrictStr = "http://127.0.0.1:11434/v1"
-    model_name: StrictStr = "qwen3.5:9b"
-    model_api_key: SecretStr = SecretStr("ollama-local")
+    model_base_url: StrictStr = "https://api.xiaomimimo.com/v1"
+    model_name: StrictStr = "mimo-v2.5"
+    model_api_key: SecretStr = Field(
+        default=SecretStr("mimo-api-key-required"),
+        validation_alias=AliasChoices(
+            "DIG_DIAGNOSTIC_MODEL_API_KEY",
+            "MIMO_API_KEY",
+            "model_api_key",
+        ),
+    )
 
     @field_validator("model_base_url")
     @classmethod

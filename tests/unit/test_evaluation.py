@@ -195,7 +195,7 @@ def _valid_inputs() -> tuple[GroundTruth, LabVerification, DiagnosisRunResult]:
         trace=trace,
         metrics=DiagnosisMetrics(
             provider="openai-compatible",
-            model="qwen3.5:9b",
+            model="mimo-v2.5",
             model_requests=4,
             input_tokens=100,
             output_tokens=50,

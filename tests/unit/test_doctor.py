@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from subprocess import CompletedProcess
 from typing import Any
+from urllib.request import Request
 
 import pytest
 from pydantic import ValidationError
@@ -26,7 +27,7 @@ from data_incident_gym.doctor import (
 
 PROJECT_MARKER = "project-marker.txt"
 RAW_ERROR = "password=TEST_REDACTED_VALUE C:\\secret\\doctor.log"
-MODEL_NAME = "qwen3.5:9b"
+MODEL_NAME = "mimo-v2.5"
 
 
 class FakeCommand:
@@ -183,12 +184,15 @@ def doctor_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                 raise RuntimeError(raw_error)
             return connection
 
-        def url_open(url: str, *, timeout: float) -> FakeResponse:
+        def url_open(request: Request, *, timeout: float) -> FakeResponse:
             assert timeout == 5
-            if failed_code == "OLLAMA_ENDPOINT":
+            assert request.full_url == "https://api.xiaomimimo.com/v1/models"
+            assert request.get_header("Api-key") == "MIMO_TEST_REDACTED_VALUE"
+            if failed_code == "MODEL_ENDPOINT":
                 raise OSError(raw_error)
             return response
 
+        monkeypatch.setenv("MIMO_API_KEY", "MIMO_TEST_REDACTED_VALUE")
         settings = DiagnosticSettings(_env_file=None, model_name=MODEL_NAME)
         runner = DoctorRunner(
             settings,
@@ -272,6 +276,7 @@ async def test_each_failed_check_returns_fixed_recommendation_without_raw_error(
     assert failed.reason_code == f"{failed_code}_FAILED"
     assert failed.recommendation_code in EXPECTED_RECOMMENDATIONS
     assert "TEST_REDACTED_VALUE" not in serialized
+    assert "MIMO_TEST_REDACTED_VALUE" not in serialized
     assert "C:\\secret\\doctor.log" not in serialized
     assert all(check.observed == "UNAVAILABLE" for check in result.checks if not check.passed)
     expected_command_count = {
@@ -281,7 +286,7 @@ async def test_each_failed_check_returns_fixed_recommendation_without_raw_error(
         "COMPOSE_POSTGRES": 3,
         "POSTGRES_CONNECTION": 3,
         "DBT_PROFILE_CONNECTION": 4,
-        "OLLAMA_ENDPOINT": 4,
+        "MODEL_ENDPOINT": 4,
         "MODEL_PRESENT": 4,
         "MODEL_TOOL_STRUCTURED_OUTPUT": 4,
     }

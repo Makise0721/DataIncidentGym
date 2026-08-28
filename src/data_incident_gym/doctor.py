@@ -14,7 +14,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Self
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import psycopg
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, model_validator
@@ -60,7 +60,7 @@ class DoctorCheckCode(StrEnum):
     COMPOSE_POSTGRES = "COMPOSE_POSTGRES"
     POSTGRES_CONNECTION = "POSTGRES_CONNECTION"
     DBT_PROFILE_CONNECTION = "DBT_PROFILE_CONNECTION"
-    OLLAMA_ENDPOINT = "OLLAMA_ENDPOINT"
+    MODEL_ENDPOINT = "MODEL_ENDPOINT"
     MODEL_PRESENT = "MODEL_PRESENT"
     MODEL_TOOL_STRUCTURED_OUTPUT = "MODEL_TOOL_STRUCTURED_OUTPUT"
 
@@ -74,8 +74,8 @@ RECOMMENDATION_BY_CHECK = {
     DoctorCheckCode.COMPOSE_POSTGRES: "START_POSTGRES_COMPOSE",
     DoctorCheckCode.POSTGRES_CONNECTION: "CHECK_POSTGRES_SETTINGS",
     DoctorCheckCode.DBT_PROFILE_CONNECTION: "CHECK_DBT_PROFILE",
-    DoctorCheckCode.OLLAMA_ENDPOINT: "START_OLLAMA",
-    DoctorCheckCode.MODEL_PRESENT: "IMPORT_QWEN3_5_9B",
+    DoctorCheckCode.MODEL_ENDPOINT: "CHECK_MODEL_ENDPOINT",
+    DoctorCheckCode.MODEL_PRESENT: "CHECK_MIMO_MODEL_ACCESS",
     DoctorCheckCode.MODEL_TOOL_STRUCTURED_OUTPUT: "CHECK_MODEL_TOOL_CALLING",
 }
 EXPECTED_RECOMMENDATIONS = set(RECOMMENDATION_BY_CHECK.values())
@@ -360,7 +360,13 @@ class DoctorRunner:
     def _endpoint_check(self) -> tuple[DoctorCheck, bool, set[str]]:
         endpoint = self._diagnostic_settings.model_base_url.rstrip("/") + "/models"
         try:
-            with self._url_open(endpoint, timeout=_URL_TIMEOUT_SECONDS) as response:
+            request = Request(
+                endpoint,
+                headers={
+                    "api-key": self._diagnostic_settings.model_api_key.get_secret_value(),
+                },
+            )
+            with self._url_open(request, timeout=_URL_TIMEOUT_SECONDS) as response:
                 body = response.read(_MAX_RESPONSE_BYTES + 1)
             if len(body) > _MAX_RESPONSE_BYTES:
                 raise ValueError("response too large")
@@ -380,8 +386,8 @@ class DoctorRunner:
                 for item in data
             }
         except Exception:
-            return self._check(DoctorCheckCode.OLLAMA_ENDPOINT, False, "UNAVAILABLE"), False, set()
-        return self._check(DoctorCheckCode.OLLAMA_ENDPOINT, True, "REACHABLE"), True, model_ids
+            return self._check(DoctorCheckCode.MODEL_ENDPOINT, False, "UNAVAILABLE"), False, set()
+        return self._check(DoctorCheckCode.MODEL_ENDPOINT, True, "REACHABLE"), True, model_ids
 
     def _model_present_check(self, endpoint_ok: bool, model_ids: set[str]) -> DoctorCheck:
         model_name = self._diagnostic_settings.model_name

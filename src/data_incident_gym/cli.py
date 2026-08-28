@@ -31,8 +31,8 @@ DOCTOR_RECOMMENDATIONS_ZH = {
     "START_POSTGRES_COMPOSE": "建议启动 compose 中的 postgres 服务。",
     "CHECK_POSTGRES_SETTINGS": "建议检查独立 diagnostic PostgreSQL 连接配置。",
     "CHECK_DBT_PROFILE": "建议检查独立 diagnostic dbt profile 与连接。",
-    "START_OLLAMA": "建议启动 Ollama 并确认 OpenAI-compatible endpoint 可访问。",
-    "IMPORT_QWEN3_5_9B": "建议导入并暴露 qwen3.5:9b 模型。",
+    "CHECK_MODEL_ENDPOINT": "建议检查模型服务 endpoint 与 MIMO_API_KEY 配置。",
+    "CHECK_MIMO_MODEL_ACCESS": "建议确认 MiMo 账号可访问 mimo-v2.5。",
     "CHECK_MODEL_TOOL_CALLING": "建议检查模型的工具调用和结构化输出能力。",
 }
 

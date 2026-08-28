@@ -29,21 +29,27 @@ def test_diagnostic_settings_reject_non_loopback_host(
         DiagnosticSettings(_env_file=None)
 
 
-def test_diagnostic_model_defaults_are_local_and_secret() -> None:
+def test_diagnostic_model_defaults_are_mimo_and_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DIG_DIAGNOSTIC_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("MIMO_API_KEY", raising=False)
+
     settings = DiagnosticSettings(_env_file=None)
 
-    assert settings.model_base_url == "http://127.0.0.1:11434/v1"
-    assert settings.model_name == "qwen3.5:9b"
+    assert settings.model_base_url == "https://api.xiaomimimo.com/v1"
+    assert settings.model_name == "mimo-v2.5"
     assert isinstance(settings.model_api_key, SecretStr)
-    assert settings.model_api_key.get_secret_value() == "ollama-local"
+    assert settings.model_api_key.get_secret_value() == "mimo-api-key-required"
 
 
-def test_diagnostic_model_environment_overrides_are_prefixed_only(
+def test_diagnostic_model_environment_overrides_prefer_diagnostic_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DIG_DIAGNOSTIC_MODEL_BASE_URL", "https://127.0.0.1:9999/v1")
     monkeypatch.setenv("DIG_DIAGNOSTIC_MODEL_NAME", "synthetic-model")
     monkeypatch.setenv("DIG_DIAGNOSTIC_MODEL_API_KEY", "TEST_REDACTED_VALUE")
+    monkeypatch.setenv("MIMO_API_KEY", "MIMO_TEST_REDACTED_VALUE")
     monkeypatch.setenv("DIG_MODEL_NAME", "wrong-prefix-model")
 
     settings = DiagnosticSettings(_env_file=None)
@@ -53,6 +59,18 @@ def test_diagnostic_model_environment_overrides_are_prefixed_only(
     assert settings.model_api_key.get_secret_value() == "TEST_REDACTED_VALUE"
     assert "TEST_REDACTED_VALUE" not in repr(settings)
     assert "TEST_REDACTED_VALUE" not in str(settings.model_dump())
+
+
+def test_mimo_api_key_is_used_without_diagnostic_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DIG_DIAGNOSTIC_MODEL_API_KEY", raising=False)
+    monkeypatch.setenv("MIMO_API_KEY", "MIMO_TEST_REDACTED_VALUE")
+
+    settings = DiagnosticSettings(_env_file=None)
+
+    assert settings.model_api_key.get_secret_value() == "MIMO_TEST_REDACTED_VALUE"
+    assert "MIMO_TEST_REDACTED_VALUE" not in repr(settings)
 
 
 @pytest.mark.parametrize(

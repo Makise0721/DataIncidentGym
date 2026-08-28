@@ -14,16 +14,16 @@ from data_incident_gym.lab import IncidentLab
 
 pytestmark = [
     pytest.mark.e2e,
-    pytest.mark.ollama,
+    pytest.mark.real_model,
     pytest.mark.skipif(
-        os.getenv("DIG_RUN_OLLAMA_TESTS") != "1",
-        reason="set DIG_RUN_OLLAMA_TESTS=1 to enable the local Ollama probe",
+        os.getenv("DIG_RUN_REAL_MODEL_TESTS") != "1",
+        reason="set DIG_RUN_REAL_MODEL_TESTS=1 to enable the real-model probe",
     ),
 ]
 
 
 @pytest.mark.asyncio
-async def test_default_ollama_diagnosis_uses_real_m3_tools_and_strict_output() -> None:
+async def test_default_model_diagnosis_uses_real_m3_tools_and_strict_output() -> None:
     lab = IncidentLab(Settings(_env_file=None), PROJECT_ROOT)
     lab.reset(CASE_ID)
     try:
@@ -35,7 +35,7 @@ async def test_default_ollama_diagnosis_uses_real_m3_tools_and_strict_output() -
         result = await runner.diagnose(CASE_ID)
 
         assert result.metrics.provider == "openai-compatible"
-        assert result.metrics.model == "qwen3.5:9b"
+        assert result.metrics.model == "mimo-v2.5"
         assert result.metrics.successful_tool_calls >= 1
         assert result.metrics.model_requests <= 8
         assert result.metrics.tool_call_attempts <= 8

@@ -37,7 +37,7 @@ addopts = "--import-mode=importlib"
 markers = [
   "integration: requires Docker and PostgreSQL",
   "e2e: runs repeated real PostgreSQL and dbt workflows",
-  "ollama: requires explicitly enabled local Ollama and qwen3.5:9b",
+  "real_model: requires explicit opt-in for the configured OpenAI-compatible model",
 ]
 
 [tool.ruff]
