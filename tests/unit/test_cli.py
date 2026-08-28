@@ -9,6 +9,13 @@ from typer.testing import CliRunner
 import data_incident_gym.cli as cli
 from data_incident_gym.baseline import BaselineError, make_baseline_summary
 from data_incident_gym.diagnosis import Diagnosis, DiagnosisMetrics, DiagnosisRunResult
+from data_incident_gym.evaluation import (
+    EvaluationCheck,
+    EvaluationCheckCode,
+    EvaluationResult,
+    EvaluationStatus,
+)
+from data_incident_gym.evaluation_runner import EvaluationAttemptResult
 from data_incident_gym.incidents import IncidentCaseError
 from data_incident_gym.lab import InvalidIncidentState
 from data_incident_gym.run_context import ActiveRun, RunContextError
@@ -398,3 +405,108 @@ def test_diagnose_preflight_and_provider_errors_are_redacted(monkeypatch) -> Non
     assert "C:\\secret\\trace.log" not in provider.stdout + provider.stderr
     assert "provider raw exception" not in provider.stdout + provider.stderr
     assert "Traceback" not in provider.stdout + provider.stderr
+
+
+def _evaluation(status: EvaluationStatus) -> EvaluationResult:
+    failed_code = (
+        EvaluationCheckCode.DIAGNOSIS_CONFIRMED
+        if status is EvaluationStatus.FAILED
+        else None
+    )
+    checks = tuple(
+        EvaluationCheck(
+            code=code,
+            passed=code is not failed_code,
+            expected=(),
+            actual=(),
+            reason_code=f"{code.value}_{'FAILED' if code is failed_code else 'PASSED'}",
+        )
+        for code in EvaluationCheckCode
+    )
+    return EvaluationResult(
+        schema_version="m5.evaluation.v1",
+        incident_case_id="schema_rename_payment_amount",
+        run_id="a" * 32,
+        status=status,
+        checks=checks,
+        failed_check_codes=() if failed_code is None else (failed_code,),
+    )
+
+
+def _attempt(status: EvaluationStatus) -> EvaluationAttemptResult:
+    return EvaluationAttemptResult(
+        incident_case_id="schema_rename_payment_amount",
+        run_id="a" * 32,
+        status=status,
+        evaluation=_evaluation(status),
+        artifact_dir=Path("artifacts") / ("a" * 32),
+    )
+
+
+def test_eval_run_is_one_bounded_attempt(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeEvaluationRunner:
+        async def run(self, case_id: str) -> EvaluationAttemptResult:
+            calls.append(case_id)
+            return _attempt(EvaluationStatus.PASSED)
+
+    monkeypatch.setattr(cli, "create_evaluation_runner", lambda: FakeEvaluationRunner())
+    result = runner.invoke(cli.app, ["eval", "run", "schema_rename_payment_amount"])
+
+    assert result.exit_code == 0
+    assert calls == ["schema_rename_payment_amount"]
+    assert "PASSED" in result.stdout
+    assert "artifacts/" + ("a" * 32) in result.stdout
+
+
+def test_eval_run_failed_score_keeps_artifact_path_and_exits_nonzero(monkeypatch) -> None:
+    class FakeEvaluationRunner:
+        async def run(self, case_id: str) -> EvaluationAttemptResult:
+            return _attempt(EvaluationStatus.FAILED)
+
+    monkeypatch.setattr(cli, "create_evaluation_runner", lambda: FakeEvaluationRunner())
+    result = runner.invoke(cli.app, ["eval", "run", "schema_rename_payment_amount"])
+
+    assert result.exit_code == 1
+    assert "FAILED" in result.stdout
+    assert "artifacts" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+def test_eval_run_setup_error_is_fixed_and_redacted(monkeypatch) -> None:
+    def failing_factory():
+        raise RuntimeError("provider=raw TEST_REDACTED_VALUE C:\\secret\\settings.toml")
+
+    monkeypatch.setattr(cli, "create_evaluation_runner", failing_factory)
+    result = runner.invoke(cli.app, ["eval", "run", "schema_rename_payment_amount"])
+
+    assert result.exit_code == 1
+    assert "EVALUATION_SETUP_FAILED" in result.stderr
+    assert "TEST_REDACTED_VALUE" not in result.stdout + result.stderr
+    assert "C:\\secret\\settings.toml" not in result.stdout + result.stderr
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+def test_eval_run_has_one_case_argument_and_rejects_unscoped_options() -> None:
+    help_result = runner.invoke(cli.app, ["eval", "run", "--help"])
+    assert help_result.exit_code == 0
+    assert "case_id" in _plain_help(help_result.stdout)
+    for forbidden in (
+        "--repeat",
+        "--runs",
+        "--run-id",
+        "--model",
+        "--base-url",
+        "--prompt",
+        "--path",
+        "--sql",
+        "--table",
+        "--repair",
+    ):
+        assert forbidden not in help_result.stdout
+        result = runner.invoke(
+            cli.app,
+            ["eval", "run", "schema_rename_payment_amount", forbidden, "value"],
+        )
+        assert result.exit_code == 2

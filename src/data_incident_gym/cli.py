@@ -9,6 +9,8 @@ from data_incident_gym.config import Settings
 from data_incident_gym.diagnosis import DiagnosisStatus
 from data_incident_gym.diagnostic_agent import DiagnosisRunner
 from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.evaluation import EvaluationStatus
+from data_incident_gym.evaluation_runner import EvaluationRunner, EvaluationWorkflowError
 from data_incident_gym.incidents import IncidentCaseError
 from data_incident_gym.lab import IncidentLab, LabError
 from data_incident_gym.run_context import RunContextError, resolve_active_run
@@ -16,8 +18,10 @@ from data_incident_gym.run_context import RunContextError, resolve_active_run
 app = typer.Typer(help="可复现的数据事故诊断实验场。")
 pipeline_app = typer.Typer(help="构建并检查 dbt 数据管道。")
 lab_app = typer.Typer(help="重置、注入并复现固定数据故障。")
+eval_app = typer.Typer(help="运行确定性评测与报告闭环。")
 app.add_typer(pipeline_app, name="pipeline")
 app.add_typer(lab_app, name="lab")
+app.add_typer(eval_app, name="eval")
 
 
 def create_baseline_builder() -> BaselineBuilder:
@@ -30,6 +34,10 @@ def create_incident_lab() -> IncidentLab:
 
 def create_diagnosis_runner(run_id: str) -> DiagnosisRunner:
     return DiagnosisRunner.for_run(run_id, DiagnosticSettings())
+
+
+def create_evaluation_runner() -> EvaluationRunner:
+    return EvaluationRunner.for_project(Settings(), DiagnosticSettings())
 
 
 def _exit_lab_error(error: LabError | IncidentCaseError) -> None:
@@ -88,6 +96,26 @@ def diagnose(
     if result.diagnosis.status == DiagnosisStatus.INSUFFICIENT_EVIDENCE:
         raise typer.Exit(code=2)
     if result.diagnosis.status == DiagnosisStatus.MODEL_ERROR:
+        raise typer.Exit(code=1)
+
+
+@eval_app.command("run")
+def eval_run(case_id: str) -> None:
+    """对一个固定案例执行一次独立的完整评测。"""
+    try:
+        result = asyncio.run(create_evaluation_runner().run(case_id))
+    except EvaluationWorkflowError as error:
+        typer.echo(f"评测运行失败 [{error.code}]。", err=True)
+        raise typer.Exit(code=1) from None
+    except Exception:
+        typer.echo("评测运行失败 [EVALUATION_SETUP_FAILED]。", err=True)
+        raise typer.Exit(code=1) from None
+
+    typer.echo("评测通过。" if result.status == EvaluationStatus.PASSED else "评测未通过。")
+    typer.echo(f"status: {result.status.value}")
+    typer.echo(f"run_id: {result.run_id}")
+    typer.echo(f"artifacts: artifacts/{result.run_id}")
+    if result.status != EvaluationStatus.PASSED:
         raise typer.Exit(code=1)
 
 
