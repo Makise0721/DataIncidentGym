@@ -135,6 +135,8 @@ P0 通过固定 Git submodule 复用下列 Apache-2.0 项目，并在本项目�
 
 管理平面与诊断平面必须使用不同的数据库权限和配置。Agent 工具不得获得管理连接串、Fault Injector 或 Shell 执行能力。
 
+`config/dbt/profiles.yml` 是管理 profile，仅供管理平面使用，包括 pipeline、IncidentLab/lab；`doctor` 和 `dbt debug` 必须使用独立的 `config/dbt/diagnostic/profiles.yml`；该诊断 profile 不含管理凭据、默认凭据或管理环境变量回退，只引用由 `DiagnosticSettings` 受控注入的 `DIG_DIAGNOSTIC_POSTGRES_*` 变量。缺少诊断配置时必须固定返回不可用，不得回退到管理 profile。
+
 ## 7. P0 模块与闭环要求
 
 前一模块未通过验收时，不开始依赖它的后一模块。
@@ -428,14 +430,20 @@ P0 的单个案例只证明工程闭环。不得从单个案例宣称系统具�
 artifacts/<run_id>/
 ├── metadata.json
 ├── trace.jsonl
+├── evidence.json
 ├── diagnosis.json
+├── evaluation.json
 └── report.md
 ```
 
 - `metadata.json`：案例、代码版本、模型、配置摘要、开始与结束时间。
 - `trace.jsonl`：工具调用、参数、工具结果引用、耗时和错误。
+- `evidence.json`：本次诊断实际取得的完整 `EvidenceRecord` 快照。
 - `diagnosis.json`：最终结构化输出。
+- `evaluation.json`：确定性评测器的逐项检查、失败原因码和总体判定。
 - `report.md`：由结构化输出模板化生成的中文报告。
+
+评测器必须只评分 Agent 结束时冻结的 `DiagnosisRunResult`、证据快照和轨迹，不得在恢复健康环境后重新查询数据库并混入新事实。凡已产生 `DiagnosisRunResult` 的诊断运行，无论评测通过、`INSUFFICIENT_EVIDENCE` 或 `MODEL_ERROR`，都必须保存全部六个文件并纳入统计。
 
 不得保存或展示模型隐藏推理。允许记录工具选择、工具参数、可验证结果、最终结论、token、耗时和重试信息。
 
@@ -560,7 +568,7 @@ P2 优先参考 Correlator Demo 与 OpenLineage 官方教程，不复制许可�
 - [ ] 确定性验证器拒绝错误根因、错误影响范围和不存在的证据。
 - [ ] TestModel 测试 100% 通过。
 - [ ] 真实模型 3 次中至少 2 次通过。
-- [ ] JSON、Markdown 和 JSONL 产物齐全。
+- [ ] `metadata.json`、`trace.jsonl`、`evidence.json`、`diagnosis.json`、`evaluation.json` 和 `report.md` 六个产物齐全。
 - [ ] 未保存隐藏推理，未发生 Agent 写操作或外部网络访问。
 - [ ] P0 结果未被误述为通用准确率结论。
 
