@@ -194,7 +194,15 @@ class DoctorRunner:
     def _process_environment() -> dict[str, str]:
         return {
             key: value
-            for key in ("PATH", "PATHEXT", "SystemRoot", "WINDIR", "TEMP", "TMP")
+            for key in (
+                "PATH",
+                "PATHEXT",
+                "SystemRoot",
+                "WINDIR",
+                "TEMP",
+                "TMP",
+                "ProgramFiles",
+            )
             if (value := os.environ.get(key)) is not None
         }
 

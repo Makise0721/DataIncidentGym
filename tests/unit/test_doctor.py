@@ -217,6 +217,20 @@ def doctor(doctor_factory) -> DoctorDeps:
     return doctor_factory()
 
 
+def test_process_environment_includes_programfiles_only_when_host_provides_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+
+    environment = DoctorRunner._process_environment()
+
+    assert environment["ProgramFiles"] == r"C:\Program Files"
+
+    monkeypatch.delenv("ProgramFiles")
+
+    assert "ProgramFiles" not in DoctorRunner._process_environment()
+
+
 @pytest.mark.asyncio
 async def test_doctor_passes_only_when_every_read_only_check_passes(doctor: DoctorDeps) -> None:
     before = sorted(
