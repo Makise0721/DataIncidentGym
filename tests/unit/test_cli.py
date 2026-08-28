@@ -259,7 +259,7 @@ def _diagnosis_result(status: str) -> DiagnosisRunResult:
         trace=(),
         metrics=DiagnosisMetrics(
             provider="openai-compatible",
-            model="gemma4:e4b",
+            model="qwen3.5:9b",
             model_requests=1,
             input_tokens=0,
             output_tokens=0,

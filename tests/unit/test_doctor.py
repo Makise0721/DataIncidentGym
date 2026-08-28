@@ -26,7 +26,7 @@ from data_incident_gym.doctor import (
 
 PROJECT_MARKER = "project-marker.txt"
 RAW_ERROR = "password=TEST_REDACTED_VALUE C:\\secret\\doctor.log"
-MODEL_NAME = "gemma4:e4b"
+MODEL_NAME = "qwen3.5:9b"
 
 
 class FakeCommand:

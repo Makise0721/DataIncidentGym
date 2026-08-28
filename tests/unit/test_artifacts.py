@@ -246,7 +246,7 @@ def _artifact_run(
         trace=trace,
         metrics=DiagnosisMetrics(
             provider="openai-compatible",
-            model="gemma4:e4b",
+            model="qwen3.5:9b",
             model_requests=4,
             input_tokens=100,
             output_tokens=50,
@@ -362,7 +362,7 @@ def test_metadata_contains_revision_dirty_flag_safe_config_prompt_hash_and_metri
     assert metadata.code_revision == "1" * 40
     assert metadata.workspace_dirty is False
     assert metadata.provider == "openai-compatible"
-    assert metadata.model == "gemma4:e4b"
+    assert metadata.model == "qwen3.5:9b"
     assert metadata.model_base_url == MODEL_BASE_URL
     assert metadata.prompt_version == "m5.diagnosis.v1"
     assert len(metadata.prompt_sha256) == 64

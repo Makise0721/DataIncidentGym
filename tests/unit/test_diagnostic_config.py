@@ -33,7 +33,7 @@ def test_diagnostic_model_defaults_are_local_and_secret() -> None:
     settings = DiagnosticSettings(_env_file=None)
 
     assert settings.model_base_url == "http://127.0.0.1:11434/v1"
-    assert settings.model_name == "gemma4:e4b"
+    assert settings.model_name == "qwen3.5:9b"
     assert isinstance(settings.model_api_key, SecretStr)
     assert settings.model_api_key.get_secret_value() == "ollama-local"
 

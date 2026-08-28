@@ -32,7 +32,7 @@ DOCTOR_RECOMMENDATIONS_ZH = {
     "CHECK_POSTGRES_SETTINGS": "建议检查独立 diagnostic PostgreSQL 连接配置。",
     "CHECK_DBT_PROFILE": "建议检查独立 diagnostic dbt profile 与连接。",
     "START_OLLAMA": "建议启动 Ollama 并确认 OpenAI-compatible endpoint 可访问。",
-    "PULL_GEMMA4_E4B": "建议拉取并暴露 gemma4:e4b 模型。",
+    "IMPORT_QWEN3_5_9B": "建议导入并暴露 qwen3.5:9b 模型。",
     "CHECK_MODEL_TOOL_CALLING": "建议检查模型的工具调用和结构化输出能力。",
 }
 

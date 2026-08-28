@@ -26,7 +26,7 @@ class DiagnosticSettings(BaseSettings):
     postgres_user: Literal["dig_reader"] = "dig_reader"
     postgres_password: SecretStr = SecretStr("dig_reader")
     model_base_url: StrictStr = "http://127.0.0.1:11434/v1"
-    model_name: StrictStr = "gemma4:e4b"
+    model_name: StrictStr = "qwen3.5:9b"
     model_api_key: SecretStr = SecretStr("ollama-local")
 
     @field_validator("model_base_url")
