@@ -426,7 +426,6 @@ class DiagnosisRunner:
                     error_code="TOOL_CALL_LIMIT",
                     elapsed_ms=_elapsed_ms(tool_started_at),
                 )
-                state.accepted_tool_attempts.append(fingerprint)
                 raise _ToolCallLimitReached
             state.accepted_tool_attempts.append(fingerprint)
             if fingerprint in state.fingerprints:

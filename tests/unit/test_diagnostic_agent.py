@@ -512,7 +512,7 @@ async def test_ninth_tool_request_is_rejected_without_entering_m3(tmp_path: Path
     assert result.diagnosis.summary == "MODEL_REQUEST_LIMIT"
     assert model_requests == 2
     assert len(tools.calls) == 8
-    assert result.metrics.tool_call_attempts == 9
+    assert result.metrics.tool_call_attempts == 8
     assert result.metrics.successful_tool_calls == 0
     assert result.trace[-1].error_code == "TOOL_CALL_LIMIT"
 

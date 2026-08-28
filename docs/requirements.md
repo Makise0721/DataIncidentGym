@@ -59,7 +59,7 @@ P0 的唯一目标用户是：
 4. 使用确定性验证器判断根因、影响范围和证据是否正确。
 5. 同时支持无需模型的自动测试和 Ollama 本地模型真实演示。
 6. 在 Windows 11 / PowerShell 7 本地可运行，并在 Ubuntu CI 验证第二平台。
-7. 在准备好依赖、镜像和模型后，运行时完全离线。
+7. 在准备好依赖和镜像后，除当前配置的远程模型请求外，环境重置、构建、证据读取、controller/evaluator、产物生成和恢复流程可离线运行。
 
 ### 3.2 P0 非目标
 
@@ -477,7 +477,7 @@ artifacts/<run_id>/
 
 ### 15.2 离线运行
 
-依赖、Docker 镜像和 Ollama 模型准备完成后，P0 必须在无互联网环境中完成重置、构建、诊断和评测。运行时不发送遥测、日志、Schema 或输出到外部服务。
+依赖和 Docker 镜像准备完成后，环境重置、构建、四个只读证据工具、controller materialization、evaluator、artifact/report 生成及恢复流程必须可在无互联网环境中完成。当前批准的 M5.2 诊断默认使用远程 OpenAI-compatible endpoint `https://api.xiaomimimo.com/v1` 和 `mimo-v2.5`，因此诊断及包含诊断的 `eval run` 明确需要网络和 `MIMO_API_KEY`；该模型请求不属于离线保证范围。除当前配置的模型 endpoint 所需的诊断请求（包含模型调查所需的 prompt 与工具结果）外，不发送遥测或其他数据到外部服务。
 
 ### 15.3 跨平台
 
