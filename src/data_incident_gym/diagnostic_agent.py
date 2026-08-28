@@ -10,7 +10,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
 from pydantic_ai.exceptions import ToolFailed, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.models import Model
@@ -19,11 +19,16 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import (
+    CaseId,
+    Confidence,
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
     DiagnosisStatus,
     EvidenceGateTraceEvent,
+    NonBlankStr,
+    RootCauseCode,
+    RunId,
     ToolTraceEvent,
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
@@ -32,6 +37,7 @@ from data_incident_gym.evidence import (
     DbtNodeErrorFact,
     EvidenceRecord,
     EvidenceToolError,
+    RelationSchemaFact,
 )
 from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import resolve_run_context
@@ -42,36 +48,30 @@ verified run context in the user request. Follow this order unless already satis
 1. Get run results. Use its exact failed node IDs for node-error and lineage calls.
 2. Get the node error for an exact failed node ID returned by run results.
 3. Get lineage for an exact node ID returned by run results or another lineage result.
-   Before returning CONFIRMED, get downstream lineage for the exact failed node ID. For each
-   downstream related model, copy only its verbatim name field into affected_assets; do not copy
-   its node_id. Include the exact failed node_id from node-error evidence together with every
-   downstream related model name.
+   Before returning CONFIRMED, get downstream lineage for the exact failed node ID.
 4. Get relation schema only for an exact unqualified relation name returned in structured
    lineage or schema evidence. A relation name is not a dbt node ID, SQL, a guessed name,
    or a schema-qualified string.
 
-Never invent node IDs, relation names, column names, or evidence IDs. Every tool argument
+Never invent node IDs, relation names, or column names. Every tool argument
 except the verified run ID must come from a previous tool's structured result. Do not repeat
-an identical tool call; one tool retry is allowed when a tool returns an error code. Cite
-only evidence IDs returned by tools. Return the required Diagnosis object. If the evidence
-does not support a conclusion, return INSUFFICIENT_EVIDENCE without guessing.
+an identical tool call; one tool retry is allowed when a tool returns an error code. If the
+evidence does not support a conclusion, return INSUFFICIENT_EVIDENCE without guessing.
+
+Return only the required structured diagnosis decision. The controller derives final
+affected_assets and evidence_ids deterministically from current-run typed evidence.
+Do not provide, guess, or rewrite those fields.
 
 Use the versioned root-cause ontology below only when compatible evidence supports it:
 - SOURCE_SCHEMA_COLUMN_RENAMED: a source relation column was renamed while a dbt consumer
   still references the former column.
 
 Finalization discipline:
-- Cite only verbatim evidence IDs returned by tools; never rewrite, concatenate, or guess an ID.
-- Set affected_assets only from node IDs or model names that appear verbatim in node-error or
-  downstream lineage evidence. Copy them exactly; do not use relation names, schema-qualified
-  names, or invented names.
-- In a CONFIRMED Diagnosis, cite the node-error, relation-schema, and downstream-lineage evidence
-  that support the conclusion. Do not cite upstream lineage in a CONFIRMED diagnosis.
-- Once the required evidence, including downstream lineage used to establish affected_assets,
-  is collected, immediately return the Diagnosis. Do not add same-type or exploratory queries.
+- Once the required evidence, including direct-failure downstream lineage, is collected,
+  immediately return the decision. Do not add same-type or exploratory queries.
 """.strip()
 
-SYSTEM_PROMPT_VERSION = "m5.diagnosis.v6"
+SYSTEM_PROMPT_VERSION = "m5.diagnosis.v7"
 SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 _MAX_TOOL_ATTEMPTS = 8
 _MODEL_ERROR_REASONS = {
@@ -81,6 +81,37 @@ _MODEL_ERROR_REASONS = {
     "MODEL_PROTOCOL_ERROR",
     "MODEL_RUNTIME_ERROR",
 }
+
+
+class _DiagnosisDecision(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: DiagnosisStatus
+    incident_case_id: CaseId
+    run_id: RunId
+    root_cause_code: RootCauseCode | None
+    summary: NonBlankStr
+    recommended_actions: tuple[NonBlankStr, ...]
+    confidence: Confidence
+
+    @model_validator(mode="after")
+    def validate_contract(self) -> _DiagnosisDecision:
+        if len(self.recommended_actions) != len(set(self.recommended_actions)):
+            raise ValueError("recommended_actions must not contain duplicates")
+
+        if self.status == DiagnosisStatus.CONFIRMED:
+            if self.root_cause_code is None:
+                raise ValueError("CONFIRMED requires root_cause_code")
+            if not self.recommended_actions:
+                raise ValueError("CONFIRMED requires recommended_actions")
+        elif self.root_cause_code is not None:
+            raise ValueError("non-confirmed decision cannot contain an unproven root cause")
+
+        if self.status == DiagnosisStatus.MODEL_ERROR and self.summary not in _MODEL_ERROR_REASONS:
+            raise ValueError("MODEL_ERROR summary must be a fixed safe reason code")
+        return self
+
+
 _PATH_PATTERN = re.compile(r"(?i)(?:[a-z]:[\\/]|\\\\|/)[^\r\n,;:()\[\]]+")
 _SQL_PATTERN = re.compile(
     r"(?is)\b(?:select|insert|update|delete|alter|create|drop|grant|revoke)\b.*"
@@ -183,7 +214,6 @@ def _safe_diagnosis(
     state: _RunState,
     status: DiagnosisStatus,
     summary: str,
-    evidence_ids: tuple[str, ...] = (),
     confidence: float = 0.0,
 ) -> Diagnosis:
     return Diagnosis(
@@ -193,7 +223,7 @@ def _safe_diagnosis(
         root_cause_code=None,
         summary=summary,
         affected_assets=(),
-        evidence_ids=evidence_ids,
+        evidence_ids=(),
         recommended_actions=("Collect additional evidence before making a change.",),
         confidence=confidence,
     )
@@ -205,16 +235,133 @@ def _model_error(state: _RunState, reason: str) -> Diagnosis:
     return _safe_diagnosis(state=state, status=DiagnosisStatus.MODEL_ERROR, summary=reason)
 
 
-def _asset_supported(record: EvidenceRecord, asset: str) -> bool:
-    content = record.content
-    if isinstance(content, DbtNodeErrorFact):
-        return content.node_id == asset or content.node_id.rsplit(".", 1)[-1] == asset
-    if isinstance(content, DbtLineageFact) and content.direction == "downstream":
-        return any(
-            node.name == asset
-            for node in content.related_nodes
+def _materialize_diagnosis(state: _RunState, decision: _DiagnosisDecision) -> Diagnosis:
+    if decision.status == DiagnosisStatus.MODEL_ERROR:
+        state.trace.append(
+            EvidenceGateTraceEvent(
+                event_type="EVIDENCE_GATE", reason_code="MODEL_DECLINED", accepted=True
+            )
         )
-    return False
+        return _model_error(state, "MODEL_DECLINED")
+
+    if decision.status == DiagnosisStatus.INSUFFICIENT_EVIDENCE:
+        state.trace.append(
+            EvidenceGateTraceEvent(
+                event_type="EVIDENCE_GATE",
+                reason_code="INSUFFICIENT_EVIDENCE",
+                accepted=True,
+            )
+        )
+        return Diagnosis(
+            status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+            incident_case_id=decision.incident_case_id,
+            run_id=decision.run_id,
+            root_cause_code=None,
+            summary=decision.summary,
+            affected_assets=(),
+            evidence_ids=(),
+            recommended_actions=decision.recommended_actions,
+            confidence=decision.confidence,
+        )
+
+    node_errors = [
+        record
+        for record in state.evidence_records
+        if isinstance(record.content, DbtNodeErrorFact)
+    ]
+    schemas = [
+        record
+        for record in state.evidence_records
+        if isinstance(record.content, RelationSchemaFact)
+    ]
+    downstream = [
+        record
+        for record in state.evidence_records
+        if isinstance(record.content, DbtLineageFact)
+        and record.content.direction == "downstream"
+    ]
+
+    if not node_errors or not schemas or not downstream:
+        state.trace.append(
+            EvidenceGateTraceEvent(
+                event_type="EVIDENCE_GATE",
+                reason_code="EVIDENCE_TYPES_INCOMPLETE",
+                accepted=False,
+            )
+        )
+        return _safe_diagnosis(
+            state=state,
+            status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+            summary="EVIDENCE_TYPES_INCOMPLETE",
+            confidence=min(decision.confidence, 0.5),
+        )
+
+    if any(len(records) != 1 for records in (node_errors, schemas, downstream)):
+        state.trace.append(
+            EvidenceGateTraceEvent(
+                event_type="EVIDENCE_GATE",
+                reason_code="EVIDENCE_SHAPE_AMBIGUOUS",
+                accepted=False,
+            )
+        )
+        return _safe_diagnosis(
+            state=state,
+            status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+            summary="EVIDENCE_SHAPE_AMBIGUOUS",
+            confidence=min(decision.confidence, 0.5),
+        )
+
+    node_error = node_errors[0]
+    schema = schemas[0]
+    downstream_lineage = downstream[0]
+    if downstream_lineage.content.node_id != node_error.content.node_id:
+        state.trace.append(
+            EvidenceGateTraceEvent(
+                event_type="EVIDENCE_GATE",
+                reason_code="EVIDENCE_SHAPE_AMBIGUOUS",
+                accepted=False,
+            )
+        )
+        return _safe_diagnosis(
+            state=state,
+            status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+            summary="EVIDENCE_SHAPE_AMBIGUOUS",
+            confidence=min(decision.confidence, 0.5),
+        )
+
+    affected_assets = tuple(
+        dict.fromkeys(
+            (
+                node_error.content.node_id,
+                *(
+                    node.name
+                    for node in downstream_lineage.content.related_nodes
+                    if node.resource_type == "model"
+                ),
+            )
+        )
+    )
+    evidence_ids = (
+        node_error.evidence_id,
+        schema.evidence_id,
+        downstream_lineage.evidence_id,
+    )
+    state.trace.append(
+        EvidenceGateTraceEvent(
+            event_type="EVIDENCE_GATE", reason_code="CONFIRMED", accepted=True
+        )
+    )
+    return Diagnosis(
+        status=DiagnosisStatus.CONFIRMED,
+        incident_case_id=decision.incident_case_id,
+        run_id=decision.run_id,
+        root_cause_code=decision.root_cause_code,
+        summary=decision.summary,
+        affected_assets=affected_assets,
+        evidence_ids=evidence_ids,
+        recommended_actions=decision.recommended_actions,
+        confidence=decision.confidence,
+    )
 
 
 class DiagnosisRunner:
@@ -252,11 +399,11 @@ class DiagnosisRunner:
             tools = EvidenceTools.for_run(run_id, settings, project_root=project_root)
         return cls(run_id, settings, project_root, model, tools)
 
-    def _agent(self) -> Agent[_RunState, Diagnosis]:
+    def _agent(self) -> Agent[_RunState, _DiagnosisDecision]:
         agent = Agent(
             self._model,
             deps_type=_RunState,
-            output_type=Diagnosis,
+            output_type=_DiagnosisDecision,
             system_prompt=SYSTEM_PROMPT,
         )
 
@@ -415,7 +562,9 @@ class DiagnosisRunner:
             )
 
         @agent.output_validator
-        def validate_output(ctx: RunContext[_RunState], output: Diagnosis) -> Diagnosis:
+        def validate_output(
+            ctx: RunContext[_RunState], output: _DiagnosisDecision
+        ) -> _DiagnosisDecision:
             state = ctx.deps
             if output.run_id != state.run_id or output.incident_case_id != state.incident_case_id:
                 state.trace.append(
@@ -426,75 +575,6 @@ class DiagnosisRunner:
                     )
                 )
                 raise ModelRetry("DIAGNOSIS_SCOPE_MISMATCH")
-            known = {record.evidence_id: record for record in state.evidence_records}
-            if any(evidence_id not in known for evidence_id in output.evidence_ids):
-                state.trace.append(
-                    EvidenceGateTraceEvent(
-                        event_type="EVIDENCE_GATE",
-                        reason_code="UNKNOWN_EVIDENCE_ID",
-                        accepted=False,
-                    )
-                )
-                raise ModelRetry("UNKNOWN_EVIDENCE_ID")
-            if output.status == DiagnosisStatus.MODEL_ERROR:
-                state.trace.append(
-                    EvidenceGateTraceEvent(
-                        event_type="EVIDENCE_GATE", reason_code="MODEL_DECLINED", accepted=True
-                    )
-                )
-                return _model_error(state, "MODEL_DECLINED")
-            if output.status == DiagnosisStatus.INSUFFICIENT_EVIDENCE:
-                state.trace.append(
-                    EvidenceGateTraceEvent(
-                        event_type="EVIDENCE_GATE",
-                        reason_code="INSUFFICIENT_EVIDENCE",
-                        accepted=True,
-                    )
-                )
-                return output
-            cited = tuple(known[evidence_id] for evidence_id in output.evidence_ids)
-            types = {record.evidence_type.value for record in cited}
-            required = {"DBT_NODE_ERROR", "RELATION_SCHEMA", "DBT_LINEAGE"}
-            if not required.issubset(types):
-                state.trace.append(
-                    EvidenceGateTraceEvent(
-                        event_type="EVIDENCE_GATE",
-                        reason_code="EVIDENCE_TYPES_INCOMPLETE",
-                        accepted=False,
-                    )
-                )
-                return _safe_diagnosis(
-                    state=state,
-                    status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
-                    summary="EVIDENCE_TYPES_INCOMPLETE",
-                    evidence_ids=output.evidence_ids,
-                    confidence=min(output.confidence, 0.5),
-                )
-            unsupported = [
-                asset
-                for asset in output.affected_assets
-                if not any(_asset_supported(record, asset) for record in cited)
-            ]
-            if unsupported:
-                state.trace.append(
-                    EvidenceGateTraceEvent(
-                        event_type="EVIDENCE_GATE",
-                        reason_code="AFFECTED_ASSET_UNSUPPORTED",
-                        accepted=False,
-                    )
-                )
-                return _safe_diagnosis(
-                    state=state,
-                    status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
-                    summary="AFFECTED_ASSET_UNSUPPORTED",
-                    evidence_ids=output.evidence_ids,
-                    confidence=min(output.confidence, 0.5),
-                )
-            state.trace.append(
-                EvidenceGateTraceEvent(
-                    event_type="EVIDENCE_GATE", reason_code="CONFIRMED", accepted=True
-                )
-            )
             return output
 
         return agent
@@ -539,7 +619,8 @@ class DiagnosisRunner:
                         usage_limits=UsageLimits(request_limit=8, tool_calls_limit=8),
                         retries={"tools": 1, "output": 2},
                     )
-            return self._result(state, result.output)
+            diagnosis = _materialize_diagnosis(state, result.output)
+            return self._result(state, diagnosis)
         except _ToolCallLimitReached:
             return self._result(state, _model_error(state, "MODEL_REQUEST_LIMIT"))
         except TimeoutError:

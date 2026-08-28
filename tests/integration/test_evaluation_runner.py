@@ -19,7 +19,7 @@ from data_incident_gym.evaluation import (
     EvaluationStatus,
 )
 from data_incident_gym.evaluation_runner import EvaluationRunner
-from data_incident_gym.evidence import EvidenceRecord, EvidenceType
+from data_incident_gym.evidence import EvidenceRecord
 from data_incident_gym.incidents import CASE_ID, load_ground_truth
 from data_incident_gym.lab import IncidentLab
 
@@ -109,18 +109,6 @@ def _scripted_diagnosis(
             ]
         )
 
-    cited_records = tuple(
-        record
-        for record in node_errors + schemas + downstream
-        if record.evidence_type
-        in {EvidenceType.DBT_NODE_ERROR, EvidenceType.RELATION_SCHEMA, EvidenceType.DBT_LINEAGE}
-    )
-    affected_assets = (node_errors[-1].content.node_id.rsplit(".", 1)[-1],) + tuple(
-        node.name
-        for record in downstream
-        for node in record.content.related_nodes
-        if node.resource_type == "model"
-    )
     return ModelResponse(
         parts=[
             ToolCallPart(
@@ -131,8 +119,6 @@ def _scripted_diagnosis(
                     "run_id": node_errors[-1].run_id,
                     "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
                     "summary": "The collected evidence confirms the source schema change.",
-                    "affected_assets": affected_assets,
-                    "evidence_ids": tuple(record.evidence_id for record in cited_records),
                     "recommended_actions": ("Restore the source contract before the next build.",),
                     "confidence": 0.9,
                 },

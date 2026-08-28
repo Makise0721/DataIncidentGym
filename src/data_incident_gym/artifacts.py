@@ -133,7 +133,7 @@ class RunMetadata(BaseModel):
     model: StrictStr
     model_base_url: StrictStr
     budget: BudgetSummary
-    prompt_version: Literal["m5.diagnosis.v6"]
+    prompt_version: Literal["m5.diagnosis.v7"]
     prompt_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
     started_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]
     finished_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]

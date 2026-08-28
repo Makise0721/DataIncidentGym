@@ -103,24 +103,8 @@ def _scripted_diagnosis(
             ]
         )
 
-    all_records = run_results + node_errors + schemas + upstream + downstream
     schema_fact = schemas[-1].content
     root_cause_code = f"EVIDENCE_{schema_fact.relation_name.upper()}_SCHEMA_MISMATCH"
-    evidence_ids = tuple(
-        record.evidence_id
-        for record in all_records
-        if record.evidence_type in {
-            EvidenceType.DBT_NODE_ERROR,
-            EvidenceType.RELATION_SCHEMA,
-            EvidenceType.DBT_LINEAGE,
-        }
-    )
-    node_name = node_errors[-1].content.node_id.rsplit(".", 1)[-1]
-    affected_assets = (node_name,) + tuple(
-        node.name
-        for record in downstream
-        for node in record.content.related_nodes
-    )
     return ModelResponse(
         parts=[
             ToolCallPart(
@@ -131,8 +115,6 @@ def _scripted_diagnosis(
                     "run_id": node_errors[-1].run_id,
                     "root_cause_code": root_cause_code,
                     "summary": "The collected evidence confirms the incident.",
-                    "affected_assets": affected_assets,
-                    "evidence_ids": evidence_ids,
                     "recommended_actions": ("Repair the upstream schema contract.",),
                     "confidence": 0.9,
                 },
@@ -162,18 +144,48 @@ async def test_real_m2_run_and_m3_tools_drive_confirmed_diagnosis() -> None:
         assert result.diagnosis.status == DiagnosisStatus.CONFIRMED
         inventory = {record.evidence_id: record for record in result.evidence_records}
         cited = tuple(inventory[evidence_id] for evidence_id in result.diagnosis.evidence_ids)
-        assert {record.evidence_type for record in cited} >= {
-            EvidenceType.DBT_NODE_ERROR,
-            EvidenceType.RELATION_SCHEMA,
-            EvidenceType.DBT_LINEAGE,
-        }
-        assert result.diagnosis.evidence_ids
-        assert set(result.diagnosis.evidence_ids) <= set(inventory)
+        node_error = next(
+            record
+            for record in inventory.values()
+            if record.evidence_type == EvidenceType.DBT_NODE_ERROR
+        )
         schema_record = next(
             record
             for record in inventory.values()
             if record.evidence_type == EvidenceType.RELATION_SCHEMA
         )
+        downstream_record = next(
+            record
+            for record in inventory.values()
+            if record.evidence_type == EvidenceType.DBT_LINEAGE
+            and record.content.direction == "downstream"
+        )
+        upstream_record = next(
+            record
+            for record in inventory.values()
+            if record.evidence_type == EvidenceType.DBT_LINEAGE
+            and record.content.direction == "upstream"
+        )
+        assert result.diagnosis.affected_assets == (
+            node_error.content.node_id,
+            *(
+                node.name
+                for node in downstream_record.content.related_nodes
+                if node.resource_type == "model"
+            ),
+        )
+        assert result.diagnosis.evidence_ids == (
+            node_error.evidence_id,
+            schema_record.evidence_id,
+            downstream_record.evidence_id,
+        )
+        assert upstream_record.evidence_id not in result.diagnosis.evidence_ids
+        assert {record.evidence_type for record in cited} == {
+            EvidenceType.DBT_NODE_ERROR,
+            EvidenceType.RELATION_SCHEMA,
+            EvidenceType.DBT_LINEAGE,
+        }
+        assert set(result.diagnosis.evidence_ids) <= set(inventory)
         assert result.diagnosis.root_cause_code == (
             f"EVIDENCE_{schema_record.content.relation_name.upper()}_SCHEMA_MISMATCH"
         )

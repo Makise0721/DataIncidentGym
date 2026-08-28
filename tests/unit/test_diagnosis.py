@@ -14,10 +14,25 @@ from data_incident_gym.diagnostic_agent import (
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_SHA256,
     SYSTEM_PROMPT_VERSION,
+    _DiagnosisDecision,
 )
 
 RUN_ID = "0123456789abcdef0123456789abcdef"
 EVIDENCE_ID = "ev_" + "a" * 64
+
+
+def decision_payload() -> dict[str, object]:
+    return {
+        "status": "CONFIRMED",
+        "incident_case_id": "schema_rename_payment_amount",
+        "run_id": RUN_ID,
+        "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
+        "summary": (
+            "The source column changed while a downstream model still references the old name."
+        ),
+        "recommended_actions": ("Restore the consumer reference or update the source contract.",),
+        "confidence": 0.9,
+    }
 
 
 def confirmed_payload() -> dict[str, object]:
@@ -112,6 +127,57 @@ def test_confidence_is_a_finite_float_between_zero_and_one(confidence: float) ->
     assert_invalid({"confidence": confidence})
 
 
+def test_diagnosis_decision_has_only_semantic_fields_and_is_frozen() -> None:
+    decision = _DiagnosisDecision.model_validate(decision_payload())
+
+    assert set(decision.model_dump()) == {
+        "status",
+        "incident_case_id",
+        "run_id",
+        "root_cause_code",
+        "summary",
+        "recommended_actions",
+        "confidence",
+    }
+    with pytest.raises(ValidationError):
+        decision.status = "MODEL_ERROR"  # type: ignore[misc]
+
+
+def test_diagnosis_decision_rejects_final_fields_and_duplicate_actions() -> None:
+    for field in ("affected_assets", "evidence_ids"):
+        payload = decision_payload()
+        payload[field] = ()
+        with pytest.raises(ValidationError):
+            _DiagnosisDecision.model_validate(payload)
+
+    payload = decision_payload()
+    payload["recommended_actions"] = ("same", "same")
+    with pytest.raises(ValidationError):
+        _DiagnosisDecision.model_validate(payload)
+
+
+def test_diagnosis_decision_enforces_status_claim_rules_and_safe_model_error() -> None:
+    payload = decision_payload()
+    payload["root_cause_code"] = None
+    with pytest.raises(ValidationError):
+        _DiagnosisDecision.model_validate(payload)
+
+    for status in ("INSUFFICIENT_EVIDENCE", "MODEL_ERROR"):
+        payload = decision_payload()
+        payload.update({"status": status, "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED"})
+        with pytest.raises(ValidationError):
+            _DiagnosisDecision.model_validate(payload)
+
+    payload = decision_payload()
+    payload.update({"status": "MODEL_ERROR", "root_cause_code": None})
+    payload["summary"] = "MODEL_RUNTIME_ERROR"
+    assert _DiagnosisDecision.model_validate(payload).summary == "MODEL_RUNTIME_ERROR"
+
+    payload["summary"] = "MODEL_RUNTIME_ERROR TEST_REDACTED_VALUE"
+    with pytest.raises(ValidationError):
+        _DiagnosisDecision.model_validate(payload)
+
+
 def test_diagnosis_is_frozen_and_run_result_has_exact_contract() -> None:
     diagnosis = Diagnosis.model_validate(confirmed_payload())
     with pytest.raises(ValidationError):
@@ -157,20 +223,20 @@ def test_tool_trace_event_requires_nonnegative_strict_elapsed_ms() -> None:
 
 
 def test_diagnosis_prompt_is_versioned_hashed_and_case_agnostic() -> None:
-    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v6"
+    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v7"
     assert hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest() == SYSTEM_PROMPT_SHA256
     assert "SOURCE_SCHEMA_COLUMN_RENAMED" in SYSTEM_PROMPT
     assert "source relation column was renamed" in SYSTEM_PROMPT
     assert "Every tool argument" in SYSTEM_PROMPT
     assert "exact unqualified relation name" in SYSTEM_PROMPT
     assert "one tool retry is allowed when a tool returns an error code" in SYSTEM_PROMPT
-    assert "verbatim evidence IDs returned by tools" in SYSTEM_PROMPT
-    assert "affected_assets only from node IDs or model names" in SYSTEM_PROMPT
+    assert "Return only the required structured diagnosis decision." in SYSTEM_PROMPT
+    assert "controller derives final" in SYSTEM_PROMPT
+    assert "Do not provide, guess, or rewrite those fields." in SYSTEM_PROMPT
     assert "downstream lineage for the exact failed node ID" in SYSTEM_PROMPT
-    assert "Include the exact failed node_id from node-error evidence" in SYSTEM_PROMPT
-    assert "copy only its verbatim name field" in SYSTEM_PROMPT
-    assert "Do not cite upstream lineage in a CONFIRMED diagnosis" in SYSTEM_PROMPT
-    assert "immediately return the Diagnosis" in SYSTEM_PROMPT
+    assert "immediately return the decision" in SYSTEM_PROMPT
+    assert "affected_assets only from node IDs or model names" not in SYSTEM_PROMPT
+    assert "verbatim evidence IDs returned by tools" not in SYSTEM_PROMPT
     for case_specific_value in (
         "schema_rename_payment_amount",
         "raw_payments",

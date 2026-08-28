@@ -30,7 +30,9 @@
 | Ground Truth 隔离 | Agent、prompt、工具与 M3 不接触 Ground Truth |
 | 三样本规则 | 精确三个独立样本、至少 2 次通过、失败保留且全部计入分母 |
 | 安全与恢复边界 | 秘密不进入数据流；类型化错误码；`EvaluationRunner` finally 恢复且最终状态必须 `HEALTHY` |
-| prompt | Task G 已获用户另行批准：仅升版为 `m5.diagnosis.v3`，追加通用收尾纪律；不改变工具、预算、评分、安全或 Ground Truth 隔离边界 |
+| prompt（历史） | Task G 已获用户另行批准：仅升版为 `m5.diagnosis.v3`，追加通用收尾纪律；不改变工具、预算、评分、安全或 Ground Truth 隔离边界 |
+| 当前 prompt 合同（M5.2 收尾，2026-08-28 用户批准） | 当前版本为 `m5.diagnosis.v7`；模型仅输出语义 decision，controller 仅依据当前 run 内类型化 EvidenceRecord 确定性生成最终 `affected_assets` 与 `evidence_ids`；不使用 Ground Truth；evaluator 保持独立 |
+| M5.2 收尾 controller 边界扩展（2026-08-28 用户批准） | 模型仅输出语义 decision；controller 仅依据当前 run 内类型化 EvidenceRecord 确定性生成最终 `affected_assets` 与 `evidence_ids`；不使用 Ground Truth；evaluator 保持独立 |
 | 依赖 | 不新增、不升级、不降级任何依赖 |
 
 ## 范围：三个小 Task，严格顺序执行

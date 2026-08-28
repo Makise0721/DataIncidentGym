@@ -344,6 +344,8 @@ uv run data-incident-gym eval run schema_rename_payment_amount
 
 历史记录：`gemma4:e4b` 与 `qwen3.5:9b` 均在 M5 阶段未能在冻结预算内稳定完成工具调用后的结构化输出；用户已于 2026-08-28 确认切换，本规则现适用于 `mimo-v2.5`。
 
+当前批准的 M5.2 Diagnosis 合同（`m5.diagnosis.v7`）：模型只输出语义 decision；controller 仅根据当前 run 内的类型化证据确定性生成最终 `affected_assets` 与 `evidence_ids`，不读取或使用 Ground Truth；evaluator 保持独立，不参与答案生成。
+
 ### 10.4 单次诊断预算
 
 ```text

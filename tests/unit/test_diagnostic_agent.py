@@ -79,15 +79,13 @@ class NarrowEvidenceTools:
         return ()
 
 
-def _diagnosis_payload() -> dict[str, object]:
+def _decision_payload() -> dict[str, object]:
     return {
         "status": "INSUFFICIENT_EVIDENCE",
         "incident_case_id": CASE_ID,
         "run_id": RUN_ID,
         "root_cause_code": None,
         "summary": "The synthetic evidence is insufficient for confirmation.",
-        "affected_assets": (),
-        "evidence_ids": (),
         "recommended_actions": ("Collect additional synthetic evidence.",),
         "confidence": 0.2,
     }
@@ -214,17 +212,13 @@ def _output_call(agent_info: AgentInfo, payload: dict[str, object]) -> ModelResp
     )
 
 
-def _confirmed_payload(
-    evidence_ids: tuple[str, ...], *, assets: tuple[str, ...] = ("stg_payments", "orders")
-) -> dict[str, object]:
+def _confirmed_payload() -> dict[str, object]:
     return {
         "status": "CONFIRMED",
         "incident_case_id": CASE_ID,
         "run_id": RUN_ID,
         "root_cause_code": "SYNTHETIC_ROOT_CAUSE",
         "summary": "Synthetic evidence supports this diagnosis.",
-        "affected_assets": assets,
-        "evidence_ids": evidence_ids,
         "recommended_actions": ("Collect additional synthetic evidence.",),
         "confidence": 0.8,
     }
@@ -249,6 +243,20 @@ def _tool_return_count(messages: list[ModelMessage]) -> int:
     )
 
 
+def _returned_records(
+    messages: list[ModelMessage], tool_name: str
+) -> tuple[EvidenceRecord, ...]:
+    returned: list[EvidenceRecord] = []
+    for message in messages:
+        for part in message.parts:
+            if isinstance(part, ToolReturnPart) and part.tool_name == tool_name:
+                assert part.outcome == "success"
+                records = part.content
+                assert isinstance(records, tuple)
+                returned.extend(records)
+    return tuple(returned)
+
+
 def _function_model_response(
     messages: list[ModelMessage],
     agent_info: AgentInfo,
@@ -259,7 +267,7 @@ def _function_model_response(
             parts=[
                 ToolCallPart(
                     output_tool.name,
-                    _diagnosis_payload(),
+                    _decision_payload(),
                     tool_call_id="synthetic_output",
                 )
             ]
@@ -298,7 +306,7 @@ async def test_runner_registers_exactly_the_four_m3_tools_and_returns_diagnosis(
     _write_metadata(tmp_path)
     registration_model = TestModel(
         call_tools=[],
-        custom_output_args=_diagnosis_payload(),
+        custom_output_args=_decision_payload(),
     )
     tools = NarrowEvidenceTools()
     registration_runner = DiagnosisRunner.for_run(
@@ -356,7 +364,7 @@ async def test_runner_registers_exactly_the_four_m3_tools_and_returns_diagnosis(
 
 
 def test_diagnostic_agent_exports_the_frozen_prompt_contract() -> None:
-    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v6"
+    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v7"
     assert SYSTEM_PROMPT_SHA256
 
 
@@ -380,7 +388,7 @@ async def test_exact_duplicate_call_is_blocked_before_second_m3_execution(tmp_pa
             parts=[
                 ToolCallPart(
                     agent_info.output_tools[0].name,
-                    _diagnosis_payload(),
+                    _decision_payload(),
                     tool_call_id="output",
                 )
             ]
@@ -444,7 +452,7 @@ async def test_different_arguments_are_not_false_positive_duplicates(tmp_path: P
                     ),
                 ]
             )
-        return _output_call(agent_info, _diagnosis_payload())
+        return _output_call(agent_info, _decision_payload())
 
     result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
 
@@ -544,7 +552,7 @@ async def test_output_validation_retries_exactly_twice_then_model_error(tmp_path
     def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
         nonlocal model_requests
         model_requests += 1
-        payload = _diagnosis_payload()
+        payload = _decision_payload()
         payload["run_id"] = "b" * 32
         return _output_call(agent_info, payload)
 
@@ -562,27 +570,25 @@ async def test_output_validation_retries_exactly_twice_then_model_error(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_unknown_evidence_id_retries_then_fails_closed(tmp_path: Path) -> None:
+async def test_model_decision_does_not_require_assets_or_evidence_ids(tmp_path: Path) -> None:
     model_requests = 0
 
     def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
         nonlocal model_requests
         model_requests += 1
-        payload = _diagnosis_payload()
-        payload["evidence_ids"] = ("ev_" + "b" * 64,)
-        return _output_call(agent_info, payload)
+        return _output_call(agent_info, _decision_payload())
 
     result = await _runner(
         tmp_path, FunctionModel(scripted), NarrowEvidenceTools()
     ).diagnose(CASE_ID)
 
-    assert model_requests == 3
-    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
-    assert all(
-        event.reason_code == "UNKNOWN_EVIDENCE_ID"
-        for event in result.trace
-        if event.event_type == "EVIDENCE_GATE"
-    )
+    assert model_requests == 1
+    assert result.diagnosis.status == "INSUFFICIENT_EVIDENCE"
+    assert result.diagnosis.affected_assets == ()
+    assert result.diagnosis.evidence_ids == ()
+    assert [
+        event.reason_code for event in result.trace if event.event_type == "EVIDENCE_GATE"
+    ] == ["INSUFFICIENT_EVIDENCE"]
 
 
 @pytest.mark.asyncio
@@ -645,7 +651,7 @@ async def test_evidence_tool_error_exposes_only_stable_code_to_model_and_trace(
                     )
                 ]
             )
-        return _output_call(agent_info, _diagnosis_payload())
+        return _output_call(agent_info, _decision_payload())
 
     result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
 
@@ -660,7 +666,7 @@ async def test_testmodel_tool_error_path_is_structured_and_safe(tmp_path: Path) 
     tools = _MappedEvidenceTools(
         {"get_dbt_run_results:unused": EvidenceToolError("synthetic tool failure")}
     )
-    model = TestModel(call_tools=["get_dbt_run_results"], custom_output_args=_diagnosis_payload())
+    model = TestModel(call_tools=["get_dbt_run_results"], custom_output_args=_decision_payload())
 
     result = await _runner(tmp_path, model, tools).diagnose(CASE_ID)
 
@@ -670,7 +676,7 @@ async def test_testmodel_tool_error_path_is_structured_and_safe(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_testmodel_invalid_output_uses_output_retry_budget(tmp_path: Path) -> None:
-    payload = _diagnosis_payload()
+    payload = _decision_payload()
     payload["run_id"] = "b" * 32
     model = TestModel(call_tools=[], custom_output_args=payload)
 
@@ -748,17 +754,19 @@ async def test_incomplete_evidence_types_downgrade_confirmed_to_insufficient(
                     ),
                 ]
             )
-        return _output_call(agent_info, _confirmed_payload((node.evidence_id, schema.evidence_id)))
+        return _output_call(agent_info, _confirmed_payload())
 
     result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
 
     assert result.diagnosis.status == "INSUFFICIENT_EVIDENCE"
     assert result.diagnosis.summary == "EVIDENCE_TYPES_INCOMPLETE"
+    assert result.diagnosis.affected_assets == ()
+    assert result.diagnosis.evidence_ids == ()
     assert result.trace[-1].reason_code == "EVIDENCE_TYPES_INCOMPLETE"
 
 
 @pytest.mark.asyncio
-async def test_unsupported_affected_asset_downgrades_confirmed_to_insufficient(
+async def test_controller_owns_affected_assets_and_evidence_ids(
     tmp_path: Path,
 ) -> None:
     node = _record(
@@ -801,18 +809,242 @@ async def test_unsupported_affected_asset_downgrades_confirmed_to_insufficient(
                     ),
                 ]
             )
-        return _output_call(
-            agent_info,
-            _confirmed_payload(
-                (node.evidence_id, schema.evidence_id, lineage.evidence_id),
-                assets=("stg_payments", "customers"),
-            ),
+        return _output_call(agent_info, _confirmed_payload())
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    assert result.diagnosis.status == "CONFIRMED"
+    assert result.diagnosis.affected_assets == ("model.synthetic.stg_payments", "orders")
+    assert result.diagnosis.evidence_ids == (
+        node.evidence_id,
+        schema.evidence_id,
+        lineage.evidence_id,
+    )
+    assert result.trace[-1].reason_code == "CONFIRMED"
+
+
+@pytest.mark.asyncio
+async def test_controller_materializes_assets_and_citations_from_typed_evidence(
+    tmp_path: Path,
+) -> None:
+    run_results = _synthetic_run_results()
+    node = _record(
+        EvidenceType.DBT_NODE_ERROR,
+        subject="failed_node",
+        node_id="model.synthetic.node",
+    )
+    schema = _record(EvidenceType.RELATION_SCHEMA, subject="synthetic_relation")
+    upstream = _record(
+        EvidenceType.DBT_LINEAGE,
+        subject="failed_node",
+        node_id="model.synthetic.node",
+        direction="upstream",
+    )
+    downstream = _record(
+        EvidenceType.DBT_LINEAGE,
+        subject="failed_node",
+        node_id="model.synthetic.node",
+        direction="downstream",
+    )
+    tools = _MappedEvidenceTools(
+        {
+            "get_dbt_run_results": (run_results,),
+            "get_dbt_node_error:model.synthetic.node": (node,),
+            "get_relation_schema:synthetic_relation": (schema,),
+            "get_dbt_lineage:model.synthetic.node:upstream": (upstream,),
+            "get_dbt_lineage:model.synthetic.node:downstream": (downstream,),
+        }
+    )
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        run_records = _returned_records(messages, "get_dbt_run_results")
+        node_records = _returned_records(messages, "get_dbt_node_error")
+        lineage_records = _returned_records(messages, "get_dbt_lineage")
+        schema_records = _returned_records(messages, "get_relation_schema")
+        upstream_records = tuple(
+            record
+            for record in lineage_records
+            if record.content.direction == "upstream"
         )
+        downstream_records = tuple(
+            record
+            for record in lineage_records
+            if record.content.direction == "downstream"
+        )
+        if not run_records:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_dbt_run_results",
+                        {"run_id": RUN_ID},
+                        tool_call_id="run-results",
+                    )
+                ]
+            )
+        if not node_records:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_dbt_node_error",
+                        {
+                            "run_id": RUN_ID,
+                            "node_id": run_records[-1].content.failed_nodes[0],
+                        },
+                        tool_call_id="node-error",
+                    )
+                ]
+            )
+        if not upstream_records:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_dbt_lineage",
+                        {"node_id": node_records[-1].content.node_id, "direction": "upstream"},
+                        tool_call_id="upstream-lineage",
+                    )
+                ]
+            )
+        if not schema_records or not downstream_records:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_relation_schema",
+                        {"relation_name": "synthetic_relation"},
+                        tool_call_id="relation-schema",
+                    ),
+                    ToolCallPart(
+                        "get_dbt_lineage",
+                        {"node_id": node_records[-1].content.node_id, "direction": "downstream"},
+                        tool_call_id="downstream-lineage",
+                    ),
+                ]
+            )
+        return _output_call(agent_info, _confirmed_payload())
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    assert result.diagnosis.status == "CONFIRMED"
+    assert result.diagnosis.affected_assets == ("model.synthetic.node", "orders")
+    assert result.diagnosis.evidence_ids == (
+        node.evidence_id,
+        schema.evidence_id,
+        downstream.evidence_id,
+    )
+    assert upstream.evidence_id not in result.diagnosis.evidence_ids
+    assert result.trace[-1].reason_code == "CONFIRMED"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_confirmed_evidence_shape_fails_closed(tmp_path: Path) -> None:
+    first_node = _record(
+        EvidenceType.DBT_NODE_ERROR,
+        subject="first_node",
+        node_id="model.synthetic.first_node",
+    )
+    second_node = _record(
+        EvidenceType.DBT_NODE_ERROR,
+        subject="second_node",
+        node_id="model.synthetic.second_node",
+    )
+    schema = _record(EvidenceType.RELATION_SCHEMA, subject="synthetic_relation")
+    downstream = _record(
+        EvidenceType.DBT_LINEAGE,
+        subject="first_node",
+        node_id="model.synthetic.first_node",
+        direction="downstream",
+    )
+    tools = _MappedEvidenceTools(
+        {
+            "get_dbt_node_error:synthetic_node": (first_node, second_node),
+            "get_relation_schema:synthetic_relation": (schema,),
+            "get_dbt_lineage:synthetic_node:downstream": (downstream,),
+        }
+    )
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        if not any(isinstance(message, ModelResponse) for message in messages):
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_dbt_node_error",
+                        {"run_id": RUN_ID, "node_id": "synthetic_node"},
+                        tool_call_id="node",
+                    ),
+                    ToolCallPart(
+                        "get_relation_schema",
+                        {"relation_name": "synthetic_relation"},
+                        tool_call_id="schema",
+                    ),
+                    ToolCallPart(
+                        "get_dbt_lineage",
+                        {"node_id": "synthetic_node", "direction": "downstream"},
+                        tool_call_id="lineage",
+                    ),
+                ]
+            )
+        return _output_call(agent_info, _confirmed_payload())
 
     result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
 
     assert result.diagnosis.status == "INSUFFICIENT_EVIDENCE"
-    assert result.diagnosis.summary == "AFFECTED_ASSET_UNSUPPORTED"
+    assert result.diagnosis.summary == "EVIDENCE_SHAPE_AMBIGUOUS"
+    assert result.diagnosis.affected_assets == ()
+    assert result.diagnosis.evidence_ids == ()
+    assert result.trace[-1].reason_code == "EVIDENCE_SHAPE_AMBIGUOUS"
+
+
+@pytest.mark.asyncio
+async def test_mismatched_downstream_node_fails_closed(tmp_path: Path) -> None:
+    node = _record(
+        EvidenceType.DBT_NODE_ERROR,
+        subject="failed_node",
+        node_id="model.synthetic.failed_node",
+    )
+    schema = _record(EvidenceType.RELATION_SCHEMA, subject="synthetic_relation")
+    downstream = _record(
+        EvidenceType.DBT_LINEAGE,
+        subject="other_node",
+        node_id="model.synthetic.other_node",
+        direction="downstream",
+    )
+    tools = _MappedEvidenceTools(
+        {
+            "get_dbt_node_error:synthetic_node": (node,),
+            "get_relation_schema:synthetic_relation": (schema,),
+            "get_dbt_lineage:synthetic_node:downstream": (downstream,),
+        }
+    )
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        if not any(isinstance(message, ModelResponse) for message in messages):
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_dbt_node_error",
+                        {"run_id": RUN_ID, "node_id": "synthetic_node"},
+                        tool_call_id="node",
+                    ),
+                    ToolCallPart(
+                        "get_relation_schema",
+                        {"relation_name": "synthetic_relation"},
+                        tool_call_id="schema",
+                    ),
+                    ToolCallPart(
+                        "get_dbt_lineage",
+                        {"node_id": "synthetic_node", "direction": "downstream"},
+                        tool_call_id="lineage",
+                    ),
+                ]
+            )
+        return _output_call(agent_info, _confirmed_payload())
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    assert result.diagnosis.status == "INSUFFICIENT_EVIDENCE"
+    assert result.diagnosis.summary == "EVIDENCE_SHAPE_AMBIGUOUS"
+    assert result.diagnosis.affected_assets == ()
+    assert result.diagnosis.evidence_ids == ()
+    assert result.trace[-1].reason_code == "EVIDENCE_SHAPE_AMBIGUOUS"
 
 
 @pytest.mark.asyncio
@@ -861,18 +1093,24 @@ async def test_valid_error_schema_and_downstream_lineage_pass_confirmed_gate(
             )
         return _output_call(
             agent_info,
-            _confirmed_payload((node.evidence_id, schema.evidence_id, lineage.evidence_id)),
+            _confirmed_payload(),
         )
 
     result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
 
     assert result.diagnosis.status == "CONFIRMED"
+    assert result.diagnosis.affected_assets == ("model.synthetic.stg_payments", "orders")
+    assert result.diagnosis.evidence_ids == (
+        node.evidence_id,
+        schema.evidence_id,
+        lineage.evidence_id,
+    )
     assert result.trace[-1].reason_code == "CONFIRMED"
 
 
 @pytest.mark.asyncio
 async def test_model_returned_insufficient_contains_no_root_or_assets(tmp_path: Path) -> None:
-    payload = _diagnosis_payload()
+    payload = _decision_payload()
 
     def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
         return _output_call(agent_info, payload)
@@ -913,7 +1151,7 @@ async def test_trace_contains_no_prompt_completion_hidden_reasoning_secret_path_
                     )
                 ]
             )
-        return _output_call(agent_info, _diagnosis_payload())
+        return _output_call(agent_info, _decision_payload())
 
     result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
     serialized = result.model_dump_json()
@@ -944,7 +1182,7 @@ async def test_trace_redacts_uri_api_key_and_bearer_credentials(tmp_path: Path) 
                     )
                 ]
             )
-        return _output_call(agent_info, _diagnosis_payload())
+        return _output_call(agent_info, _decision_payload())
 
     result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
 
@@ -991,7 +1229,7 @@ async def test_tool_calls_are_executed_sequentially_in_model_emission_order(tmp_
                     ),
                 ]
             )
-        return _output_call(agent_info, _diagnosis_payload())
+        return _output_call(agent_info, _decision_payload())
 
     await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
 
