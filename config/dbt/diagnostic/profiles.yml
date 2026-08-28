@@ -1,0 +1,16 @@
+config:
+  send_anonymous_usage_stats: false
+
+jaffle_shop:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DIG_DIAGNOSTIC_POSTGRES_HOST') }}"
+      port: "{{ env_var('DIG_DIAGNOSTIC_POSTGRES_PORT') | int }}"
+      dbname: "{{ env_var('DIG_DIAGNOSTIC_POSTGRES_DATABASE') }}"
+      schema: "{{ env_var('DIG_DIAGNOSTIC_POSTGRES_SCHEMA') }}"
+      user: "{{ env_var('DIG_DIAGNOSTIC_POSTGRES_USER') }}"
+      password: "{{ env_var('DIG_DIAGNOSTIC_POSTGRES_PASSWORD') }}"
+      threads: 1
+      connect_timeout: 10

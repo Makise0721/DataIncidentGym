@@ -9,6 +9,7 @@ from data_incident_gym.config import Settings
 from data_incident_gym.diagnosis import DiagnosisStatus
 from data_incident_gym.diagnostic_agent import DiagnosisRunner
 from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.doctor import DoctorRunner, DoctorStatus
 from data_incident_gym.evaluation import EvaluationStatus
 from data_incident_gym.evaluation_runner import EvaluationRunner, EvaluationWorkflowError
 from data_incident_gym.incidents import IncidentCaseError
@@ -22,6 +23,18 @@ eval_app = typer.Typer(help="运行确定性评测与报告闭环。")
 app.add_typer(pipeline_app, name="pipeline")
 app.add_typer(lab_app, name="lab")
 app.add_typer(eval_app, name="eval")
+
+DOCTOR_RECOMMENDATIONS_ZH = {
+    "USE_PYTHON_3_12": "建议使用 Python 3.12.10。",
+    "INSTALL_UV_0_11_24": "建议安装并使用 uv 0.11.24。",
+    "START_DOCKER_DESKTOP": "建议启动 Docker Desktop。",
+    "START_POSTGRES_COMPOSE": "建议启动 compose 中的 postgres 服务。",
+    "CHECK_POSTGRES_SETTINGS": "建议检查独立 diagnostic PostgreSQL 连接配置。",
+    "CHECK_DBT_PROFILE": "建议检查独立 diagnostic dbt profile 与连接。",
+    "START_OLLAMA": "建议启动 Ollama 并确认 OpenAI-compatible endpoint 可访问。",
+    "PULL_GEMMA4_E4B": "建议拉取并暴露 gemma4:e4b 模型。",
+    "CHECK_MODEL_TOOL_CALLING": "建议检查模型的工具调用和结构化输出能力。",
+}
 
 
 def create_baseline_builder() -> BaselineBuilder:
@@ -38,6 +51,10 @@ def create_diagnosis_runner(run_id: str) -> DiagnosisRunner:
 
 def create_evaluation_runner() -> EvaluationRunner:
     return EvaluationRunner.for_project(Settings(), DiagnosticSettings())
+
+
+def create_doctor_runner() -> DoctorRunner:
+    return DoctorRunner.for_project(DiagnosticSettings())
 
 
 def _exit_lab_error(error: LabError | IncidentCaseError) -> None:
@@ -116,6 +133,24 @@ def eval_run(case_id: str) -> None:
     typer.echo(f"run_id: {result.run_id}")
     typer.echo(f"artifacts: artifacts/{result.run_id}")
     if result.status != EvaluationStatus.PASSED:
+        raise typer.Exit(code=1)
+
+
+@app.command("doctor")
+def doctor() -> None:
+    """只读检查 P0 环境、依赖和模型最小能力。"""
+    try:
+        result = asyncio.run(create_doctor_runner().run())
+    except Exception:
+        typer.echo("doctor 失败 [DOCTOR_SETUP_FAILED]。", err=True)
+        raise typer.Exit(code=1) from None
+    for check in result.checks:
+        state = "通过" if check.passed else "失败"
+        typer.echo(f"[{state}] {check.code.value}: {check.observed}")
+        if check.recommendation_code is not None:
+            typer.echo(DOCTOR_RECOMMENDATIONS_ZH[check.recommendation_code])
+    typer.echo("说明：doctor 通过不代表 P0 评测通过。")
+    if result.status == DoctorStatus.FAILED:
         raise typer.Exit(code=1)
 
 

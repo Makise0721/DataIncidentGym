@@ -9,6 +9,12 @@ from typer.testing import CliRunner
 import data_incident_gym.cli as cli
 from data_incident_gym.baseline import BaselineError, make_baseline_summary
 from data_incident_gym.diagnosis import Diagnosis, DiagnosisMetrics, DiagnosisRunResult
+from data_incident_gym.doctor import (
+    DoctorCheck,
+    DoctorCheckCode,
+    DoctorResult,
+    DoctorStatus,
+)
 from data_incident_gym.evaluation import (
     EvaluationCheck,
     EvaluationCheckCode,
@@ -271,7 +277,7 @@ def test_top_level_help_adds_only_diagnose_and_diagnose_options_are_bounded() ->
 
     assert app_help.exit_code == 0
     assert "diagnose" in app_help.stdout
-    assert {command.name for command in cli.app.registered_commands} == {"diagnose"}
+    assert {command.name for command in cli.app.registered_commands} == {"diagnose", "doctor"}
     assert diagnose_help.exit_code == 0
     assert "case_id" in diagnose_help_text
     assert "--run-id" in diagnose_help_text
@@ -405,6 +411,66 @@ def test_diagnose_preflight_and_provider_errors_are_redacted(monkeypatch) -> Non
     assert "C:\\secret\\trace.log" not in provider.stdout + provider.stderr
     assert "provider raw exception" not in provider.stdout + provider.stderr
     assert "Traceback" not in provider.stdout + provider.stderr
+
+
+def _doctor_result(failed_code: DoctorCheckCode | None = None) -> DoctorResult:
+    checks = tuple(
+        DoctorCheck(
+            code=code,
+            passed=code is not failed_code,
+            observed="OK" if code is not failed_code else "UNAVAILABLE",
+            reason_code=f"{code.value}_{'FAILED' if code is failed_code else 'PASSED'}",
+            recommendation_code=(None if code is not failed_code else "START_OLLAMA"),
+        )
+        for code in DoctorCheckCode
+    )
+    return DoctorResult(
+        status=DoctorStatus.FAILED if failed_code is not None else DoctorStatus.PASSED,
+        checks=checks,
+    )
+
+
+def test_doctor_success_prints_fixed_checks_and_explanation(monkeypatch) -> None:
+    class FakeDoctorRunner:
+        async def run(self) -> DoctorResult:
+            return _doctor_result()
+
+    monkeypatch.setattr(cli, "create_doctor_runner", lambda: FakeDoctorRunner())
+    result = runner.invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert "[通过] PYTHON: OK" in result.stdout
+    assert "doctor 通过不代表 P0 评测通过" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+def test_doctor_failure_prints_recommendation_and_exits_one(monkeypatch) -> None:
+    class FakeDoctorRunner:
+        async def run(self) -> DoctorResult:
+            return _doctor_result(DoctorCheckCode.OLLAMA_ENDPOINT)
+
+    monkeypatch.setattr(cli, "create_doctor_runner", lambda: FakeDoctorRunner())
+    result = runner.invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "[失败] OLLAMA_ENDPOINT: UNAVAILABLE" in result.stdout
+    assert "启动 Ollama" in result.stdout
+    assert "doctor 通过不代表 P0 评测通过" in result.stdout
+    assert "Traceback" not in result.stdout + result.stderr
+
+
+def test_doctor_setup_error_is_fixed_and_redacted(monkeypatch) -> None:
+    def failing_factory():
+        raise RuntimeError("password=TEST_REDACTED_VALUE C:\\secret\\settings.toml")
+
+    monkeypatch.setattr(cli, "create_doctor_runner", failing_factory)
+    result = runner.invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "DOCTOR_SETUP_FAILED" in result.stderr
+    assert "TEST_REDACTED_VALUE" not in result.stdout + result.stderr
+    assert "C:\\secret\\settings.toml" not in result.stdout + result.stderr
+    assert "Traceback" not in result.stdout + result.stderr
 
 
 def _evaluation(status: EvaluationStatus) -> EvaluationResult:
