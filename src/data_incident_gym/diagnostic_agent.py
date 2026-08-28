@@ -55,9 +55,17 @@ does not support a conclusion, return INSUFFICIENT_EVIDENCE without guessing.
 Use the versioned root-cause ontology below only when compatible evidence supports it:
 - SOURCE_SCHEMA_COLUMN_RENAMED: a source relation column was renamed while a dbt consumer
   still references the former column.
+
+Finalization discipline:
+- Cite only verbatim evidence IDs returned by tools; never rewrite, concatenate, or guess an ID.
+- Set affected_assets only from node IDs or model names that appear verbatim in node-error or
+  lineage evidence. Copy them exactly; do not use relation names, schema-qualified names, or
+  invented names.
+- Once the required evidence is collected, immediately return the Diagnosis. Do not add
+  same-type or exploratory queries.
 """.strip()
 
-SYSTEM_PROMPT_VERSION = "m5.diagnosis.v2"
+SYSTEM_PROMPT_VERSION = "m5.diagnosis.v3"
 SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 _MAX_TOOL_ATTEMPTS = 8
 _MODEL_ERROR_REASONS = {

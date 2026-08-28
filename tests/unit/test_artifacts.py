@@ -364,7 +364,7 @@ def test_metadata_contains_revision_dirty_flag_safe_config_prompt_hash_and_metri
     assert metadata.provider == "openai-compatible"
     assert metadata.model == "qwen3.5:9b"
     assert metadata.model_base_url == MODEL_BASE_URL
-    assert metadata.prompt_version == "m5.diagnosis.v2"
+    assert metadata.prompt_version == "m5.diagnosis.v3"
     assert len(metadata.prompt_sha256) == 64
     assert metadata.diagnosis_metrics == artifact_run.diagnosis_run.metrics
     assert metadata.budget.model_request_limit == 8

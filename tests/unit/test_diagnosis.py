@@ -157,13 +157,16 @@ def test_tool_trace_event_requires_nonnegative_strict_elapsed_ms() -> None:
 
 
 def test_diagnosis_prompt_is_versioned_hashed_and_case_agnostic() -> None:
-    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v2"
+    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v3"
     assert hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest() == SYSTEM_PROMPT_SHA256
     assert "SOURCE_SCHEMA_COLUMN_RENAMED" in SYSTEM_PROMPT
     assert "source relation column was renamed" in SYSTEM_PROMPT
     assert "Every tool argument" in SYSTEM_PROMPT
     assert "exact unqualified relation name" in SYSTEM_PROMPT
     assert "one tool retry is allowed when a tool returns an error code" in SYSTEM_PROMPT
+    assert "verbatim evidence IDs returned by tools" in SYSTEM_PROMPT
+    assert "affected_assets only from node IDs or model names" in SYSTEM_PROMPT
+    assert "immediately return the Diagnosis" in SYSTEM_PROMPT
     for case_specific_value in (
         "schema_rename_payment_amount",
         "raw_payments",

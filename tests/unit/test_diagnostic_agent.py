@@ -356,7 +356,7 @@ async def test_runner_registers_exactly_the_four_m3_tools_and_returns_diagnosis(
 
 
 def test_diagnostic_agent_exports_the_frozen_prompt_contract() -> None:
-    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v2"
+    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v3"
     assert SYSTEM_PROMPT_SHA256
 
 

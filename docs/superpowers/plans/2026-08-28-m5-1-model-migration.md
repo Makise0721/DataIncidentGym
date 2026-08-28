@@ -30,7 +30,7 @@
 | Ground Truth 隔离 | Agent、prompt、工具与 M3 不接触 Ground Truth |
 | 三样本规则 | 精确三个独立样本、至少 2 次通过、失败保留且全部计入分母 |
 | 安全与恢复边界 | 秘密不进入数据流；类型化错误码；`EvaluationRunner` finally 恢复且最终状态必须 `HEALTHY` |
-| prompt | 不修改 `SYSTEM_PROMPT` 内容与版本；除非调查证明模型迁移无法兼容且用户另行批准 |
+| prompt | Task G 已获用户另行批准：仅升版为 `m5.diagnosis.v3`，追加通用收尾纪律；不改变工具、预算、评分、安全或 Ground Truth 隔离边界 |
 | 依赖 | 不新增、不升级、不降级任何依赖 |
 
 ## 范围：三个小 Task，严格顺序执行
