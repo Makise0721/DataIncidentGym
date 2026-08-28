@@ -37,7 +37,7 @@ async def test_default_ollama_diagnosis_uses_real_m3_tools_and_strict_output() -
         assert result.metrics.provider == "openai-compatible"
         assert result.metrics.model == "qwen3.5:9b"
         assert result.metrics.successful_tool_calls >= 1
-        assert result.metrics.model_requests <= 6
+        assert result.metrics.model_requests <= 8
         assert result.metrics.tool_call_attempts <= 8
         assert result.diagnosis.status in {
             DiagnosisStatus.CONFIRMED,

@@ -367,7 +367,7 @@ def test_metadata_contains_revision_dirty_flag_safe_config_prompt_hash_and_metri
     assert metadata.prompt_version == "m5.diagnosis.v2"
     assert len(metadata.prompt_sha256) == 64
     assert metadata.diagnosis_metrics == artifact_run.diagnosis_run.metrics
-    assert metadata.budget.model_request_limit == 6
+    assert metadata.budget.model_request_limit == 8
     assert metadata.budget.tool_call_limit == 8
     assert metadata.budget.output_retry_limit == 2
     assert metadata.budget.timeout_seconds == 300

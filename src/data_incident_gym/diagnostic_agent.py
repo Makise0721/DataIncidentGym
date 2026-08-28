@@ -522,7 +522,7 @@ class DiagnosisRunner:
                         prompt,
                         deps=state,
                         usage=state.usage,
-                        usage_limits=UsageLimits(request_limit=6, tool_calls_limit=8),
+                        usage_limits=UsageLimits(request_limit=8, tool_calls_limit=8),
                         retries={"tools": 1, "output": 2},
                     )
             return self._result(state, result.output)

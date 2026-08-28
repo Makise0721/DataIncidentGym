@@ -510,9 +510,9 @@ async def test_ninth_tool_request_is_rejected_without_entering_m3(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_sixth_model_request_is_allowed_and_seventh_is_not_sent(tmp_path: Path) -> None:
+async def test_eighth_model_request_is_allowed_and_ninth_is_not_sent(tmp_path: Path) -> None:
     tools = _MappedEvidenceTools(
-        {f"get_relation_schema:synthetic_relation_{index}": () for index in range(6)}
+        {f"get_relation_schema:synthetic_relation_{index}": () for index in range(8)}
     )
     model_requests = 0
 
@@ -532,9 +532,9 @@ async def test_sixth_model_request_is_allowed_and_seventh_is_not_sent(tmp_path: 
     result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
 
     assert result.diagnosis.summary == "MODEL_REQUEST_LIMIT"
-    assert model_requests == 6
-    assert len(tools.calls) == 6
-    assert result.metrics.model_requests == 6
+    assert model_requests == 8
+    assert len(tools.calls) == 8
+    assert result.metrics.model_requests == 8
 
 
 @pytest.mark.asyncio

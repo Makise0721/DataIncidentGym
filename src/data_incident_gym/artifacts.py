@@ -92,7 +92,7 @@ class ArtifactWriteError(RuntimeError):
 class BudgetSummary(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    model_request_limit: Literal[6]
+    model_request_limit: Literal[8]
     tool_call_limit: Literal[8]
     output_retry_limit: Literal[2]
     timeout_seconds: Literal[300]
@@ -312,7 +312,7 @@ class ArtifactWriter:
             model=safe_model,
             model_base_url=run.model_base_url,
             budget=BudgetSummary(
-                model_request_limit=6,
+                model_request_limit=8,
                 tool_call_limit=8,
                 output_retry_limit=2,
                 timeout_seconds=300,
