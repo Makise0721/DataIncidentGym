@@ -25,7 +25,7 @@
 | canonical 产物 | `metadata.json`、`trace.jsonl`、`evidence.json`、`diagnosis.json`、`evaluation.json`、`report.md` 六个 |
 | 只读工具 | M3 四个：`get_dbt_run_results`、`get_dbt_node_error`、`get_relation_schema`、`get_dbt_lineage` |
 | Diagnosis 终态 | `CONFIRMED`、`INSUFFICIENT_EVIDENCE`、`MODEL_ERROR` 三种 |
-| 单次预算 | 模型请求 6 / 工具调用 8 / 结构化输出校验重试 2 / 总超时 180 秒 |
+| 单次预算 | 模型请求 6 / 工具调用 8 / 结构化输出校验重试 2 / 总超时 300 秒（2026-08-28 用户再批准由 180 秒改为 300 秒） |
 | 评分口径 | 确定性精确匹配；不使用 LLM judge；confidence 不参与主要评分 |
 | Ground Truth 隔离 | Agent、prompt、工具与 M3 不接触 Ground Truth |
 | 三样本规则 | 精确三个独立样本、至少 2 次通过、失败保留且全部计入分母 |

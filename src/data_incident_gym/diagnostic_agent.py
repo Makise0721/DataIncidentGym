@@ -517,7 +517,7 @@ class DiagnosisRunner:
         )
         try:
             with agent.parallel_tool_call_execution_mode("sequential"):
-                async with asyncio.timeout(180):
+                async with asyncio.timeout(300):
                     result = await agent.run(
                         prompt,
                         deps=state,

@@ -95,7 +95,7 @@ class BudgetSummary(BaseModel):
     model_request_limit: Literal[6]
     tool_call_limit: Literal[8]
     output_retry_limit: Literal[2]
-    timeout_seconds: Literal[180]
+    timeout_seconds: Literal[300]
 
 
 class TraceEnvelope(BaseModel):
@@ -315,7 +315,7 @@ class ArtifactWriter:
                 model_request_limit=6,
                 tool_call_limit=8,
                 output_retry_limit=2,
-                timeout_seconds=180,
+                timeout_seconds=300,
             ),
             prompt_version=SYSTEM_PROMPT_VERSION,
             prompt_sha256=SYSTEM_PROMPT_SHA256,

@@ -370,7 +370,7 @@ def test_metadata_contains_revision_dirty_flag_safe_config_prompt_hash_and_metri
     assert metadata.budget.model_request_limit == 6
     assert metadata.budget.tool_call_limit == 8
     assert metadata.budget.output_retry_limit == 2
-    assert metadata.budget.timeout_seconds == 180
+    assert metadata.budget.timeout_seconds == 300
 
 
 def test_report_is_deterministic_chinese_and_contains_every_failed_check(
