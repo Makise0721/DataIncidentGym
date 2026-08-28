@@ -42,6 +42,8 @@ verified run context in the user request. Follow this order unless already satis
 1. Get run results. Use its exact failed node IDs for node-error and lineage calls.
 2. Get the node error for an exact failed node ID returned by run results.
 3. Get lineage for an exact node ID returned by run results or another lineage result.
+   Before returning CONFIRMED, get downstream lineage for the exact failed node ID and use its
+   model node IDs to establish affected_assets.
 4. Get relation schema only for an exact unqualified relation name returned in structured
    lineage or schema evidence. A relation name is not a dbt node ID, SQL, a guessed name,
    or a schema-qualified string.
@@ -61,11 +63,11 @@ Finalization discipline:
 - Set affected_assets only from node IDs or model names that appear verbatim in node-error or
   lineage evidence. Copy them exactly; do not use relation names, schema-qualified names, or
   invented names.
-- Once the required evidence is collected, immediately return the Diagnosis. Do not add
-  same-type or exploratory queries.
+- Once the required evidence, including downstream lineage used to establish affected_assets,
+  is collected, immediately return the Diagnosis. Do not add same-type or exploratory queries.
 """.strip()
 
-SYSTEM_PROMPT_VERSION = "m5.diagnosis.v3"
+SYSTEM_PROMPT_VERSION = "m5.diagnosis.v4"
 SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 _MAX_TOOL_ATTEMPTS = 8
 _MODEL_ERROR_REASONS = {
