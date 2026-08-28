@@ -5,7 +5,7 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from importlib import resources
 from pathlib import Path
@@ -55,6 +55,7 @@ ARTIFACT_FILENAMES = (
 )
 _RUN_DIRECTORY_PATTERN = re.compile(r"^\.[0-9a-f]{32}\.[0-9a-f]{32}\.tmp$")
 _REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+_RUNTIME_LABEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,127}$")
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -69,6 +70,8 @@ def _strict_aware_datetime(value: object) -> datetime:
         raise ValueError("timestamp must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
+    if value.utcoffset() != timedelta(0):
+        raise ValueError("timestamp must be UTC")
     return value
 
 
@@ -210,6 +213,12 @@ def _load_json(text: str) -> Any:
     return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
 
 
+def _safe_runtime_label(value: object) -> str:
+    if isinstance(value, str) and _RUNTIME_LABEL_PATTERN.fullmatch(value):
+        return value
+    return "[redacted]"
+
+
 class ArtifactWriter:
     def __init__(
         self,
@@ -287,6 +296,11 @@ class ArtifactWriter:
     def _build_metadata(self, run: ArtifactRun) -> RunMetadata:
         revision, workspace_dirty = self._git_state()
         metrics = run.diagnosis_run.metrics
+        safe_provider = _safe_runtime_label(metrics.provider)
+        safe_model = _safe_runtime_label(metrics.model)
+        safe_metrics = metrics.model_copy(
+            update={"provider": safe_provider, "model": safe_model}
+        )
         elapsed_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
         return RunMetadata(
             schema_version="m5.metadata.v1",
@@ -294,8 +308,8 @@ class ArtifactWriter:
             run_id=run.run_id,
             code_revision=revision,
             workspace_dirty=workspace_dirty,
-            provider=metrics.provider,
-            model=metrics.model,
+            provider=safe_provider,
+            model=safe_model,
             model_base_url=run.model_base_url,
             budget=BudgetSummary(
                 model_request_limit=6,
@@ -308,7 +322,7 @@ class ArtifactWriter:
             started_at=run.started_at,
             finished_at=run.finished_at,
             elapsed_ms=elapsed_ms,
-            diagnosis_metrics=metrics,
+            diagnosis_metrics=safe_metrics,
             evaluation_status=run.evaluation.status,
             recovery_status=run.recovery_status,
             artifact_files=ARTIFACT_FILENAMES,

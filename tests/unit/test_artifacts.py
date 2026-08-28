@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from importlib import resources
 from pathlib import Path
 
 import pytest
 from jinja2 import Environment, StrictUndefined, UndefinedError
+from pydantic import ValidationError
 
 from data_incident_gym.artifacts import (
     ARTIFACT_FILENAMES,
@@ -493,11 +494,37 @@ def test_pre_redacted_trace_and_error_sentinels_never_reappear_in_non_diagnosis_
         )
         return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
-    output = ArtifactWriter(tmp_path, run_command=sensitive_git).write(artifact_run)
+    unsafe_metrics = artifact_run.diagnosis_run.metrics.model_copy(
+        update={
+            "provider": "TEST_REDACTED_VALUE",
+            "model": "TEST_REDACTED_VALUE",
+        }
+    )
+    unsafe_run = artifact_run.model_copy(
+        update={
+            "diagnosis_run": artifact_run.diagnosis_run.model_copy(
+                update={"metrics": unsafe_metrics}
+            )
+        }
+    )
+    output = ArtifactWriter(tmp_path, run_command=sensitive_git).write(unsafe_run)
 
     for filename in ("metadata.json", "trace.jsonl", "evaluation.json", "report.md"):
         assert "TEST_REDACTED_VALUE" not in read(output / filename)
         assert "C:\\secret\\probe.txt" not in read(output / filename)
+    metadata = RunMetadata.model_validate_json(read(output / "metadata.json"))
+    assert metadata.provider == "[redacted]"
+    assert metadata.model == "[redacted]"
+    assert metadata.diagnosis_metrics.provider == "[redacted]"
+    assert metadata.diagnosis_metrics.model == "[redacted]"
+
+
+def test_artifact_timestamps_require_utc(tmp_path: Path, artifact_run: ArtifactRun) -> None:
+    payload = artifact_run.model_dump(mode="python")
+    payload["started_at"] = datetime(2026, 8, 28, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+
+    with pytest.raises(ValidationError):
+        ArtifactRun.model_validate(payload)
 
 
 def test_report_escapes_diagnosis_text_as_inert_preformatted_content(tmp_path: Path) -> None:

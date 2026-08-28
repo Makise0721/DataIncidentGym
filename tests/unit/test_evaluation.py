@@ -65,6 +65,7 @@ def _tool_event(
         arguments=arguments,
         fingerprint=fingerprint,
         evidence_ids=evidence_ids,
+        elapsed_ms=0,
     )
 
 
