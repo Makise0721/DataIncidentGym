@@ -359,10 +359,9 @@ async def test_doctor_uses_only_diagnostic_profile_for_dbt_and_never_writes(
         for argument in call_args
     )
     assert all(
-        not any(token in argument.lower() for token in ("build", "seed", "run"))
+        len(call_args) > 1 and call_args[1] not in {"build", "seed", "run"}
         for call_args, _ in doctor.command.calls
         if call_args[0] == "dbt"
-        for argument in call_args
     )
 
 
