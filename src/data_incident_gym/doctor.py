@@ -38,6 +38,14 @@ _URL_TIMEOUT_SECONDS = 5
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _VERSION_PATTERN = re.compile(r"^\d+(?:\.\d+){2,}$")
 _SAFE_MODEL_NAME = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,127}$")
+_DIAGNOSTIC_DATABASE_ENV_KEYS = (
+    "DIG_DIAGNOSTIC_POSTGRES_HOST",
+    "DIG_DIAGNOSTIC_POSTGRES_PORT",
+    "DIG_DIAGNOSTIC_POSTGRES_DATABASE",
+    "DIG_DIAGNOSTIC_POSTGRES_SCHEMA",
+    "DIG_DIAGNOSTIC_POSTGRES_USER",
+    "DIG_DIAGNOSTIC_POSTGRES_PASSWORD",
+)
 
 
 class DoctorStatus(StrEnum):
@@ -203,6 +211,20 @@ class DoctorRunner:
             ),
             "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
         }
+
+    def _has_explicit_diagnostic_database_config(self) -> bool:
+        if all(key in os.environ for key in _DIAGNOSTIC_DATABASE_ENV_KEYS):
+            return True
+        env_file = self._project_root / ".env.diagnostic"
+        try:
+            keys = {
+                line.split("=", 1)[0].strip()
+                for line in env_file.read_text(encoding="utf-8").splitlines()
+                if "=" in line and line.split("=", 1)[0].strip()
+            }
+        except OSError:
+            return False
+        return set(_DIAGNOSTIC_DATABASE_ENV_KEYS).issubset(keys)
 
     def _command(
         self,
@@ -413,14 +435,31 @@ class DoctorRunner:
         )
 
     async def run(self) -> DoctorResult:
-        checks = [
-            self._python_check(),
-            self._uv_check(),
-            self._docker_check(),
-            self._compose_check(),
-            self._postgres_check(),
-            self._dbt_profile_check(),
-        ]
+        checks = [self._python_check(), self._uv_check()]
+        docker_check = self._docker_check()
+        checks.append(docker_check)
+        compose_check = (
+            self._compose_check()
+            if docker_check.passed
+            else self._check(DoctorCheckCode.COMPOSE_POSTGRES, False, "UNAVAILABLE")
+        )
+        checks.append(compose_check)
+        postgres_check = (
+            self._postgres_check()
+            if compose_check.passed and self._has_explicit_diagnostic_database_config()
+            else self._check(DoctorCheckCode.POSTGRES_CONNECTION, False, "UNAVAILABLE")
+        )
+        checks.append(postgres_check)
+        dbt_check = (
+            self._dbt_profile_check()
+            if postgres_check.passed
+            else self._check(
+                DoctorCheckCode.DBT_PROFILE_CONNECTION,
+                False,
+                "UNAVAILABLE",
+            )
+        )
+        checks.append(dbt_check)
         endpoint_check, endpoint_ok, model_ids = self._endpoint_check()
         checks.append(endpoint_check)
         model_check = self._model_present_check(endpoint_ok, model_ids)

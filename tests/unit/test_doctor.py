@@ -168,6 +168,15 @@ def doctor_factory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             else ["read_probe_value"],
             custom_output_args={"tool_value": "DOCTOR_TOOL_OK"},
         )
+        for key, value in {
+            "DIG_DIAGNOSTIC_POSTGRES_HOST": "127.0.0.1",
+            "DIG_DIAGNOSTIC_POSTGRES_PORT": "55432",
+            "DIG_DIAGNOSTIC_POSTGRES_DATABASE": "data_incident_gym",
+            "DIG_DIAGNOSTIC_POSTGRES_SCHEMA": "analytics",
+            "DIG_DIAGNOSTIC_POSTGRES_USER": "dig_reader",
+            "DIG_DIAGNOSTIC_POSTGRES_PASSWORD": "diagnostic-secret",
+        }.items():
+            monkeypatch.setenv(key, value)
 
         def connect(**_: object) -> FakeConnection:
             if failed_code == "POSTGRES_CONNECTION":
@@ -251,7 +260,46 @@ async def test_each_failed_check_returns_fixed_recommendation_without_raw_error(
     assert "TEST_REDACTED_VALUE" not in serialized
     assert "C:\\secret\\doctor.log" not in serialized
     assert all(check.observed == "UNAVAILABLE" for check in result.checks if not check.passed)
-    assert len(doctor.command.calls) == 4
+    expected_command_count = {
+        "PYTHON": 4,
+        "UV": 4,
+        "DOCKER": 2,
+        "COMPOSE_POSTGRES": 3,
+        "POSTGRES_CONNECTION": 3,
+        "DBT_PROFILE_CONNECTION": 4,
+        "OLLAMA_ENDPOINT": 4,
+        "MODEL_PRESENT": 4,
+        "MODEL_TOOL_STRUCTURED_OUTPUT": 4,
+    }
+    assert len(doctor.command.calls) == expected_command_count[failed_code]
+
+
+@pytest.mark.asyncio
+async def test_missing_explicit_diagnostic_database_config_fails_closed_without_db_or_dbt(
+    doctor: DoctorDeps,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in (
+        "DIG_DIAGNOSTIC_POSTGRES_HOST",
+        "DIG_DIAGNOSTIC_POSTGRES_PORT",
+        "DIG_DIAGNOSTIC_POSTGRES_DATABASE",
+        "DIG_DIAGNOSTIC_POSTGRES_SCHEMA",
+        "DIG_DIAGNOSTIC_POSTGRES_USER",
+        "DIG_DIAGNOSTIC_POSTGRES_PASSWORD",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    result = await doctor.runner.run()
+
+    checks = {check.code: check for check in result.checks}
+    assert checks[DoctorCheckCode.POSTGRES_CONNECTION].reason_code == (
+        "POSTGRES_CONNECTION_FAILED"
+    )
+    assert checks[DoctorCheckCode.DBT_PROFILE_CONNECTION].reason_code == (
+        "DBT_PROFILE_CONNECTION_FAILED"
+    )
+    assert doctor.connection.cursor_value.executed == []
+    assert [args for args, _ in doctor.command.calls if args[0] == "dbt"] == []
 
 
 @pytest.mark.asyncio
