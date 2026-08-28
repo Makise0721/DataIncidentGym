@@ -44,7 +44,8 @@ verified run context in the user request. Follow this order unless already satis
 3. Get lineage for an exact node ID returned by run results or another lineage result.
    Before returning CONFIRMED, get downstream lineage for the exact failed node ID. For each
    downstream related model, copy only its verbatim name field into affected_assets; do not copy
-   its node_id.
+   its node_id. Include the exact failed node_id from node-error evidence together with every
+   downstream related model name.
 4. Get relation schema only for an exact unqualified relation name returned in structured
    lineage or schema evidence. A relation name is not a dbt node ID, SQL, a guessed name,
    or a schema-qualified string.
@@ -70,7 +71,7 @@ Finalization discipline:
   is collected, immediately return the Diagnosis. Do not add same-type or exploratory queries.
 """.strip()
 
-SYSTEM_PROMPT_VERSION = "m5.diagnosis.v5"
+SYSTEM_PROMPT_VERSION = "m5.diagnosis.v6"
 SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 _MAX_TOOL_ATTEMPTS = 8
 _MODEL_ERROR_REASONS = {

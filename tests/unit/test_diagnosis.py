@@ -157,7 +157,7 @@ def test_tool_trace_event_requires_nonnegative_strict_elapsed_ms() -> None:
 
 
 def test_diagnosis_prompt_is_versioned_hashed_and_case_agnostic() -> None:
-    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v5"
+    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v6"
     assert hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest() == SYSTEM_PROMPT_SHA256
     assert "SOURCE_SCHEMA_COLUMN_RENAMED" in SYSTEM_PROMPT
     assert "source relation column was renamed" in SYSTEM_PROMPT
@@ -167,6 +167,7 @@ def test_diagnosis_prompt_is_versioned_hashed_and_case_agnostic() -> None:
     assert "verbatim evidence IDs returned by tools" in SYSTEM_PROMPT
     assert "affected_assets only from node IDs or model names" in SYSTEM_PROMPT
     assert "downstream lineage for the exact failed node ID" in SYSTEM_PROMPT
+    assert "Include the exact failed node_id from node-error evidence" in SYSTEM_PROMPT
     assert "copy only its verbatim name field" in SYSTEM_PROMPT
     assert "Do not cite upstream lineage in a CONFIRMED diagnosis" in SYSTEM_PROMPT
     assert "immediately return the Diagnosis" in SYSTEM_PROMPT
