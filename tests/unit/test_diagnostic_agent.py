@@ -638,10 +638,17 @@ async def test_exact_duplicate_call_is_blocked_before_second_m3_execution(tmp_pa
 @pytest.mark.asyncio
 async def test_output_validation_retries_then_model_error(tmp_path: Path) -> None:
     model_requests = 0
+    retry_contents: list[str] = []
 
     def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
         nonlocal model_requests
         model_requests += 1
+        retry_contents.extend(
+            str(part.content)
+            for message in messages
+            for part in message.parts
+            if isinstance(part, RetryPromptPart)
+        )
         return _output_call(agent_info, _confirmed_payload(run_id="b" * 32))
 
     result = await _runner(
@@ -660,6 +667,7 @@ async def test_output_validation_retries_then_model_error(tmp_path: Path) -> Non
     assert protocol_event.category == "DECISION_CONTRACT_REJECTED"
     assert protocol_event.stage == "OUTPUT_VALIDATION"
     assert protocol_event.tool_name
+    assert any("DECISION_SCOPE_MISMATCH" in content for content in retry_contents)
 
 
 @pytest.mark.asyncio
@@ -1210,7 +1218,11 @@ async def test_blocked_gap_rejects_confirmation_but_allows_insufficient_evidence
                     )
                 ]
             )
-        if retry_contents:
+        if any(
+            "If any gap is BLOCKED, return INSUFFICIENT_EVIDENCE with empty claims."
+            in content
+            for content in retry_contents
+        ):
             return _output_call(agent_info, _insufficient_payload())
         return _output_call(agent_info, _confirmed_payload())
 
@@ -1222,7 +1234,15 @@ async def test_blocked_gap_rejects_confirmation_but_allows_insufficient_evidence
         gap.status.value == "BLOCKED" for gap in result.investigation_state.gaps
     )
     assert any("EVIDENCE_GAP_OPEN" in content for content in retry_contents)
-    assert any("open or blocked gap" in content for content in retry_contents)
+    assert any(
+        "If any gap is BLOCKED, return INSUFFICIENT_EVIDENCE with empty claims."
+        in content
+        for content in retry_contents
+    )
+    assert any(
+        "Otherwise close every OPEN gap before CONFIRMED." in content
+        for content in retry_contents
+    )
 
 
 @pytest.mark.asyncio

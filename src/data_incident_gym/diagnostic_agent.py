@@ -205,19 +205,21 @@ _KERNEL_RETRY_GUIDANCE = {
         "REFUTED_HYPOTHESIS_REQUIRED: Mark at least one non-selected hypothesis REFUTED."
     ),
     "EVIDENCE_GAP_OPEN": (
-        "EVIDENCE_GAP_OPEN: Gather evidence for every open or blocked gap before "
-        "returning CONFIRMED."
+        "EVIDENCE_GAP_OPEN: If any gap is BLOCKED, return INSUFFICIENT_EVIDENCE with "
+        "empty claims. Otherwise close every OPEN gap before CONFIRMED."
     ),
 }
 _GENERIC_KERNEL_RETRY_GUIDANCE = (
-    "DECISION_CONTRACT_REJECTED: Rebuild the decision from current closed evidence and "
+    "Rebuild the decision from current closed evidence and "
     "registered hypotheses; keep selected_hypothesis_id, hypothesis.root_cause_code, "
     "and ROOT_CAUSE claim.value aligned."
 )
 
 
 def _kernel_retry_message(code: str) -> str:
-    return _KERNEL_RETRY_GUIDANCE.get(code, _GENERIC_KERNEL_RETRY_GUIDANCE)
+    return _KERNEL_RETRY_GUIDANCE.get(
+        code, f"{code}: {_GENERIC_KERNEL_RETRY_GUIDANCE}"
+    )
 
 
 @dataclass(frozen=True)
