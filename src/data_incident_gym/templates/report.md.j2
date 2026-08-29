@@ -1,4 +1,4 @@
-# DataIncidentGym M5 诊断报告
+# DataIncidentGym M6 诊断报告
 
 ## 运行信息
 
@@ -39,6 +39,37 @@
 
 <pre class="recommended-actions">{% for action in diagnosis.recommended_actions %}{{ action }}{% if not loop.last %}
 {% endif %}{% endfor %}</pre>
+
+## 调查状态
+
+| 假设 | 根因编码 | 判定 |
+| --- | --- | --- |
+{% for hypothesis in investigation_state.hypotheses -%}
+| {{ hypothesis.hypothesis_id | e }} | {{ hypothesis.root_cause_code | e }} | {{ verdict_by_id.get(hypothesis.hypothesis_id, "UNASSESSED") | e }} |
+{% endfor %}
+
+## 证据缺口
+
+| 缺口 | 类型 | 状态 | 证据数 | 原因码 |
+| --- | --- | --- | --- | --- |
+{% for gap in investigation_state.gaps -%}
+| {{ gap.gap_id | e }} | {{ gap.gap_kind.value | e }} | {{ gap.status.value | e }} | {{ gap.evidence_ids | length }} | {{ (gap.error_code or "NONE") | e }} |
+{% endfor %}
+
+## 主张与证据
+
+| 主张类型 | 值 | EvidenceRecord |
+| --- | --- | --- |
+{% for claim in investigation_state.claims -%}
+| {{ claim.kind.value | e }} | {{ claim.value | e }} | {{ claim.evidence_ids | join(", ") | e }} |
+{% endfor %}
+
+## 预算与最终门禁
+
+- 模型请求：{{ investigation_state.model_requests_used }} / {{ investigation_state.model_request_limit }}，剩余 {{ investigation_state.model_requests_remaining }}
+- 工具调用：{{ investigation_state.tool_calls_used }} / {{ investigation_state.tool_call_limit }}，剩余 {{ investigation_state.tool_calls_remaining }}
+- 最终状态：{{ (investigation_state.final_status.value if investigation_state.final_status else "NONE") | e }}
+- 最终门禁原因：{{ (investigation_state.gate_reason or "NONE") | e }}
 
 ## 引用证据
 

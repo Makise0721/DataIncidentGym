@@ -154,4 +154,25 @@ class DiagnosisRunResult(BaseModel):
         evidence_ids = tuple(record.evidence_id for record in self.evidence_records)
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("evidence_records must not contain duplicate evidence_id values")
+        terminal_events = tuple(
+            event for event in self.trace if isinstance(event, KernelStateTraceEvent)
+        )
+        if len(terminal_events) != 1 or not self.trace or self.trace[-1] != terminal_events[0]:
+            raise ValueError("trace requires one terminal Kernel state")
+        if terminal_events[0].state != self.investigation_state:
+            raise ValueError("terminal Kernel state must equal investigation_state")
+        if self.investigation_state.incident_case_id != self.diagnosis.incident_case_id:
+            raise ValueError("Kernel case must match diagnosis")
+        if self.investigation_state.run_id != self.diagnosis.run_id:
+            raise ValueError("Kernel run must match diagnosis")
+        if self.investigation_state.evidence_inventory != evidence_ids:
+            raise ValueError("Kernel evidence inventory must match records exactly")
+        if self.investigation_state.model_requests_used != self.metrics.model_requests:
+            raise ValueError("Kernel model budget must match metrics")
+        if self.investigation_state.tool_calls_used != self.metrics.tool_call_attempts:
+            raise ValueError("Kernel tool budget must match metrics")
+        if self.investigation_state.final_status is None:
+            raise ValueError("run result requires terminal Kernel status")
+        if self.investigation_state.final_status.value != self.diagnosis.status.value:
+            raise ValueError("Kernel final status must match diagnosis")
         return self

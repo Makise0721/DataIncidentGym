@@ -29,6 +29,19 @@ from data_incident_gym.diagnosis import (
     EvidenceGateTraceEvent,
     ToolTraceEvent,
 )
+from data_incident_gym.diagnostic_kernel import (
+    ClaimEvidence,
+    ClaimKind,
+    EvidenceGap,
+    EvidenceGapKind,
+    EvidenceGapStatus,
+    Hypothesis,
+    HypothesisAssessment,
+    HypothesisVerdict,
+    InvestigationState,
+    KernelFinalStatus,
+    KernelStateTraceEvent,
+)
 from data_incident_gym.evaluation import (
     DeterministicEvaluator,
     EvaluationResult,
@@ -106,6 +119,114 @@ def _recorded_event(
         evidence_ids=evidence_ids,
         error_code=error_code,
         elapsed_ms=elapsed_ms,
+    )
+
+
+def _kernel_state(
+    run_id: str,
+    truth,
+    diagnosis: Diagnosis,
+    records: tuple[EvidenceRecord, ...],
+) -> InvestigationState:
+    run_results, node_error, schema, lineage = records
+    selected_id = "h_selected"
+    alternative_id = "h_alternative"
+    alternative_code = next(
+        code
+        for code in (
+            "SOURCE_SCHEMA_COLUMN_RENAMED",
+            "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        )
+        if code != truth.root_cause_code
+    )
+    return InvestigationState(
+        schema_version="m6.investigation.v1",
+        incident_case_id=CASE_ID,
+        run_id=run_id,
+        revision=8,
+        allowed_root_cause_codes=(
+            "SOURCE_SCHEMA_COLUMN_RENAMED",
+            "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        ),
+        hypotheses=(
+            Hypothesis(hypothesis_id=selected_id, root_cause_code=truth.root_cause_code),
+            Hypothesis(hypothesis_id=alternative_id, root_cause_code=alternative_code),
+        ),
+        gaps=(
+            EvidenceGap(
+                gap_id="g_locate",
+                gap_kind=EvidenceGapKind.LOCATE_FAILURE,
+                hypothesis_ids=(selected_id, alternative_id),
+                tool_name="get_dbt_run_results",
+                status=EvidenceGapStatus.CLOSED,
+                evidence_ids=(run_results.evidence_id,),
+            ),
+            EvidenceGap(
+                gap_id="g_explain",
+                gap_kind=EvidenceGapKind.EXPLAIN_FAILURE,
+                hypothesis_ids=(selected_id, alternative_id),
+                tool_name="get_dbt_node_error",
+                status=EvidenceGapStatus.CLOSED,
+                evidence_ids=(node_error.evidence_id,),
+            ),
+            EvidenceGap(
+                gap_id="g_schema",
+                gap_kind=EvidenceGapKind.DISCRIMINATE_SCHEMA,
+                hypothesis_ids=(selected_id, alternative_id),
+                tool_name="get_relation_schema",
+                status=EvidenceGapStatus.CLOSED,
+                evidence_ids=(schema.evidence_id,),
+            ),
+            EvidenceGap(
+                gap_id="g_impact",
+                gap_kind=EvidenceGapKind.MAP_IMPACT,
+                hypothesis_ids=(selected_id, alternative_id),
+                tool_name="get_dbt_lineage",
+                status=EvidenceGapStatus.CLOSED,
+                evidence_ids=(lineage.evidence_id,),
+            ),
+        ),
+        assessments=(
+            HypothesisAssessment(
+                hypothesis_id=selected_id,
+                verdict=HypothesisVerdict.SUPPORTED,
+                evidence_ids=(node_error.evidence_id, schema.evidence_id),
+            ),
+            HypothesisAssessment(
+                hypothesis_id=alternative_id,
+                verdict=HypothesisVerdict.REFUTED,
+                evidence_ids=(schema.evidence_id,),
+            ),
+        ),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value=truth.root_cause_code,
+                evidence_ids=(node_error.evidence_id, schema.evidence_id),
+            ),
+            *(
+                ClaimEvidence(
+                    kind=ClaimKind.AFFECTED_ASSET,
+                    value=asset,
+                    evidence_ids=(
+                        node_error.evidence_id
+                        if asset == truth.direct_failure
+                        else lineage.evidence_id,
+                    ),
+                )
+                for asset in diagnosis.affected_assets
+            ),
+        ),
+        evidence_inventory=tuple(record.evidence_id for record in records),
+        tool_fingerprints=("1" * 64, "2" * 64, "3" * 64, "4" * 64),
+        model_request_limit=8,
+        model_requests_used=4,
+        model_requests_remaining=4,
+        tool_call_limit=8,
+        tool_calls_used=4,
+        tool_calls_remaining=4,
+        final_status=KernelFinalStatus.CONFIRMED,
+        gate_reason="CONFIRMED",
     )
 
 
@@ -240,10 +361,13 @@ def _artifact_run(
             accepted=True,
         ),
     )
+    records = (run_results, node_error, schema, lineage)
+    state = _kernel_state(run_id, truth, diagnosis, records)
     diagnosis_run = DiagnosisRunResult(
         diagnosis=diagnosis,
-        evidence_records=(run_results, node_error, schema, lineage),
-        trace=trace,
+        evidence_records=records,
+        trace=(*trace, KernelStateTraceEvent(event_type="KERNEL_STATE", state=state)),
+        investigation_state=state,
         metrics=DiagnosisMetrics(
             provider="openai-compatible",
             model="mimo-v2.5",
@@ -302,6 +426,7 @@ def test_writer_publishes_exactly_six_round_trippable_files(
 
     assert output == tmp_path / "artifacts" / artifact_run.run_id
     assert {path.name for path in output.iterdir()} == EXPECTED_FILES
+    assert len(tuple(output.iterdir())) == len(ARTIFACT_FILENAMES)
     assert RunMetadata.model_validate_json(read(output / "metadata.json")).run_id == (
         artifact_run.run_id
     )
@@ -316,6 +441,9 @@ def test_writer_publishes_exactly_six_round_trippable_files(
     )
     assert [TraceEnvelope.model_validate_json(line).sequence for line in lines(output)] == list(
         range(1, len(artifact_run.diagnosis_run.trace) + 1)
+    )
+    assert TraceEnvelope.model_validate_json(lines(output)[-1]).event.state == (
+        artifact_run.diagnosis_run.investigation_state
     )
 
 
@@ -339,7 +467,7 @@ def test_trace_jsonl_preserves_order_duration_errors_and_evidence_references(
     )
     stored = [TraceEnvelope.model_validate_json(line) for line in lines(output)]
 
-    assert [item.sequence for item in stored] == [1, 2, 3, 4, 5]
+    assert [item.sequence for item in stored] == [1, 2, 3, 4, 5, 6]
     tool_events = [item.event for item in stored if item.event.event_type == "TOOL_CALL"]
     assert [event.elapsed_ms for event in tool_events] == [4, 12, 7, 9]
     assert tool_events[1].error_code == "EVIDENCE_TOOL_ERROR"
@@ -364,7 +492,7 @@ def test_metadata_contains_revision_dirty_flag_safe_config_prompt_hash_and_metri
     assert metadata.provider == "openai-compatible"
     assert metadata.model == "mimo-v2.5"
     assert metadata.model_base_url == MODEL_BASE_URL
-    assert metadata.prompt_version == "m5.diagnosis.v7"
+    assert metadata.prompt_version == "m6.diagnosis.v1"
     assert len(metadata.prompt_sha256) == 64
     assert metadata.diagnosis_metrics == artifact_run.diagnosis_run.metrics
     assert metadata.budget.model_request_limit == 8
@@ -384,6 +512,16 @@ def test_report_is_deterministic_chinese_and_contains_every_failed_check(
     assert "DataIncidentGym" in report
     assert "评测" in report
     assert "RECOVERY_HEALTHY_FAILED" in report
+    for hypothesis in failed_artifact_run.diagnosis_run.investigation_state.hypotheses:
+        assert hypothesis.root_cause_code in report
+    for gap in failed_artifact_run.diagnosis_run.investigation_state.gaps:
+        assert gap.gap_id in report
+    for claim in failed_artifact_run.diagnosis_run.investigation_state.claims:
+        assert claim.value in report
+    assert "模型请求：4 / 8，剩余 4" in report
+    assert "工具调用：4 / 8，剩余 4" in report
+    assert "最终状态：CONFIRMED" in report
+    assert "最终门禁原因：CONFIRMED" in report
     assert report.endswith("\n")
     assert not report.endswith("\n\n")
     assert all(check.reason_code in report for check in failed_artifact_run.evaluation.checks)

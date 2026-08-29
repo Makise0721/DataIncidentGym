@@ -15,7 +15,11 @@ from data_incident_gym.diagnostic_agent import (
     SYSTEM_PROMPT_SHA256,
     SYSTEM_PROMPT_VERSION,
 )
-from data_incident_gym.diagnostic_kernel import DiagnosticKernel, KernelStateTraceEvent
+from data_incident_gym.diagnostic_kernel import (
+    DiagnosticKernel,
+    KernelFinalStatus,
+    KernelStateTraceEvent,
+)
 
 RUN_ID = "0123456789abcdef0123456789abcdef"
 CASE_ID = "schema_rename_payment_amount"
@@ -200,7 +204,12 @@ def test_diagnosis_run_result_contains_terminal_kernel_state() -> None:
         model_request_limit=8,
         tool_call_limit=8,
     )
-    state = kernel.snapshot(model_requests_used=0)
+    state = kernel.snapshot(model_requests_used=0).model_copy(
+        update={
+            "final_status": KernelFinalStatus.INSUFFICIENT_EVIDENCE,
+            "gate_reason": "INSUFFICIENT_EVIDENCE",
+        }
+    )
     diagnosis = Diagnosis.model_validate(
         {
             "status": "INSUFFICIENT_EVIDENCE",
@@ -240,6 +249,103 @@ def test_diagnosis_run_result_contains_terminal_kernel_state() -> None:
         "investigation_state",
         "metrics",
     }
+
+
+def test_run_result_requires_one_identical_terminal_kernel_snapshot() -> None:
+    kernel = DiagnosticKernel.start(
+        incident_case_id=CASE_ID,
+        run_id=RUN_ID,
+        allowed_root_cause_codes=ONTOLOGY,
+        model_request_limit=8,
+        tool_call_limit=8,
+    )
+    state = kernel.snapshot(model_requests_used=0)
+    diagnosis = Diagnosis.model_validate(
+        {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "incident_case_id": CASE_ID,
+            "run_id": RUN_ID,
+            "root_cause_code": None,
+            "summary": "The available evidence is insufficient.",
+            "affected_assets": (),
+            "evidence_ids": (),
+            "recommended_actions": ("Collect additional evidence.",),
+            "confidence": 0.2,
+        }
+    )
+    base = {
+        "diagnosis": diagnosis,
+        "evidence_records": (),
+        "trace": (KernelStateTraceEvent(event_type="KERNEL_STATE", state=state),),
+        "investigation_state": state,
+        "metrics": {
+            "provider": "pydantic-function",
+            "model": "scripted-kernel-model",
+            "model_requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "tool_call_attempts": 0,
+            "successful_tool_calls": 0,
+            "elapsed_ms": 0,
+        },
+    }
+    missing_terminal = {**base, "trace": ()}
+    with pytest.raises(ValidationError, match="terminal Kernel state"):
+        DiagnosisRunResult.model_validate(missing_terminal)
+
+    wrong_state = state.model_copy(update={"revision": state.revision + 1})
+    non_identical_terminal = {
+        **base,
+        "trace": (KernelStateTraceEvent(event_type="KERNEL_STATE", state=wrong_state),),
+    }
+    with pytest.raises(ValidationError, match="terminal Kernel state must equal"):
+        DiagnosisRunResult.model_validate(non_identical_terminal)
+
+
+def test_run_result_rejects_inventory_or_identity_drift() -> None:
+    kernel = DiagnosticKernel.start(
+        incident_case_id=CASE_ID,
+        run_id=RUN_ID,
+        allowed_root_cause_codes=ONTOLOGY,
+        model_request_limit=8,
+        tool_call_limit=8,
+    )
+    state = kernel.snapshot(model_requests_used=0)
+    diagnosis = Diagnosis.model_validate(
+        {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "incident_case_id": CASE_ID,
+            "run_id": RUN_ID,
+            "root_cause_code": None,
+            "summary": "The available evidence is insufficient.",
+            "affected_assets": (),
+            "evidence_ids": (),
+            "recommended_actions": ("Collect additional evidence.",),
+            "confidence": 0.2,
+        }
+    )
+    wrong_state = state.model_copy(update={"evidence_inventory": (EVIDENCE_ID,)})
+    with pytest.raises(ValidationError, match="Kernel evidence inventory"):
+        DiagnosisRunResult.model_validate(
+            {
+                "diagnosis": diagnosis,
+                "evidence_records": (),
+                "trace": (
+                    KernelStateTraceEvent(event_type="KERNEL_STATE", state=wrong_state),
+                ),
+                "investigation_state": wrong_state,
+                "metrics": {
+                    "provider": "pydantic-function",
+                    "model": "scripted-kernel-model",
+                    "model_requests": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "tool_call_attempts": 0,
+                    "successful_tool_calls": 0,
+                    "elapsed_ms": 0,
+                },
+            }
+        )
 
 
 def test_tool_trace_event_requires_nonnegative_strict_elapsed_ms() -> None:

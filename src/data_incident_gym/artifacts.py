@@ -38,6 +38,7 @@ from data_incident_gym.diagnostic_agent import (
     SYSTEM_PROMPT_SHA256,
     SYSTEM_PROMPT_VERSION,
 )
+from data_incident_gym.diagnostic_kernel import KernelStateTraceEvent
 from data_incident_gym.evaluation import (
     EvaluationCheckCode,
     EvaluationResult,
@@ -101,7 +102,7 @@ class BudgetSummary(BaseModel):
 class TraceEnvelope(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["m5.trace.v1"]
+    schema_version: Literal["m6.trace.v1"]
     sequence: Annotated[StrictInt, Field(ge=1)]
     event: TraceEvent
 
@@ -109,7 +110,7 @@ class TraceEnvelope(BaseModel):
 class EvidenceArtifact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["m5.evidence.v1"]
+    schema_version: Literal["m6.evidence.v1"]
     incident_case_id: CaseId
     run_id: RunId
     records: tuple[EvidenceRecord, ...]
@@ -124,7 +125,7 @@ class EvidenceArtifact(BaseModel):
 class RunMetadata(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["m5.metadata.v1"]
+    schema_version: Literal["m6.metadata.v1"]
     incident_case_id: CaseId
     run_id: RunId
     code_revision: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{40}$")]
@@ -133,7 +134,7 @@ class RunMetadata(BaseModel):
     model: StrictStr
     model_base_url: StrictStr
     budget: BudgetSummary
-    prompt_version: Literal["m5.diagnosis.v7"]
+    prompt_version: Literal["m6.diagnosis.v1"]
     prompt_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
     started_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]
     finished_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]
@@ -303,7 +304,7 @@ class ArtifactWriter:
         )
         elapsed_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
         return RunMetadata(
-            schema_version="m5.metadata.v1",
+            schema_version="m6.metadata.v1",
             incident_case_id=run.incident_case_id,
             run_id=run.run_id,
             code_revision=revision,
@@ -332,7 +333,7 @@ class ArtifactWriter:
         metadata = self._build_metadata(run)
         trace = "".join(
             TraceEnvelope(
-                schema_version="m5.trace.v1",
+                schema_version="m6.trace.v1",
                 sequence=index,
                 event=event,
             ).model_dump_json()
@@ -343,7 +344,7 @@ class ArtifactWriter:
             "metadata.json": metadata.model_dump_json(indent=2) + "\n",
             "trace.jsonl": trace,
             "evidence.json": EvidenceArtifact(
-                schema_version="m5.evidence.v1",
+                schema_version="m6.evidence.v1",
                 incident_case_id=run.incident_case_id,
                 run_id=run.run_id,
                 records=run.diagnosis_run.evidence_records,
@@ -382,6 +383,11 @@ class ArtifactWriter:
             for evidence_id in run.diagnosis_run.diagnosis.evidence_ids
             if evidence_id in evidence_by_id
         )
+        investigation_state = run.diagnosis_run.investigation_state
+        verdict_by_id = {
+            assessment.hypothesis_id: assessment.verdict.value
+            for assessment in investigation_state.assessments
+        }
         rendered = template.render(
             incident_case_id=run.incident_case_id,
             run_id=run.run_id,
@@ -394,6 +400,8 @@ class ArtifactWriter:
             cited_evidence=cited_evidence,
             metrics=run.diagnosis_run.metrics,
             recovery_status=run.recovery_status,
+            investigation_state=investigation_state,
+            verdict_by_id=verdict_by_id,
         )
         return rendered.rstrip("\n") + "\n"
 
@@ -442,6 +450,12 @@ class ArtifactWriter:
             raise ValueError("evidence changed during artifact validation")
         if tuple(item.event for item in trace_envelopes) != run.diagnosis_run.trace:
             raise ValueError("trace changed during artifact validation")
+        if not trace_envelopes or not isinstance(
+            trace_envelopes[-1].event, KernelStateTraceEvent
+        ):
+            raise ValueError("trace must end with Kernel state")
+        if trace_envelopes[-1].event.state != run.diagnosis_run.investigation_state:
+            raise ValueError("Kernel state changed during artifact validation")
         if tuple(item.sequence for item in trace_envelopes) != tuple(
             range(1, len(run.diagnosis_run.trace) + 1)
         ):

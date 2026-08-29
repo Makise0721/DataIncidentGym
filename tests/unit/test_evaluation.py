@@ -14,6 +14,19 @@ from data_incident_gym.diagnosis import (
     EvidenceGateTraceEvent,
     ToolTraceEvent,
 )
+from data_incident_gym.diagnostic_kernel import (
+    ClaimEvidence,
+    ClaimKind,
+    EvidenceGap,
+    EvidenceGapKind,
+    EvidenceGapStatus,
+    Hypothesis,
+    HypothesisAssessment,
+    HypothesisVerdict,
+    InvestigationState,
+    KernelFinalStatus,
+    KernelStateTraceEvent,
+)
 from data_incident_gym.evaluation import (
     ALLOWED_DIAGNOSTIC_TOOLS,
     DeterministicEvaluator,
@@ -41,6 +54,9 @@ OTHER_RUN_ID = "c" * 32
 OBSERVED_AT = datetime(2026, 8, 28, 0, 0, tzinfo=UTC)
 CHECK_ORDER = (
     "ENVIRONMENT_VERIFIED",
+    "INVESTIGATION_STATE_VALID",
+    "ALTERNATIVE_HYPOTHESIS_REFUTED",
+    "CLAIM_EVIDENCE_COVERAGE",
     "DIAGNOSIS_CONFIRMED",
     "ROOT_CAUSE_EXACT",
     "AFFECTED_ASSETS_EXACT",
@@ -50,6 +66,10 @@ CHECK_ORDER = (
     "EVIDENCE_CONTENT_COMPATIBLE",
     "TRACE_READ_ONLY_SAFE",
     "RECOVERY_HEALTHY",
+)
+APPROVED_ROOT_CAUSE_CODES = (
+    "SOURCE_SCHEMA_COLUMN_RENAMED",
+    "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
 )
 
 
@@ -66,6 +86,113 @@ def _tool_event(
         fingerprint=fingerprint,
         evidence_ids=evidence_ids,
         elapsed_ms=0,
+    )
+
+
+def _kernel_state(
+    truth: GroundTruth,
+    diagnosis: Diagnosis,
+    records: tuple[EvidenceRecord, ...],
+) -> InvestigationState:
+    run_results, node_error, schema, lineage = records
+    selected_id = "h_selected"
+    alternative_id = "h_alternative"
+    alternative_code = next(
+        code
+        for code in APPROVED_ROOT_CAUSE_CODES
+        if code != truth.root_cause_code
+    )
+    return InvestigationState(
+        schema_version="m6.investigation.v1",
+        incident_case_id=CASE_ID,
+        run_id=RUN_ID,
+        revision=8,
+        allowed_root_cause_codes=APPROVED_ROOT_CAUSE_CODES,
+        hypotheses=(
+            Hypothesis(
+                hypothesis_id=selected_id,
+                root_cause_code=truth.root_cause_code,
+            ),
+            Hypothesis(
+                hypothesis_id=alternative_id,
+                root_cause_code=alternative_code,
+            ),
+        ),
+        gaps=(
+            EvidenceGap(
+                gap_id="g_locate",
+                gap_kind=EvidenceGapKind.LOCATE_FAILURE,
+                hypothesis_ids=(selected_id, alternative_id),
+                tool_name="get_dbt_run_results",
+                status=EvidenceGapStatus.CLOSED,
+                evidence_ids=(run_results.evidence_id,),
+            ),
+            EvidenceGap(
+                gap_id="g_explain",
+                gap_kind=EvidenceGapKind.EXPLAIN_FAILURE,
+                hypothesis_ids=(selected_id, alternative_id),
+                tool_name="get_dbt_node_error",
+                status=EvidenceGapStatus.CLOSED,
+                evidence_ids=(node_error.evidence_id,),
+            ),
+            EvidenceGap(
+                gap_id="g_schema",
+                gap_kind=EvidenceGapKind.DISCRIMINATE_SCHEMA,
+                hypothesis_ids=(selected_id, alternative_id),
+                tool_name="get_relation_schema",
+                status=EvidenceGapStatus.CLOSED,
+                evidence_ids=(schema.evidence_id,),
+            ),
+            EvidenceGap(
+                gap_id="g_impact",
+                gap_kind=EvidenceGapKind.MAP_IMPACT,
+                hypothesis_ids=(selected_id, alternative_id),
+                tool_name="get_dbt_lineage",
+                status=EvidenceGapStatus.CLOSED,
+                evidence_ids=(lineage.evidence_id,),
+            ),
+        ),
+        assessments=(
+            HypothesisAssessment(
+                hypothesis_id=selected_id,
+                verdict=HypothesisVerdict.SUPPORTED,
+                evidence_ids=(node_error.evidence_id, schema.evidence_id),
+            ),
+            HypothesisAssessment(
+                hypothesis_id=alternative_id,
+                verdict=HypothesisVerdict.REFUTED,
+                evidence_ids=(schema.evidence_id,),
+            ),
+        ),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value=truth.root_cause_code,
+                evidence_ids=(node_error.evidence_id, schema.evidence_id),
+            ),
+            *(
+                ClaimEvidence(
+                    kind=ClaimKind.AFFECTED_ASSET,
+                    value=asset,
+                    evidence_ids=(
+                        node_error.evidence_id
+                        if asset == truth.direct_failure
+                        else lineage.evidence_id,
+                    ),
+                )
+                for asset in diagnosis.affected_assets
+            ),
+        ),
+        evidence_inventory=tuple(record.evidence_id for record in records),
+        tool_fingerprints=("1" * 64, "2" * 64, "3" * 64, "4" * 64),
+        model_request_limit=8,
+        model_requests_used=4,
+        model_requests_remaining=4,
+        tool_call_limit=8,
+        tool_calls_used=4,
+        tool_calls_remaining=4,
+        final_status=KernelFinalStatus.CONFIRMED,
+        gate_reason="CONFIRMED",
     )
 
 
@@ -189,10 +316,13 @@ def _valid_inputs() -> tuple[GroundTruth, LabVerification, DiagnosisRunResult]:
             accepted=True,
         ),
     )
+    records = (run_results, node_error, schema, lineage)
+    state = _kernel_state(truth, diagnosis, records)
     diagnosis_run = DiagnosisRunResult(
         diagnosis=diagnosis,
-        evidence_records=(run_results, node_error, schema, lineage),
-        trace=trace,
+        evidence_records=records,
+        trace=(*trace, KernelStateTraceEvent(event_type="KERNEL_STATE", state=state)),
+        investigation_state=state,
         metrics=DiagnosisMetrics(
             provider="openai-compatible",
             model="mimo-v2.5",
@@ -424,12 +554,169 @@ def _mutate(
         return (
             truth,
             verification,
-            diagnosis_run.model_copy(update={"trace": diagnosis_run.trace[:-2]}),
+            diagnosis_run.model_copy(update={"trace": diagnosis_run.trace[1:]}),
             True,
         )
     if mutation == "recovery_failed":
         return truth, verification, diagnosis_run, False
     raise AssertionError(f"unknown mutation: {mutation}")
+
+
+def _with_terminal_state(
+    diagnosis_run: DiagnosisRunResult,
+    state: InvestigationState,
+) -> DiagnosisRunResult:
+    return diagnosis_run.model_copy(
+        update={
+            "investigation_state": state,
+            "trace": (
+                *diagnosis_run.trace[:-1],
+                KernelStateTraceEvent(event_type="KERNEL_STATE", state=state),
+            ),
+        }
+    )
+
+
+def _mutate_kernel(
+    inputs: tuple[GroundTruth, LabVerification, DiagnosisRunResult],
+    mutation: str,
+) -> tuple[GroundTruth, LabVerification, DiagnosisRunResult]:
+    truth, verification, diagnosis_run = inputs
+    state = diagnosis_run.investigation_state
+    if mutation == "terminal_state_missing":
+        return truth, verification, diagnosis_run.model_copy(
+            update={"trace": diagnosis_run.trace[:-1]}
+        )
+    if mutation == "terminal_state_not_identical":
+        wrong_state = state.model_copy(update={"revision": state.revision + 1})
+        return truth, verification, diagnosis_run.model_copy(
+            update={
+                "trace": (
+                    *diagnosis_run.trace[:-1],
+                    KernelStateTraceEvent(event_type="KERNEL_STATE", state=wrong_state),
+                )
+            }
+        )
+    if mutation == "inventory_drift":
+        return truth, verification, _with_terminal_state(
+            diagnosis_run,
+            state.model_copy(
+                update={"evidence_inventory": state.evidence_inventory[:-1]}
+            ),
+        )
+    if mutation == "budget_drift":
+        return truth, verification, _with_terminal_state(
+            diagnosis_run,
+            state.model_copy(
+                update={
+                    "model_requests_used": 3,
+                    "model_requests_remaining": 5,
+                }
+            ),
+        )
+    if mutation == "selected_not_supported":
+        selected = state.assessments[0].model_copy(
+            update={"verdict": HypothesisVerdict.REFUTED}
+        )
+        return truth, verification, _with_terminal_state(
+            diagnosis_run,
+            state.model_copy(update={"assessments": (selected, *state.assessments[1:])}),
+        )
+    if mutation == "no_refuted_alternative":
+        alternative = state.assessments[1].model_copy(
+            update={"verdict": HypothesisVerdict.SUPPORTED}
+        )
+        return truth, verification, _with_terminal_state(
+            diagnosis_run,
+            state.model_copy(update={"assessments": (state.assessments[0], alternative)}),
+        )
+    if mutation == "root_claim_missing_schema":
+        root_claim = state.claims[0].model_copy(
+            update={"evidence_ids": (state.claims[0].evidence_ids[0],)}
+        )
+        return truth, verification, _with_terminal_state(
+            diagnosis_run,
+            state.model_copy(update={"claims": (root_claim, *state.claims[1:])}),
+        )
+    if mutation == "asset_claim_missing_lineage":
+        asset_index = next(
+            index
+            for index, claim in enumerate(state.claims)
+            if claim.kind == ClaimKind.AFFECTED_ASSET
+            and claim.value != truth.direct_failure
+        )
+        direct_claim = next(
+            claim
+            for claim in state.claims
+            if claim.kind == ClaimKind.AFFECTED_ASSET
+            and claim.value == truth.direct_failure
+        )
+        asset_claim = state.claims[asset_index].model_copy(
+            update={"evidence_ids": (direct_claim.evidence_ids[0],)}
+        )
+        claims = list(state.claims)
+        claims[asset_index] = asset_claim
+        return truth, verification, _with_terminal_state(
+            diagnosis_run,
+            state.model_copy(update={"claims": tuple(claims)}),
+        )
+    if mutation == "claim_not_projected_to_diagnosis":
+        diagnosis = diagnosis_run.diagnosis.model_copy(
+            update={"evidence_ids": diagnosis_run.diagnosis.evidence_ids[:-1]}
+        )
+        return truth, verification, diagnosis_run.model_copy(
+            update={"diagnosis": diagnosis}
+        )
+    if mutation == "foreign_run_claim_evidence":
+        schema_id = next(
+            record.evidence_id
+            for record in diagnosis_run.evidence_records
+            if record.evidence_type == EvidenceType.RELATION_SCHEMA
+        )
+        records = tuple(
+            record.model_copy(update={"run_id": OTHER_RUN_ID})
+            if record.evidence_id == schema_id
+            else record
+            for record in diagnosis_run.evidence_records
+        )
+        return truth, verification, diagnosis_run.model_copy(
+            update={"evidence_records": records}
+        )
+    raise AssertionError(f"unknown Kernel mutation: {mutation}")
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failed_code"),
+    (
+        ("terminal_state_missing", "INVESTIGATION_STATE_VALID"),
+        ("terminal_state_not_identical", "INVESTIGATION_STATE_VALID"),
+        ("inventory_drift", "INVESTIGATION_STATE_VALID"),
+        ("budget_drift", "INVESTIGATION_STATE_VALID"),
+        ("selected_not_supported", "INVESTIGATION_STATE_VALID"),
+        ("no_refuted_alternative", "ALTERNATIVE_HYPOTHESIS_REFUTED"),
+        ("root_claim_missing_schema", "CLAIM_EVIDENCE_COVERAGE"),
+        ("asset_claim_missing_lineage", "CLAIM_EVIDENCE_COVERAGE"),
+        ("claim_not_projected_to_diagnosis", "CLAIM_EVIDENCE_COVERAGE"),
+        ("foreign_run_claim_evidence", "CLAIM_EVIDENCE_COVERAGE"),
+    ),
+)
+def test_kernel_mutations_fail_closed(
+    valid_inputs: tuple[GroundTruth, LabVerification, DiagnosisRunResult],
+    mutation: str,
+    failed_code: str,
+) -> None:
+    ground_truth, verification, diagnosis_run = _mutate_kernel(valid_inputs, mutation)
+    result = DeterministicEvaluator.evaluate(
+        ground_truth,
+        verification,
+        diagnosis_run,
+        recovery_succeeded=True,
+    )
+
+    assert result.status == EvaluationStatus.FAILED
+    assert failed_code in {
+        check.code.value for check in result.checks if not check.passed
+    }
 
 
 def _check(result: EvaluationResult, code: str) -> EvaluationCheck:
