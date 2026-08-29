@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+from data_incident_gym.diagnostic_kernel import InvestigationState, KernelStateTraceEvent
 from data_incident_gym.evidence import EvidenceRecord
 
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
@@ -120,7 +121,10 @@ class EvidenceGateTraceEvent(BaseModel):
     accepted: StrictBool
 
 
-TraceEvent = Annotated[ToolTraceEvent | EvidenceGateTraceEvent, Field(discriminator="event_type")]
+TraceEvent = Annotated[
+    ToolTraceEvent | EvidenceGateTraceEvent | KernelStateTraceEvent,
+    Field(discriminator="event_type"),
+]
 
 
 class DiagnosisMetrics(BaseModel):
@@ -142,6 +146,7 @@ class DiagnosisRunResult(BaseModel):
     diagnosis: Diagnosis
     evidence_records: tuple[EvidenceRecord, ...]
     trace: tuple[TraceEvent, ...]
+    investigation_state: InvestigationState
     metrics: DiagnosisMetrics
 
     @model_validator(mode="after")

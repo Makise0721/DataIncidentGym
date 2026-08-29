@@ -14,54 +14,30 @@ from data_incident_gym.diagnostic_agent import (
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_SHA256,
     SYSTEM_PROMPT_VERSION,
-    _DiagnosisDecision,
 )
+from data_incident_gym.diagnostic_kernel import DiagnosticKernel, KernelStateTraceEvent
 
 RUN_ID = "0123456789abcdef0123456789abcdef"
+CASE_ID = "schema_rename_payment_amount"
 EVIDENCE_ID = "ev_" + "a" * 64
-
-
-def decision_payload() -> dict[str, object]:
-    return {
-        "status": "CONFIRMED",
-        "incident_case_id": "schema_rename_payment_amount",
-        "run_id": RUN_ID,
-        "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
-        "summary": (
-            "The source column changed while a downstream model still references the old name."
-        ),
-        "recommended_actions": ("Restore the consumer reference or update the source contract.",),
-        "confidence": 0.9,
-    }
+ONTOLOGY = (
+    "SOURCE_SCHEMA_COLUMN_RENAMED",
+    "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+)
 
 
 def confirmed_payload() -> dict[str, object]:
     return {
         "status": "CONFIRMED",
-        "incident_case_id": "schema_rename_payment_amount",
+        "incident_case_id": CASE_ID,
         "run_id": RUN_ID,
         "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
-        "summary": (
-            "The source column changed while a downstream model still references the old name."
-        ),
+        "summary": "The source column changed while a consumer still references the old name.",
         "affected_assets": ("stg_payments", "orders"),
         "evidence_ids": (EVIDENCE_ID,),
-        "recommended_actions": ("Restore the consumer reference or update the source contract.",),
+        "recommended_actions": ("Restore the consumer reference.",),
         "confidence": 0.9,
     }
-
-
-def nonconfirmed_payload(status: str) -> dict[str, object]:
-    payload = confirmed_payload()
-    payload.update(
-        {
-            "status": status,
-            "root_cause_code": None,
-            "affected_assets": (),
-            "summary": "The available evidence does not support a confirmed diagnosis.",
-        }
-    )
-    return payload
 
 
 def assert_invalid(changes: dict[str, object]) -> None:
@@ -81,17 +57,31 @@ def test_confirmed_requires_root_assets_evidence_and_actions() -> None:
 
 @pytest.mark.parametrize("status", ["INSUFFICIENT_EVIDENCE", "MODEL_ERROR"])
 def test_nonconfirmed_status_rejects_unproven_claims(status: str) -> None:
-    payload = nonconfirmed_payload(status)
+    payload = confirmed_payload()
+    payload.update(
+        {
+            "status": status,
+            "root_cause_code": None,
+            "affected_assets": (),
+            "summary": "The available evidence does not support a confirmed diagnosis.",
+        }
+    )
     payload["root_cause_code"] = "SOURCE_SCHEMA_COLUMN_RENAMED"
     with pytest.raises(ValidationError):
         Diagnosis.model_validate(payload)
 
 
 def test_model_error_accepts_only_fixed_safe_reason_code() -> None:
-    payload = nonconfirmed_payload("MODEL_ERROR")
-    payload["summary"] = "MODEL_RUNTIME_ERROR"
+    payload = confirmed_payload()
+    payload.update(
+        {
+            "status": "MODEL_ERROR",
+            "root_cause_code": None,
+            "affected_assets": (),
+            "summary": "MODEL_RUNTIME_ERROR",
+        }
+    )
     assert Diagnosis.model_validate(payload).summary == "MODEL_RUNTIME_ERROR"
-
     payload["summary"] = "MODEL_RUNTIME_ERROR TEST_REDACTED_VALUE"
     with pytest.raises(ValidationError):
         Diagnosis.model_validate(payload)
@@ -127,70 +117,112 @@ def test_confidence_is_a_finite_float_between_zero_and_one(confidence: float) ->
     assert_invalid({"confidence": confidence})
 
 
-def test_diagnosis_decision_has_only_semantic_fields_and_is_frozen() -> None:
-    decision = _DiagnosisDecision.model_validate(decision_payload())
+def test_diagnosis_is_frozen() -> None:
+    diagnosis = Diagnosis.model_validate(confirmed_payload())
+    with pytest.raises(ValidationError):
+        diagnosis.status = "MODEL_ERROR"  # type: ignore[misc]
 
+
+def test_kernel_decision_is_the_only_model_output_contract() -> None:
+    from data_incident_gym.diagnostic_kernel import (
+        ClaimEvidence,
+        ClaimKind,
+        HypothesisAssessment,
+        HypothesisVerdict,
+        KernelDecision,
+    )
+
+    decision = KernelDecision(
+        status="CONFIRMED",
+        incident_case_id=CASE_ID,
+        run_id=RUN_ID,
+        selected_hypothesis_id="h_root",
+        assessments=(
+            HypothesisAssessment(
+                hypothesis_id="h_root",
+                verdict=HypothesisVerdict.SUPPORTED,
+                evidence_ids=(EVIDENCE_ID,),
+            ),
+        ),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value="SOURCE_SCHEMA_COLUMN_RENAMED",
+                evidence_ids=(EVIDENCE_ID,),
+            ),
+        ),
+        summary="A structured decision with explicit claim evidence.",
+        recommended_actions=("Keep the source contract aligned.",),
+        confidence=0.8,
+    )
     assert set(decision.model_dump()) == {
         "status",
         "incident_case_id",
         "run_id",
-        "root_cause_code",
+        "selected_hypothesis_id",
+        "assessments",
+        "claims",
         "summary",
         "recommended_actions",
         "confidence",
     }
     with pytest.raises(ValidationError):
-        decision.status = "MODEL_ERROR"  # type: ignore[misc]
+        decision.status = "INSUFFICIENT_EVIDENCE"  # type: ignore[misc]
 
 
-def test_diagnosis_decision_rejects_final_fields_and_duplicate_actions() -> None:
-    for field in ("affected_assets", "evidence_ids"):
-        payload = decision_payload()
-        payload[field] = ()
-        with pytest.raises(ValidationError):
-            _DiagnosisDecision.model_validate(payload)
+def test_kernel_decision_rejects_controller_fields_and_bad_status_shape() -> None:
+    from data_incident_gym.diagnostic_kernel import KernelDecision
 
-    payload = decision_payload()
-    payload["recommended_actions"] = ("same", "same")
+    base = {
+        "status": "INSUFFICIENT_EVIDENCE",
+        "incident_case_id": CASE_ID,
+        "run_id": RUN_ID,
+        "selected_hypothesis_id": None,
+        "assessments": (),
+        "claims": (),
+        "summary": "More evidence is required.",
+        "recommended_actions": ("Collect source evidence.",),
+        "confidence": 0.2,
+    }
     with pytest.raises(ValidationError):
-        _DiagnosisDecision.model_validate(payload)
-
-
-def test_diagnosis_decision_enforces_status_claim_rules_and_safe_model_error() -> None:
-    payload = decision_payload()
-    payload["root_cause_code"] = None
+        KernelDecision.model_validate({**base, "affected_assets": ()})
     with pytest.raises(ValidationError):
-        _DiagnosisDecision.model_validate(payload)
-
-    for status in ("INSUFFICIENT_EVIDENCE", "MODEL_ERROR"):
-        payload = decision_payload()
-        payload.update({"status": status, "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED"})
-        with pytest.raises(ValidationError):
-            _DiagnosisDecision.model_validate(payload)
-
-    payload = decision_payload()
-    payload.update({"status": "MODEL_ERROR", "root_cause_code": None})
-    payload["summary"] = "MODEL_RUNTIME_ERROR"
-    assert _DiagnosisDecision.model_validate(payload).summary == "MODEL_RUNTIME_ERROR"
-
-    payload["summary"] = "MODEL_RUNTIME_ERROR TEST_REDACTED_VALUE"
-    with pytest.raises(ValidationError):
-        _DiagnosisDecision.model_validate(payload)
+        KernelDecision.model_validate(
+            {**base, "selected_hypothesis_id": "h_root", "claims": ()}
+        )
 
 
-def test_diagnosis_is_frozen_and_run_result_has_exact_contract() -> None:
-    diagnosis = Diagnosis.model_validate(confirmed_payload())
-    with pytest.raises(ValidationError):
-        diagnosis.status = "MODEL_ERROR"  # type: ignore[misc]
-
+def test_diagnosis_run_result_contains_terminal_kernel_state() -> None:
+    kernel = DiagnosticKernel.start(
+        incident_case_id=CASE_ID,
+        run_id=RUN_ID,
+        allowed_root_cause_codes=ONTOLOGY,
+        model_request_limit=8,
+        tool_call_limit=8,
+    )
+    state = kernel.snapshot(model_requests_used=0)
+    diagnosis = Diagnosis.model_validate(
+        {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "incident_case_id": CASE_ID,
+            "run_id": RUN_ID,
+            "root_cause_code": None,
+            "summary": "The available evidence is insufficient.",
+            "affected_assets": (),
+            "evidence_ids": (),
+            "recommended_actions": ("Collect additional evidence.",),
+            "confidence": 0.2,
+        }
+    )
     result = DiagnosisRunResult.model_validate(
         {
             "diagnosis": diagnosis,
             "evidence_records": (),
-            "trace": (),
+            "trace": (KernelStateTraceEvent(event_type="KERNEL_STATE", state=state),),
+            "investigation_state": state,
             "metrics": {
-                "provider": "openai-compatible",
-                "model": "mimo-v2.5",
+                "provider": "pydantic-function",
+                "model": "scripted-kernel-model",
                 "model_requests": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -200,50 +232,39 @@ def test_diagnosis_is_frozen_and_run_result_has_exact_contract() -> None:
             },
         }
     )
-    assert set(result.model_dump()) == {"diagnosis", "evidence_records", "trace", "metrics"}
-    with pytest.raises(ValidationError):
-        DiagnosisRunResult.model_validate({**result.model_dump(), "unexpected": "value"})
+    assert result.investigation_state == result.trace[-1].state
+    assert set(result.model_dump()) == {
+        "diagnosis",
+        "evidence_records",
+        "trace",
+        "investigation_state",
+        "metrics",
+    }
 
 
 def test_tool_trace_event_requires_nonnegative_strict_elapsed_ms() -> None:
     event = ToolTraceEvent(
         event_type="TOOL_CALL",
         tool_name="get_dbt_run_results",
-        arguments={"run_id": "a" * 32},
+        arguments={"run_id": RUN_ID},
         fingerprint="b" * 64,
         evidence_ids=(),
         elapsed_ms=0,
     )
     assert event.elapsed_ms == 0
-
     with pytest.raises(ValidationError):
         ToolTraceEvent.model_validate({**event.model_dump(), "elapsed_ms": -1})
     with pytest.raises(ValidationError):
         ToolTraceEvent.model_validate({**event.model_dump(), "elapsed_ms": 1.0})
 
 
-def test_diagnosis_prompt_is_versioned_hashed_and_case_agnostic() -> None:
-    assert SYSTEM_PROMPT_VERSION == "m5.diagnosis.v7"
+def test_diagnosis_prompt_is_m6_versioned_hashed_and_case_agnostic() -> None:
+    assert SYSTEM_PROMPT_VERSION == "m6.diagnosis.v1"
     assert hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest() == SYSTEM_PROMPT_SHA256
+    assert "InvestigationIntent" in SYSTEM_PROMPT
     assert "SOURCE_SCHEMA_COLUMN_RENAMED" in SYSTEM_PROMPT
-    assert "source relation column was renamed" in SYSTEM_PROMPT
-    assert "Every tool argument" in SYSTEM_PROMPT
-    assert "exact unqualified relation name" in SYSTEM_PROMPT
-    assert "one tool retry is allowed when a tool returns an error code" in SYSTEM_PROMPT
-    assert "Return only the required structured diagnosis decision." in SYSTEM_PROMPT
-    assert "controller derives final" in SYSTEM_PROMPT
-    assert "Do not provide, guess, or rewrite those fields." in SYSTEM_PROMPT
-    assert "downstream lineage for the exact failed node ID" in SYSTEM_PROMPT
-    assert "immediately return the decision" in SYSTEM_PROMPT
-    assert "affected_assets only from node IDs or model names" not in SYSTEM_PROMPT
-    assert "verbatim evidence IDs returned by tools" not in SYSTEM_PROMPT
-    for case_specific_value in (
-        "schema_rename_payment_amount",
-        "raw_payments",
-        "stg_payments",
-        "orders",
-        "customers",
-        "amount",
-        "total_amount",
-    ):
-        assert case_specific_value not in SYSTEM_PROMPT
+    assert "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED" in SYSTEM_PROMPT
+    assert "at least two candidate hypotheses" in SYSTEM_PROMPT
+    assert "Ground Truth" not in SYSTEM_PROMPT
+    assert "schema_rename_payment_amount" not in SYSTEM_PROMPT
+    assert "schema_type_change_payment_amount" not in SYSTEM_PROMPT
