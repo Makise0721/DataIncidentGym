@@ -8,15 +8,19 @@ from data_incident_gym.baseline import (
     RelationSummary,
     make_baseline_summary,
 )
-from data_incident_gym.incidents import CASE_ID, load_ground_truth
+from data_incident_gym.incidents import CASE_ID, SUPPORTED_CASE_IDS, load_ground_truth
 from data_incident_gym.lab_verifier import IncidentVerifier, LabVerificationError
 
 RUN_ID = "0123456789abcdef0123456789abcdef"
 
 
-def _write_valid_run(tmp_path: Path, project_root: Path) -> Path:
-    truth = load_ground_truth(CASE_ID, project_root)
-    config_path = tmp_path / "config/incidents/schema_rename_payment_amount.json"
+def _write_valid_run(
+    tmp_path: Path,
+    project_root: Path,
+    case_id: str = CASE_ID,
+) -> Path:
+    truth = load_ground_truth(case_id, project_root)
+    config_path = tmp_path / "config/incidents" / f"{case_id}.json"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(truth.to_json(), encoding="utf-8")
 
@@ -31,7 +35,7 @@ def _write_valid_run(tmp_path: Path, project_root: Path) -> Path:
             {
                 "schema_version": "m2.run.v1",
                 "run_id": RUN_ID,
-                "incident_case_id": CASE_ID,
+                "incident_case_id": case_id,
                 "dbt_exit_code": 1,
                 "ground_truth_digest": truth.digest(),
                 "artifacts": {
@@ -45,13 +49,16 @@ def _write_valid_run(tmp_path: Path, project_root: Path) -> Path:
         encoding="utf-8",
     )
     relation = RelationSummary(
-        name="raw_payments",
-        row_count=113,
-        columns=(
-            ColumnSummary("id", "integer", True, 1),
-            ColumnSummary("order_id", "integer", True, 2),
-            ColumnSummary("payment_method", "text", True, 3),
-            ColumnSummary("total_amount", "integer", True, 4),
+        name=truth.expected_schema.relation,
+        row_count=truth.expected_schema.row_count,
+        columns=tuple(
+            ColumnSummary(
+                column.name,
+                column.data_type,
+                column.nullable,
+                column.ordinal_position,
+            )
+            for column in truth.expected_schema.fault_column_metadata
         ),
     )
     schema = make_baseline_summary("analytics", (relation,))
@@ -116,6 +123,38 @@ def test_verifier_accepts_expected_failure_and_writes_stable_result(
     assert (run_root / "verification.json").read_text(encoding="utf-8") == (
         result.to_json()
     )
+
+
+@pytest.mark.parametrize("case_id", SUPPORTED_CASE_IDS)
+def test_verifier_contract_is_selected_by_committed_case(
+    project_root: Path,
+    case_id: str,
+) -> None:
+    truth = load_ground_truth(case_id, project_root)
+
+    assert truth.expected_schema.relation == truth.injection.relation
+    assert truth.direct_failure in truth.affected_assets
+    assert truth.required_evidence_types == (
+        "DBT_NODE_ERROR",
+        "RELATION_SCHEMA",
+        "DBT_LINEAGE",
+    )
+
+
+@pytest.mark.parametrize("case_id", SUPPORTED_CASE_IDS)
+def test_verifier_accepts_each_committed_case(
+    tmp_path: Path,
+    project_root: Path,
+    case_id: str,
+) -> None:
+    run_root = _write_valid_run(tmp_path, project_root, case_id)
+
+    result = IncidentVerifier(tmp_path).verify(RUN_ID)
+
+    assert result.incident_case_id == case_id
+    assert result.schema_fingerprint == json.loads(
+        (run_root / "schema.json").read_text(encoding="utf-8")
+    )["fingerprint"]
 
 
 def test_verifier_accepts_manifest_and_run_result_extensions(

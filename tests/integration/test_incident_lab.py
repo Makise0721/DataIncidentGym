@@ -4,24 +4,27 @@ from pathlib import Path
 import pytest
 
 from data_incident_gym.config import Settings
-from data_incident_gym.incidents import CASE_ID
+from data_incident_gym.incidents import SUPPORTED_CASE_IDS
 from data_incident_gym.lab import IncidentLab
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("case_id", SUPPORTED_CASE_IDS)
 def test_incident_lab_captures_expected_failure_and_recovers(
     project_root: Path,
+    case_id: str,
 ) -> None:
     lab = IncidentLab(Settings(_env_file=None), project_root)
-    baseline = lab.reset(CASE_ID)
+    baseline = lab.reset(case_id)
 
     try:
-        injected = lab.inject(CASE_ID)
-        run = lab.build(CASE_ID)
+        injected = lab.inject(case_id)
+        run = lab.build(case_id)
 
         assert injected.state == "INJECTED"
         assert injected.fingerprint != baseline.fingerprint
         assert run.dbt_exit_code != 0
+        assert run.verification.incident_case_id == case_id
         assert run.verification.status == "EXPECTED_FAILURE"
         assert run.verification.failed_nodes == (
             "model.jaffle_shop.stg_payments",
@@ -51,7 +54,7 @@ def test_incident_lab_captures_expected_failure_and_recovers(
         for json_path in run.artifact_dir.rglob("*.json"):
             assert secret not in json_path.read_text(encoding="utf-8")
     finally:
-        recovered = lab.reset(CASE_ID)
+        recovered = lab.reset(case_id)
 
     assert recovered.state == "HEALTHY"
     assert recovered.fingerprint == baseline.fingerprint
