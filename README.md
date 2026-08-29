@@ -136,7 +136,6 @@ finally {
 ## 项目文档
 
 - [`docs/requirements.md`](docs/requirements.md)：唯一需求与验收合同。
-- [`DECISIONS.md`](DECISIONS.md)：关键方案、边界和阶段验收决策记录。
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)：第三方来源、固定版本与复用范围。
 
 ## 第三方许可证
