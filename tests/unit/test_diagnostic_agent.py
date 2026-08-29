@@ -313,11 +313,16 @@ def _output_call(agent_info: AgentInfo, payload: dict[str, object]) -> ModelResp
 
 
 def _intent(gap_id: str, gap_kind: str, **values: object) -> dict[str, object]:
+    hypothesis_ids = tuple(values.pop("hypothesis_ids", ()))
+    new_hypotheses = tuple(values.pop("new_hypotheses", ()))
     return {
         "gap_id": gap_id,
         "gap_kind": gap_kind,
-        "hypothesis_ids": values.pop("hypothesis_ids", ()),
-        "new_hypotheses": values.pop("new_hypotheses", ()),
+        "hypothesis_ids": list(hypothesis_ids),
+        "new_hypothesis_ids": [item["hypothesis_id"] for item in new_hypotheses],  # type: ignore[index]
+        "new_hypothesis_root_cause_codes": [
+            item["root_cause_code"] for item in new_hypotheses  # type: ignore[index]
+        ],
         **values,
     }
 
@@ -481,6 +486,30 @@ async def test_runner_registers_four_tools_and_returns_model_claims(tmp_path: Pa
         item.name for item in registration_model.last_model_request_parameters.function_tools
     } == expected
     assert registration_model.last_model_request_parameters.native_tools == []
+    run_results_tool = next(
+        item
+        for item in registration_model.last_model_request_parameters.function_tools
+        if item.name == "get_dbt_run_results"
+    )
+    intent_schema = run_results_tool.parameters_json_schema["$defs"][
+        "InvestigationIntentTransport"
+    ]
+    assert set(intent_schema["properties"]) == {
+        "gap_id",
+        "gap_kind",
+        "hypothesis_ids",
+        "new_hypothesis_ids",
+        "new_hypothesis_root_cause_codes",
+    }
+    assert all(
+        intent_schema["properties"][name]["type"] == "array"
+        for name in (
+            "hypothesis_ids",
+            "new_hypothesis_ids",
+            "new_hypothesis_root_cause_codes",
+        )
+    )
+    assert "new_hypotheses" not in intent_schema["properties"]
 
     model = _full_scripted_model(_confirmed_payload(root_code="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"))
     result = await _runner(tmp_path, model, tools).diagnose(CASE_ID)
@@ -595,6 +624,40 @@ async def test_invalid_tool_arguments_are_classified_before_tool_entry(
     assert result.investigation_state.tool_calls_used == 0
     assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
     assert "invalid-tool-arguments" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_flat_list_intent_transport_reaches_tool_entry(tmp_path: Path) -> None:
+    tools = SyntheticEvidenceTools()
+    transport_intent = {
+        "gap_id": "g_failure",
+        "gap_kind": "LOCATE_FAILURE",
+        "hypothesis_ids": [],
+        "new_hypothesis_ids": [],
+        "new_hypothesis_root_cause_codes": [],
+    }
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        if not any(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        ):
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_dbt_run_results",
+                        {"run_id": RUN_ID, "intent": transport_intent},
+                        tool_call_id="flat-intent",
+                    )
+                ]
+            )
+        return _output_call(agent_info, _insufficient_payload())
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+    assert [name for name, _ in tools.calls] == ["get_dbt_run_results"]
+    assert result.investigation_state.gaps[0].gap_id == "g_failure"
+    assert result.investigation_state.gaps[0].status.value == "CLOSED"
 
 
 @pytest.mark.asyncio

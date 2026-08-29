@@ -9,7 +9,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
@@ -37,7 +37,9 @@ from data_incident_gym.diagnosis import (
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.diagnostic_kernel import (
     DiagnosticKernel,
+    EvidenceGapKind,
     EvidenceGapStatus,
+    Hypothesis,
     InvestigationIntent,
     KernelDecision,
     KernelError,
@@ -50,7 +52,10 @@ from data_incident_gym.run_context import resolve_run_context
 
 SYSTEM_PROMPT = """
 Diagnose one verified data incident using only the four registered read-only evidence tools.
-Every tool call must include an InvestigationIntent naming one observable EvidenceGap.
+Every tool call must include a flat InvestigationIntentTransport naming one observable
+EvidenceGap. Use JSON lists for hypothesis_ids, new_hypothesis_ids, and
+new_hypothesis_root_cause_codes; the two new-hypothesis lists must be parallel and in the
+same order. The controller converts this transport object into its strict InvestigationIntent.
 Tool arguments must come from the verified run context or prior structured evidence.
 
 Maintain at least two candidate hypotheses before returning CONFIRMED. Use only this
@@ -102,6 +107,53 @@ _SAFE_TOOL_ERRORS = {
 class ModelIdentity:
     provider: str
     model: str
+
+
+class InvestigationIntentTransport(BaseModel):
+    """Shallow JSON transport for model tool calls; the Kernel still owns strict intent rules."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gap_id: StrictStr = Field(description="The gap identifier, such as g_failure.")
+    gap_kind: EvidenceGapKind = Field(description="The observable evidence gap kind.")
+    hypothesis_ids: list[StrictStr] = Field(
+        default_factory=list,
+        description="Known hypothesis identifiers referenced by this gap.",
+    )
+    new_hypothesis_ids: list[StrictStr] = Field(
+        default_factory=list,
+        description="New hypothesis identifiers, parallel to new_hypothesis_root_cause_codes.",
+    )
+    new_hypothesis_root_cause_codes: list[StrictStr] = Field(
+        default_factory=list,
+        description="New hypothesis root-cause codes, parallel to new_hypothesis_ids.",
+    )
+
+    @model_validator(mode="after")
+    def require_parallel_new_hypotheses(self) -> InvestigationIntentTransport:
+        if len(self.new_hypothesis_ids) != len(self.new_hypothesis_root_cause_codes):
+            raise ValueError(
+                "new_hypothesis_ids and new_hypothesis_root_cause_codes must be parallel"
+            )
+        return self
+
+    def to_investigation_intent(self) -> InvestigationIntent:
+        return InvestigationIntent(
+            gap_id=self.gap_id,
+            gap_kind=self.gap_kind,
+            hypothesis_ids=tuple(self.hypothesis_ids),
+            new_hypotheses=tuple(
+                Hypothesis(
+                    hypothesis_id=hypothesis_id,
+                    root_cause_code=root_cause_code,
+                )
+                for hypothesis_id, root_cause_code in zip(
+                    self.new_hypothesis_ids,
+                    self.new_hypothesis_root_cause_codes,
+                    strict=True,
+                )
+            ),
+        )
 
 
 _DEFAULT_MODEL_IDENTITY = ModelIdentity("pydantic-function", "scripted-kernel-model")
@@ -415,14 +467,15 @@ class DiagnosisRunner:
             ctx: RunContext[_RunState],
             tool_name: str,
             arguments: dict[str, str],
-            intent: InvestigationIntent,
+            intent: InvestigationIntentTransport,
             call: Callable[[], tuple[EvidenceRecord, ...]],
         ) -> tuple[EvidenceRecord, ...]:
             state = ctx.deps
             started_at = monotonic()
+            strict_intent = intent.to_investigation_intent()
             try:
                 prepared = state.kernel.prepare_tool(
-                    intent=intent,
+                    intent=strict_intent,
                     tool_name=tool_name,
                     arguments=arguments,
                 )
@@ -492,7 +545,7 @@ class DiagnosisRunner:
                 str,
                 Field(description="The exact verified run_id from the diagnostic context."),
             ],
-            intent: InvestigationIntent,
+            intent: InvestigationIntentTransport,
         ) -> tuple[EvidenceRecord, ...]:
             """Return run results for the verified run and close a locate-failure gap."""
             return execute(
@@ -514,7 +567,7 @@ class DiagnosisRunner:
                 str,
                 Field(description="An exact failed node_id returned by run results."),
             ],
-            intent: InvestigationIntent,
+            intent: InvestigationIntentTransport,
         ) -> tuple[EvidenceRecord, ...]:
             """Return the error for a failed node proven by run-results evidence."""
             return execute(
@@ -532,7 +585,7 @@ class DiagnosisRunner:
                 str,
                 Field(description="An exact unqualified relation name from prior lineage."),
             ],
-            intent: InvestigationIntent,
+            intent: InvestigationIntentTransport,
         ) -> tuple[EvidenceRecord, ...]:
             """Return catalog metadata for a relation proven by upstream lineage."""
             return execute(
@@ -551,7 +604,7 @@ class DiagnosisRunner:
                 Field(description="An exact node_id returned by run results or prior lineage."),
             ],
             direction: Literal["upstream", "downstream"],
-            intent: InvestigationIntent,
+            intent: InvestigationIntentTransport,
         ) -> tuple[EvidenceRecord, ...]:
             """Return bounded lineage for a node proven by structured evidence."""
             return execute(

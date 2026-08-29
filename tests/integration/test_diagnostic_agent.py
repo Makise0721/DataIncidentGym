@@ -39,8 +39,11 @@ def _intent(
     return {
         "gap_id": gap_id,
         "gap_kind": gap_kind,
-        "hypothesis_ids": hypothesis_ids,
-        "new_hypotheses": new_hypotheses,
+        "hypothesis_ids": list(hypothesis_ids),
+        "new_hypothesis_ids": [item["hypothesis_id"] for item in new_hypotheses],
+        "new_hypothesis_root_cause_codes": [
+            item["root_cause_code"] for item in new_hypotheses
+        ],
     }
 
 
