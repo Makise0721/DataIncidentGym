@@ -577,7 +577,7 @@ P2 优先参考 Correlator Demo 与 OpenLineage 官方教程，不复制许可�
 - [ ] TestModel 测试 100% 通过。
 - [ ] 真实模型 3 次中至少 2 次通过。
 - [ ] `metadata.json`、`trace.jsonl`、`evidence.json`、`diagnosis.json`、`evaluation.json` 和 `report.md` 六个产物齐全。
-- [ ] 未保存隐藏推理，未发生 Agent 写操作或外部网络访问。
+- [ ] 未保存隐藏推理，未发生 Agent 写操作；除当前配置的诊断模型 endpoint 所需请求外，未发生其他外部网络访问。
 - [ ] P0 结果未被误述为通用准确率结论。
 
 ## 19. 风险与控制
