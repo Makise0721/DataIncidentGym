@@ -309,6 +309,25 @@ def _mismatched_root_claim_payload() -> dict[str, object]:
     return payload
 
 
+def _unsupported_selected_hypothesis_payload() -> dict[str, object]:
+    payload = _confirmed_payload()
+    assessments = list(payload["assessments"])  # type: ignore[arg-type]
+    assessments[0] = {**assessments[0], "verdict": "REFUTED"}
+    payload["assessments"] = tuple(assessments)
+    return payload
+
+
+def _unknown_claim_evidence_payload() -> dict[str, object]:
+    payload = _confirmed_payload()
+    claims = list(payload["claims"])  # type: ignore[arg-type]
+    claims[0] = {
+        **claims[0],
+        "evidence_ids": ("ev_" + "f" * 64,),
+    }
+    payload["claims"] = tuple(claims)
+    return payload
+
+
 def _output_call(agent_info: AgentInfo, payload: dict[str, object]) -> ModelResponse:
     return ModelResponse(
         parts=[
@@ -698,6 +717,107 @@ async def test_root_claim_retry_explains_hypothesis_code_mapping_and_recovers(
 
 
 @pytest.mark.asyncio
+async def test_selected_hypothesis_retry_explains_support_requirement_and_recovers(
+    tmp_path: Path,
+) -> None:
+    tools = SyntheticEvidenceTools()
+    calls = _full_tool_calls()
+    retry_contents: list[str] = []
+    model_requests = 0
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        nonlocal model_requests
+        model_requests += 1
+        retry_contents.extend(
+            str(part.content)
+            for message in messages
+            for part in message.parts
+            if isinstance(part, RetryPromptPart)
+        )
+        tool_returns = sum(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        )
+        if tool_returns < len(calls):
+            tool_name, arguments = calls[tool_returns]
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name,
+                        arguments,
+                        tool_call_id=f"call-{tool_returns}",
+                    )
+                ]
+            )
+        payload = (
+            _confirmed_payload()
+            if retry_contents
+            else _unsupported_selected_hypothesis_payload()
+        )
+        return _output_call(agent_info, payload)
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    assert model_requests == 7
+    assert result.diagnosis.status.value == "CONFIRMED"
+    assert any("SELECTED_HYPOTHESIS_NOT_SUPPORTED" in content for content in retry_contents)
+    assert any(
+        "selected_hypothesis_id" in content and "SUPPORTED" in content
+        for content in retry_contents
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_claim_evidence_retry_explains_provenance_and_recovers(
+    tmp_path: Path,
+) -> None:
+    tools = SyntheticEvidenceTools()
+    calls = _full_tool_calls()
+    retry_contents: list[str] = []
+    model_requests = 0
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        nonlocal model_requests
+        model_requests += 1
+        retry_contents.extend(
+            str(part.content)
+            for message in messages
+            for part in message.parts
+            if isinstance(part, RetryPromptPart)
+        )
+        tool_returns = sum(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        )
+        if tool_returns < len(calls):
+            tool_name, arguments = calls[tool_returns]
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name,
+                        arguments,
+                        tool_call_id=f"call-{tool_returns}",
+                    )
+                ]
+            )
+        payload = _confirmed_payload() if retry_contents else _unknown_claim_evidence_payload()
+        return _output_call(agent_info, payload)
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    assert model_requests == 7
+    assert result.diagnosis.status.value == "CONFIRMED"
+    assert any("CLAIM_EVIDENCE_UNKNOWN" in content for content in retry_contents)
+    assert any(
+        "only evidence IDs returned by successful evidence tools" in content
+        for content in retry_contents
+    )
+    assert "ev_" + "f" * 64 not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
 async def test_relation_name_retry_explains_node_id_name_confusion(
     tmp_path: Path,
 ) -> None:
@@ -1048,6 +1168,61 @@ async def test_evidence_tool_error_exposes_only_stable_code_and_blocks_gap(
     assert event.error_code == "EVIDENCE_TOOL_ERROR"
     assert result.investigation_state.gaps[0].status.value == "BLOCKED"
     assert "TEST_REDACTED_VALUE" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_blocked_gap_rejects_confirmation_but_allows_insufficient_evidence(
+    tmp_path: Path,
+) -> None:
+    calls = _full_tool_calls()
+    tools = SyntheticEvidenceTools(
+        {
+            f"get_dbt_lineage:{FAILED_NODE}:downstream": EvidenceToolError(
+                "synthetic database failure"
+            )
+        }
+    )
+    retry_contents: list[str] = []
+    model_requests = 0
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        nonlocal model_requests
+        model_requests += 1
+        retry_contents.extend(
+            str(part.content)
+            for message in messages
+            for part in message.parts
+            if isinstance(part, RetryPromptPart)
+        )
+        tool_returns = sum(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        )
+        if tool_returns < len(calls):
+            tool_name, arguments = calls[tool_returns]
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name,
+                        arguments,
+                        tool_call_id=f"call-{tool_returns}",
+                    )
+                ]
+            )
+        if retry_contents:
+            return _output_call(agent_info, _insufficient_payload())
+        return _output_call(agent_info, _confirmed_payload())
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    assert model_requests == 7
+    assert result.diagnosis.status.value == "INSUFFICIENT_EVIDENCE"
+    assert any(
+        gap.status.value == "BLOCKED" for gap in result.investigation_state.gaps
+    )
+    assert any("EVIDENCE_GAP_OPEN" in content for content in retry_contents)
+    assert any("open or blocked gap" in content for content in retry_contents)
 
 
 @pytest.mark.asyncio

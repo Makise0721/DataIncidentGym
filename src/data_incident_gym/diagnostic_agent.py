@@ -154,6 +154,11 @@ _KERNEL_RETRY_GUIDANCE = {
         "HYPOTHESIS_REFERENCE_UNKNOWN: hypothesis_ids may contain only already registered "
         "hypothesis IDs."
     ),
+    "SELECTED_HYPOTHESIS_NOT_SUPPORTED": (
+        "SELECTED_HYPOTHESIS_NOT_SUPPORTED: Set selected_hypothesis_id to a registered "
+        "hypothesis whose assessment verdict is SUPPORTED; do not select a REFUTED "
+        "hypothesis."
+    ),
     "DUPLICATE_TOOL_CALL": (
         "DUPLICATE_TOOL_CALL: Do not repeat a successful query; choose the next required "
         "evidence gap."
@@ -183,6 +188,14 @@ _KERNEL_RETRY_GUIDANCE = {
     "CLAIM_EVIDENCE_TYPES_INCOMPLETE": (
         "CLAIM_EVIDENCE_TYPES_INCOMPLETE: Claims must collectively cite node-error, "
         "relation-schema, and downstream-lineage records."
+    ),
+    "ASSESSMENT_EVIDENCE_UNKNOWN": (
+        "ASSESSMENT_EVIDENCE_UNKNOWN: Use only evidence IDs returned by successful "
+        "evidence tools for hypothesis assessments; do not invent or alter IDs."
+    ),
+    "CLAIM_EVIDENCE_UNKNOWN": (
+        "CLAIM_EVIDENCE_UNKNOWN: Use only evidence IDs returned by successful evidence "
+        "tools for claims; do not invent or alter IDs."
     ),
     "HYPOTHESIS_ASSESSMENT_INCOMPLETE": (
         "HYPOTHESIS_ASSESSMENT_INCOMPLETE: Include exactly one assessment for every "
