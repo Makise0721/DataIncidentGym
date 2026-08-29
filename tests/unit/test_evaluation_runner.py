@@ -13,6 +13,11 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisStatus,
 )
+from data_incident_gym.diagnostic_kernel import (
+    InvestigationState,
+    KernelFinalStatus,
+    KernelStateTraceEvent,
+)
 from data_incident_gym.evaluation import (
     EvaluationCheck,
     EvaluationCheckCode,
@@ -66,10 +71,39 @@ def _diagnosis(status: DiagnosisStatus) -> Diagnosis:
 
 
 def _diagnosis_run(status: DiagnosisStatus = DiagnosisStatus.CONFIRMED) -> DiagnosisRunResult:
+    state = InvestigationState(
+        schema_version="m6.investigation.v1",
+        incident_case_id=CASE_ID,
+        run_id=RUN_ID,
+        revision=0,
+        allowed_root_cause_codes=(
+            "SOURCE_SCHEMA_COLUMN_RENAMED",
+            "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        ),
+        hypotheses=(),
+        gaps=(),
+        assessments=(),
+        claims=(),
+        evidence_inventory=(),
+        tool_fingerprints=(),
+        model_request_limit=8,
+        model_requests_used=1,
+        model_requests_remaining=7,
+        tool_call_limit=8,
+        tool_calls_used=0,
+        tool_calls_remaining=8,
+        final_status=KernelFinalStatus(status.value),
+        gate_reason=(
+            "MODEL_RUNTIME_ERROR"
+            if status is DiagnosisStatus.MODEL_ERROR
+            else status.value
+        ),
+    )
     return DiagnosisRunResult(
         diagnosis=_diagnosis(status),
         evidence_records=(),
-        trace=(),
+        trace=(KernelStateTraceEvent(event_type="KERNEL_STATE", state=state),),
+        investigation_state=state,
         metrics=DiagnosisMetrics(
             provider="openai-compatible",
             model="mimo-v2.5",
@@ -95,7 +129,7 @@ def _evaluation(failed_code: EvaluationCheckCode | None = None) -> EvaluationRes
         for code in EvaluationCheckCode
     )
     return EvaluationResult(
-        schema_version="m5.evaluation.v1",
+        schema_version="m6.evaluation.v1",
         incident_case_id=CASE_ID,
         run_id=RUN_ID,
         status=EvaluationStatus.FAILED if failed_code is not None else EvaluationStatus.PASSED,
