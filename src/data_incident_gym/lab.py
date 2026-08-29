@@ -21,7 +21,13 @@ from data_incident_gym.baseline import (
 )
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.dbt_runner import DbtExecutionError, DbtRunner
-from data_incident_gym.incidents import GroundTruth, IncidentCaseError, load_ground_truth
+from data_incident_gym.incidents import (
+    ColumnRenameInjection,
+    ColumnTypeChangeInjection,
+    GroundTruth,
+    IncidentCaseError,
+    load_ground_truth,
+)
 from data_incident_gym.lab_verifier import (
     IncidentVerifier,
     LabVerification,
@@ -39,6 +45,14 @@ CaseState = Literal["MISSING", "HEALTHY", "INJECTED", "DRIFTED"]
 _ALLOWED_RENAMES = {
     ("raw_payments", "amount", "total_amount"),
     ("raw_payments", "total_amount", "amount"),
+}
+_ALLOWED_TYPE_CHANGES = {
+    ("raw_payments", "amount", "integer", "text"),
+    ("raw_payments", "amount", "text", "integer"),
+}
+_TYPE_SQL = {
+    "integer": sql.SQL("integer"),
+    "text": sql.SQL("text"),
 }
 RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 RunIdFactory = Callable[[], str]
@@ -272,6 +286,58 @@ class IncidentLab:
         if error is not None:
             raise self._clean(error)
 
+    def _change_column_type(
+        self,
+        relation: str,
+        column: str,
+        source_type: str,
+        target_type: str,
+    ) -> None:
+        key = (relation, column, source_type, target_type)
+        if key not in _ALLOWED_TYPE_CHANGES:
+            raise InvalidIncidentState("拒绝执行未授权的故障字段类型变化")
+        statement = sql.SQL(
+            "ALTER TABLE {}.{} ALTER COLUMN {} TYPE {} USING {}::{}"
+        ).format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(relation),
+            sql.Identifier(column),
+            _TYPE_SQL[target_type],
+            sql.Identifier(column),
+            _TYPE_SQL[target_type],
+        )
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.transaction(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement)
+        except Exception as exc:
+            raise self._clean(
+                IncidentExecutionError(
+                    f"故障字段类型变化失败：{self._redact(str(exc))}"
+                )
+            ) from None
+
+    def _apply_mutation(self, truth: GroundTruth, *, inject: bool) -> None:
+        mutation = truth.injection
+        if isinstance(mutation, ColumnRenameInjection):
+            source = mutation.from_column if inject else mutation.to_column
+            target = mutation.to_column if inject else mutation.from_column
+            self._rename_column(mutation.relation, source, target)
+            return
+        if not isinstance(mutation, ColumnTypeChangeInjection):
+            raise InvalidIncidentState("故障注入契约类型无效")
+        source_type = mutation.from_type if inject else mutation.to_type
+        target_type = mutation.to_type if inject else mutation.from_type
+        self._change_column_type(
+            mutation.relation,
+            mutation.column,
+            source_type,
+            target_type,
+        )
+
     def _fingerprint(self, relation: RelationSummary) -> str:
         return make_baseline_summary(
             self.settings.postgres_schema,
@@ -361,11 +427,7 @@ class IncidentLab:
         current = self._inspect_relation(truth)
         state = self._classify_state(current, truth)
         if state == "INJECTED":
-            self._rename_column(
-                truth.injection.relation,
-                truth.injection.to_column,
-                truth.injection.from_column,
-            )
+            self._apply_mutation(truth, inject=False)
         elif state not in {"MISSING", "HEALTHY"}:
             raise InvalidIncidentState(
                 f"无法从未知 Schema 状态重置案例：{case_id}"
@@ -394,11 +456,7 @@ class IncidentLab:
                 f"故障注入要求健康状态，当前状态：{state}"
             )
         self._clear_active_run()
-        self._rename_column(
-            truth.injection.relation,
-            truth.injection.from_column,
-            truth.injection.to_column,
-        )
+        self._apply_mutation(truth, inject=True)
         after = self._inspect_relation(truth)
         if self._classify_state(after, truth) != "INJECTED" or after is None:
             raise InvalidIncidentState("故障注入后 Schema 不符合预期")

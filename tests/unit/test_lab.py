@@ -14,7 +14,11 @@ from data_incident_gym.baseline import (
     make_baseline_summary,
 )
 from data_incident_gym.config import Settings
-from data_incident_gym.incidents import CASE_ID, load_ground_truth
+from data_incident_gym.incidents import (
+    CASE_ID,
+    TYPE_CHANGE_CASE_ID,
+    load_ground_truth,
+)
 from data_incident_gym.lab import (
     FaultVerificationError,
     IncidentExecutionError,
@@ -35,9 +39,24 @@ def _relation(*names: str) -> RelationSummary:
     )
 
 
+def _typed_relation(amount_type: str) -> RelationSummary:
+    return RelationSummary(
+        name="raw_payments",
+        row_count=113,
+        columns=(
+            ColumnSummary("id", "integer", True, 1),
+            ColumnSummary("order_id", "integer", True, 2),
+            ColumnSummary("payment_method", "text", True, 3),
+            ColumnSummary("amount", amount_type, True, 4),
+        ),
+    )
+
+
 HEALTHY = _relation("id", "order_id", "payment_method", "amount")
 INJECTED = _relation("id", "order_id", "payment_method", "total_amount")
 DRIFTED = _relation("id", "order_id", "payment_method", "other_amount")
+TYPE_HEALTHY = _typed_relation("integer")
+TYPE_INJECTED = _typed_relation("text")
 
 
 class FakeBaseline:
@@ -53,15 +72,18 @@ class FakeBaseline:
         return self.summary
 
 
-def _prepare_ground_truth(tmp_path: Path) -> None:
-    truth = load_ground_truth(CASE_ID)
-    path = tmp_path / "config/incidents/schema_rename_payment_amount.json"
+def _prepare_ground_truth(tmp_path: Path, case_id: str = CASE_ID) -> None:
+    truth = load_ground_truth(case_id)
+    path = tmp_path / "config/incidents" / f"{case_id}.json"
     path.parent.mkdir(parents=True)
     path.write_text(truth.to_json(), encoding="utf-8")
 
 
-def _lab(tmp_path: Path) -> tuple[IncidentLab, FakeBaseline]:
-    _prepare_ground_truth(tmp_path)
+def _lab(
+    tmp_path: Path,
+    case_id: str = CASE_ID,
+) -> tuple[IncidentLab, FakeBaseline]:
+    _prepare_ground_truth(tmp_path, case_id)
     summary = make_baseline_summary("analytics", (HEALTHY,))
     baseline = FakeBaseline(summary)
     lab = IncidentLab(
@@ -293,9 +315,7 @@ def test_injected_schema_state_rejects_metadata_drift(
     assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
 
 
-def test_rename_uses_fixed_quoted_identifiers(tmp_path: Path) -> None:
-    executed: list[object] = []
-
+def _recording_connection(executed: list[object]) -> object:
     class Cursor:
         def __enter__(self):
             return self
@@ -326,11 +346,17 @@ def test_rename_uses_fixed_quoted_identifiers(tmp_path: Path) -> None:
         def transaction(self) -> Transaction:
             return Transaction()
 
+    return Connection()
+
+
+def test_rename_uses_fixed_quoted_identifiers(tmp_path: Path) -> None:
+    executed: list[object] = []
+
     lab = IncidentLab(
         Settings(_env_file=None),
         tmp_path,
         baseline_builder=SimpleNamespace(),
-        db_connect=lambda **_: Connection(),
+        db_connect=lambda **_: _recording_connection(executed),
     )
 
     lab._rename_column("raw_payments", "amount", "total_amount")
@@ -341,6 +367,62 @@ def test_rename_uses_fixed_quoted_identifiers(tmp_path: Path) -> None:
         'ALTER TABLE "analytics"."raw_payments" '
         'RENAME COLUMN "amount" TO "total_amount"'
     )
+
+
+def test_type_change_uses_fixed_allowlisted_sql(tmp_path: Path) -> None:
+    executed: list[object] = []
+    lab = IncidentLab(
+        Settings(_env_file=None),
+        tmp_path,
+        baseline_builder=SimpleNamespace(),
+        db_connect=lambda **_: _recording_connection(executed),
+    )
+
+    lab._change_column_type("raw_payments", "amount", "integer", "text")
+
+    assert len(executed) == 1
+    assert isinstance(executed[0], sql.Composed)
+    assert executed[0].as_string(None) == (
+        'ALTER TABLE "analytics"."raw_payments" '
+        'ALTER COLUMN "amount" TYPE text USING "amount"::text'
+    )
+
+
+def test_type_change_rejects_nonallowlisted_type(tmp_path: Path) -> None:
+    lab = IncidentLab(
+        Settings(_env_file=None),
+        tmp_path,
+        baseline_builder=SimpleNamespace(),
+    )
+
+    with pytest.raises(InvalidIncidentState, match="未授权"):
+        lab._change_column_type("raw_payments", "amount", "integer", "jsonb")
+
+
+def test_type_case_injects_and_reset_applies_inverse_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lab, baseline = _lab(tmp_path, TYPE_CHANGE_CASE_ID)
+    states = iter((TYPE_HEALTHY, TYPE_INJECTED))
+    changes: list[tuple[str, str, str, str]] = []
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: next(states))
+    monkeypatch.setattr(
+        lab,
+        "_change_column_type",
+        lambda relation, column, source, target: changes.append(
+            (relation, column, source, target)
+        ),
+    )
+
+    assert lab.inject(TYPE_CHANGE_CASE_ID).state == "INJECTED"
+    assert changes == [("raw_payments", "amount", "integer", "text")]
+    assert baseline.calls == ["start_postgres"]
+
+    monkeypatch.setattr(lab, "_inspect_relation", lambda _: TYPE_INJECTED)
+    changes.clear()
+    assert lab.reset(TYPE_CHANGE_CASE_ID).state == "HEALTHY"
+    assert changes == [("raw_payments", "amount", "text", "integer")]
 
 
 def test_schema_read_error_redacts_password_and_exception_chain(tmp_path: Path) -> None:
