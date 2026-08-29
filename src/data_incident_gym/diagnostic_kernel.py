@@ -71,7 +71,8 @@ class Hypothesis(BaseModel):
 
     hypothesis_id: StrictStr = Field(pattern=_HYPOTHESIS_ID_PATTERN)
     root_cause_code: StrictStr = Field(
-        pattern=r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$"
+        pattern=r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$",
+        description="The ontology root-cause code associated with this hypothesis.",
     )
 
 
@@ -142,7 +143,12 @@ class ClaimEvidence(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: ClaimKind
-    value: StrictStr
+    value: StrictStr = Field(
+        description=(
+            "For a ROOT_CAUSE claim, use exactly the root_cause_code associated "
+            "with selected_hypothesis_id."
+        )
+    )
     evidence_ids: tuple[
         Annotated[StrictStr, Field(pattern=_EVIDENCE_ID_PATTERN)],
         ...,
@@ -162,7 +168,12 @@ class KernelDecision(BaseModel):
         pattern=r"^[a-z][a-z0-9_]{2,63}$"
     )
     run_id: StrictStr = Field(pattern=_RUN_ID_PATTERN)
-    selected_hypothesis_id: StrictStr | None
+    selected_hypothesis_id: StrictStr | None = Field(
+        description=(
+            "The registered hypothesis to select; its root_cause_code must equal "
+            "the ROOT_CAUSE claim.value."
+        )
+    )
     assessments: tuple[HypothesisAssessment, ...]
     claims: tuple[ClaimEvidence, ...]
     summary: StrictStr

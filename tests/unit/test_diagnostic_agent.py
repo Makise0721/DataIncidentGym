@@ -9,6 +9,7 @@ from pydantic_ai.exceptions import IncompleteToolCall, ModelAPIError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
+    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -300,6 +301,14 @@ def _confirmed_payload(
     }
 
 
+def _mismatched_root_claim_payload() -> dict[str, object]:
+    payload = _confirmed_payload()
+    claims = list(payload["claims"])  # type: ignore[arg-type]
+    claims[0] = {**claims[0], "value": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"}
+    payload["claims"] = tuple(claims)
+    return payload
+
+
 def _output_call(agent_info: AgentInfo, payload: dict[str, object]) -> ModelResponse:
     return ModelResponse(
         parts=[
@@ -446,6 +455,13 @@ def test_prompt_exports_m6_gap_driven_contract() -> None:
     assert "Use a fresh gap_id for every tool call" in normalized_prompt
     assert "Root-cause claims must cite both" in normalized_prompt
     assert "downstream lineage record" in normalized_prompt
+    assert (
+        "selected_hypothesis_id -> corresponding "
+        "hypothesis.root_cause_code -> ROOT_CAUSE claim.value"
+        in normalized_prompt
+    )
+    assert "related_nodes[].name" in normalized_prompt
+    assert "never use related_nodes[].node_id" in normalized_prompt
     assert "Ground Truth" not in SYSTEM_PROMPT
     assert "schema_rename_payment_amount" not in SYSTEM_PROMPT
     assert "schema_type_change_payment_amount" not in SYSTEM_PROMPT
@@ -519,6 +535,28 @@ async def test_runner_registers_four_tools_and_returns_model_claims(tmp_path: Pa
         )
     )
     assert "intent" not in tool_schema["properties"]
+    relation_tool = next(
+        item
+        for item in registration_model.last_model_request_parameters.function_tools
+        if item.name == "get_relation_schema"
+    )
+    relation_description = relation_tool.parameters_json_schema["properties"][
+        "relation_name"
+    ]["description"]
+    assert "related_nodes[].name" in relation_description
+    assert "related_nodes[].node_id" in relation_description
+    output_tool = registration_model.last_model_request_parameters.output_tools[0]
+    output_schema = output_tool.parameters_json_schema
+    selected_description = output_schema["properties"]["selected_hypothesis_id"][
+        "description"
+    ]
+    claim_value_description = output_schema["$defs"]["ClaimEvidence"]["properties"][
+        "value"
+    ]["description"]
+    assert "root_cause_code" in selected_description
+    assert "ROOT_CAUSE claim.value" in selected_description
+    assert "selected_hypothesis_id" in claim_value_description
+    assert "root_cause_code" in claim_value_description
 
     model = _full_scripted_model(_confirmed_payload(root_code="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"))
     result = await _runner(tmp_path, model, tools).diagnose(CASE_ID)
@@ -600,9 +638,123 @@ async def test_output_validation_retries_then_model_error(tmp_path: Path) -> Non
     protocol_event = next(
         event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
     )
-    assert protocol_event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert protocol_event.category == "DECISION_CONTRACT_REJECTED"
     assert protocol_event.stage == "OUTPUT_VALIDATION"
     assert protocol_event.tool_name
+
+
+@pytest.mark.asyncio
+async def test_root_claim_retry_explains_hypothesis_code_mapping_and_recovers(
+    tmp_path: Path,
+) -> None:
+    tools = SyntheticEvidenceTools()
+    calls = _full_tool_calls()
+    mismatched_payload = _mismatched_root_claim_payload()
+    retry_contents: list[str] = []
+    model_requests = 0
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        nonlocal model_requests
+        model_requests += 1
+        retry_contents.extend(
+            str(part.content)
+            for message in messages
+            for part in message.parts
+            if isinstance(part, RetryPromptPart)
+        )
+        tool_returns = sum(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        )
+        if tool_returns < len(calls):
+            tool_name, arguments = calls[tool_returns]
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name,
+                        arguments,
+                        tool_call_id=f"call-{tool_returns}",
+                    )
+                ]
+            )
+        payload = _confirmed_payload() if retry_contents else mismatched_payload
+        return _output_call(agent_info, payload)
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    assert model_requests == 7
+    assert result.diagnosis.status.value == "CONFIRMED"
+    assert any("ROOT_CLAIM_MISMATCH" in content for content in retry_contents)
+    assert any(
+        "Set the ROOT_CAUSE claim value exactly to the root_cause_code registered for"
+        in content
+        for content in retry_contents
+    )
+    assert any(
+        "Do not use a hypothesis ID, summary, or generic label." in content
+        for content in retry_contents
+    )
+
+
+@pytest.mark.asyncio
+async def test_relation_name_retry_explains_node_id_name_confusion(
+    tmp_path: Path,
+) -> None:
+    tools = SyntheticEvidenceTools()
+    calls = _full_tool_calls()
+    schema_name_guidance: list[str] = []
+    model_requests = 0
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        nonlocal model_requests
+        model_requests += 1
+        tool_returns = sum(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        )
+        if tool_returns < 3:
+            tool_name, arguments = calls[tool_returns]
+        elif tool_returns == 3:
+            tool_name, arguments = calls[3]
+            arguments = {**arguments, "relation_name": UPSTREAM_NODE}
+        elif tool_returns == 4:
+            schema_name_guidance.extend(
+                str(part.content)
+                for message in messages
+                for part in message.parts
+                if isinstance(part, ToolReturnPart)
+            )
+            tool_name, arguments = calls[3]
+        elif tool_returns == 5:
+            tool_name, arguments = calls[4]
+        else:
+            return _output_call(agent_info, _confirmed_payload())
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name,
+                    arguments,
+                    tool_call_id=f"call-{model_requests}",
+                )
+            ]
+        )
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+
+    assert model_requests == 7
+    assert result.diagnosis.status.value == "CONFIRMED"
+    assert [name for name, _ in tools.calls] == [
+        "get_dbt_run_results",
+        "get_dbt_node_error",
+        "get_dbt_lineage",
+        "get_relation_schema",
+        "get_dbt_lineage",
+    ]
+    assert any("RELATION_ARGUMENT_NOT_PROVEN" in content for content in schema_name_guidance)
+    assert any("related_nodes[].name" in content for content in schema_name_guidance)
+    assert any("never use related_nodes[].node_id" in content for content in schema_name_guidance)
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,11 @@ each downstream affected asset must cite the successful downstream lineage recor
 only current-run EvidenceRecord IDs from closed gaps. The Diagnostic Kernel validates the
 claims but does not create claims or citations for you. If a required gap remains open,
 return INSUFFICIENT_EVIDENCE instead of guessing. Never return hidden reasoning.
+
+For a confirmed decision, these values must be exactly aligned:
+selected_hypothesis_id -> corresponding hypothesis.root_cause_code -> ROOT_CAUSE claim.value.
+For get_relation_schema, use only an exact relation name from upstream lineage
+related_nodes[].name; never use related_nodes[].node_id.
 """.strip()
 
 SYSTEM_PROMPT_VERSION = "m6.diagnosis.v1"
@@ -118,6 +123,88 @@ _SAFE_TOOL_ERRORS = {
     "RUN_NOT_FOUND",
     "RUN_STATE_DRIFT",
 }
+_KERNEL_RETRY_GUIDANCE = {
+    "ARGUMENTS_INVALID": (
+        "ARGUMENTS_INVALID: Send only the tool's business arguments and the flat "
+        "transport fields, using JSON lists for list fields."
+    ),
+    "GAP_TOOL_MISMATCH": (
+        "GAP_TOOL_MISMATCH: Match LOCATE_FAILURE to get_dbt_run_results, "
+        "EXPLAIN_FAILURE to get_dbt_node_error, DISCOVER_SOURCE_RELATION to upstream "
+        "get_dbt_lineage, DISCRIMINATE_SCHEMA to get_relation_schema, and MAP_IMPACT "
+        "to downstream get_dbt_lineage."
+    ),
+    "NODE_ARGUMENT_NOT_PROVEN": (
+        "NODE_ARGUMENT_NOT_PROVEN: Use a node_id returned by run results or prior lineage."
+    ),
+    "RELATION_ARGUMENT_NOT_PROVEN": (
+        "RELATION_ARGUMENT_NOT_PROVEN: For get_relation_schema, set relation_name to an "
+        "exact name from related_nodes[].name in a successful upstream get_dbt_lineage "
+        "result; never use related_nodes[].node_id."
+    ),
+    "HYPOTHESIS_REQUIRES_NODE_ERROR": (
+        "HYPOTHESIS_REQUIRES_NODE_ERROR: Do not register hypotheses until a successful "
+        "get_dbt_node_error return."
+    ),
+    "DUPLICATE_HYPOTHESIS": (
+        "DUPLICATE_HYPOTHESIS: Register each hypothesis ID only once and do not resend "
+        "the new-hypothesis lists."
+    ),
+    "HYPOTHESIS_REFERENCE_UNKNOWN": (
+        "HYPOTHESIS_REFERENCE_UNKNOWN: hypothesis_ids may contain only already registered "
+        "hypothesis IDs."
+    ),
+    "DUPLICATE_TOOL_CALL": (
+        "DUPLICATE_TOOL_CALL: Do not repeat a successful query; choose the next required "
+        "evidence gap."
+    ),
+    "DUPLICATE_GAP_ID": (
+        "DUPLICATE_GAP_ID: Use a fresh gap_id for every tool call."
+    ),
+    "ROOT_CLAIM_MISMATCH": (
+        "ROOT_CLAIM_MISMATCH: Set the ROOT_CAUSE claim value exactly to the "
+        "root_cause_code registered for selected_hypothesis_id. Do not use a hypothesis "
+        "ID, summary, or generic label."
+    ),
+    "ROOT_CLAIM_REQUIRED": (
+        "ROOT_CLAIM_REQUIRED: Return exactly one ROOT_CAUSE claim."
+    ),
+    "ROOT_CLAIM_EVIDENCE_INCOMPATIBLE": (
+        "ROOT_CLAIM_EVIDENCE_INCOMPATIBLE: Cite both the successful node-error record "
+        "and the successful relation-schema record on the ROOT_CAUSE claim."
+    ),
+    "ASSET_CLAIM_REQUIRED": (
+        "ASSET_CLAIM_REQUIRED: Return one AFFECTED_ASSET claim for every affected asset."
+    ),
+    "ASSET_CLAIM_EVIDENCE_INCOMPATIBLE": (
+        "ASSET_CLAIM_EVIDENCE_INCOMPATIBLE: Cite the node-error record for the failed "
+        "node or the downstream lineage record for each downstream asset."
+    ),
+    "CLAIM_EVIDENCE_TYPES_INCOMPLETE": (
+        "CLAIM_EVIDENCE_TYPES_INCOMPLETE: Claims must collectively cite node-error, "
+        "relation-schema, and downstream-lineage records."
+    ),
+    "HYPOTHESIS_ASSESSMENT_INCOMPLETE": (
+        "HYPOTHESIS_ASSESSMENT_INCOMPLETE: Include exactly one assessment for every "
+        "registered hypothesis."
+    ),
+    "REFUTED_HYPOTHESIS_REQUIRED": (
+        "REFUTED_HYPOTHESIS_REQUIRED: Mark at least one non-selected hypothesis REFUTED."
+    ),
+    "EVIDENCE_GAP_OPEN": (
+        "EVIDENCE_GAP_OPEN: Gather evidence for every open or blocked gap before "
+        "returning CONFIRMED."
+    ),
+}
+_GENERIC_KERNEL_RETRY_GUIDANCE = (
+    "DECISION_CONTRACT_REJECTED: Rebuild the decision from current closed evidence and "
+    "registered hypotheses; keep selected_hypothesis_id, hypothesis.root_cause_code, "
+    "and ROOT_CAUSE claim.value aligned."
+)
+
+
+def _kernel_retry_message(code: str) -> str:
+    return _KERNEL_RETRY_GUIDANCE.get(code, _GENERIC_KERNEL_RETRY_GUIDANCE)
 
 
 @dataclass(frozen=True)
@@ -544,7 +631,7 @@ class DiagnosisRunner:
                         error_code=error.code,
                         started_at=started_at,
                     )
-                raise ToolFailed(error.code) from None
+                raise ToolFailed(_kernel_retry_message(error.code)) from None
 
             try:
                 records = tuple(call())
@@ -582,7 +669,7 @@ class DiagnosisRunner:
                     error_code=error_code,
                     started_at=started_at,
                 )
-                raise ToolFailed(error_code) from None
+                raise ToolFailed(_kernel_retry_message(error_code)) from None
 
             state.successful_calls += 1
             state.record_tool_trace(
@@ -659,7 +746,13 @@ class DiagnosisRunner:
             ctx: RunContext[_RunState],
             relation_name: Annotated[
                 str,
-                Field(description="An exact unqualified relation name from prior lineage."),
+                Field(
+                    description=(
+                        "An exact unqualified relation name copied from "
+                        "related_nodes[].name of a successful upstream get_dbt_lineage "
+                        "result; never use related_nodes[].node_id."
+                    )
+                ),
             ],
             gap_id: _TransportGapId,
             gap_kind: _TransportGapKind,
@@ -732,7 +825,7 @@ class DiagnosisRunner:
                 outcome = state.kernel.finalize(output)
             except KernelError as error:
                 state.set_protocol_failure(
-                    category="OUTPUT_SCHEMA_REJECTED",
+                    category="DECISION_CONTRACT_REJECTED",
                     stage="OUTPUT_VALIDATION",
                     tool_name=_last_observed_tool_name(state, output=True),
                 )
@@ -743,7 +836,7 @@ class DiagnosisRunner:
                         accepted=False,
                     )
                 )
-                raise ModelRetry(error.code) from None
+                raise ModelRetry(_kernel_retry_message(error.code)) from None
             state.outcome = outcome
             state.trace.append(
                 EvidenceGateTraceEvent(

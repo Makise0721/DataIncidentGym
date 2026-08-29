@@ -135,6 +135,7 @@ class ModelProtocolTraceEvent(BaseModel):
     category: Literal[
         "TOOL_ARGUMENT_REJECTED",
         "OUTPUT_SCHEMA_REJECTED",
+        "DECISION_CONTRACT_REJECTED",
         "PREMATURE_FINALIZATION",
         "PROVIDER_PROTOCOL_FAILURE",
     ]

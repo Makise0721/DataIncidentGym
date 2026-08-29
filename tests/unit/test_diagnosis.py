@@ -389,7 +389,7 @@ def test_model_protocol_trace_event_is_safe_and_strict() -> None:
         event_type="MODEL_PROTOCOL",
         stage="TOOL_ARGUMENT_VALIDATION",
         tool_name="get_dbt_run_results",
-        category="TOOL_ARGUMENT_REJECTED",
+        category="DECISION_CONTRACT_REJECTED",
     )
     assert ModelProtocolTraceEvent.model_validate_json(event.model_dump_json()) == event
     with pytest.raises(ValidationError):
