@@ -606,6 +606,38 @@ def test_duplicate_attempt_is_audited_and_consumes_budget() -> None:
     assert state.tool_calls_remaining == 6
 
 
+def test_duplicate_gap_id_is_rejected_without_partial_transition() -> None:
+    kernel = _kernel()
+    first = kernel.prepare_tool(
+        intent=InvestigationIntent(
+            gap_id="g_duplicate",
+            gap_kind=EvidenceGapKind.LOCATE_FAILURE,
+        ),
+        tool_name="get_dbt_run_results",
+        arguments={"run_id": RUN_ID},
+    )
+    kernel.record_tool_result(first, (_run_results_record(),))
+    before = kernel.snapshot(model_requests_used=1)
+
+    with pytest.raises(KernelError, match="DUPLICATE_GAP_ID") as captured:
+        kernel.prepare_tool(
+            intent=InvestigationIntent(
+                gap_id="g_duplicate",
+                gap_kind=EvidenceGapKind.EXPLAIN_FAILURE,
+            ),
+            tool_name="get_dbt_node_error",
+            arguments={"run_id": RUN_ID, "node_id": FAILED_NODE},
+        )
+
+    after = kernel.snapshot(model_requests_used=1)
+    assert after.gaps == before.gaps
+    assert after.hypotheses == before.hypotheses
+    assert after.tool_fingerprints == before.tool_fingerprints + (
+        captured.value.fingerprint,
+    )
+    assert after.revision == before.revision + 1
+
+
 def test_ninth_tool_attempt_is_rejected_before_state_change() -> None:
     kernel = _kernel()
     first = kernel.prepare_tool(

@@ -583,6 +583,8 @@ class DiagnosticKernel:
         self._revision += 1
         if fingerprint in self._prepared_fingerprints:
             self._error("DUPLICATE_TOOL_CALL", fingerprint)
+        if any(gap.gap_id == intent.gap_id for gap in self._gaps):
+            self._error("DUPLICATE_GAP_ID", fingerprint)
 
         validated_arguments = self._validate_arguments(arguments, fingerprint)
         self._validate_tool_mapping(intent, tool_name, validated_arguments, fingerprint)
