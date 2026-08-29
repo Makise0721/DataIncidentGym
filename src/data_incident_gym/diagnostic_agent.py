@@ -67,13 +67,29 @@ versioned ontology:
   incompatible data type for a consumer.
 
 Use gaps to locate the failure, inspect its error, discover the source relation,
-discriminate competing schema hypotheses, and map downstream impact. The order is chosen
-from the evidence already observed; do not make an unsupported or duplicate call.
+discriminate competing schema hypotheses, and map downstream impact. Begin with
+get_dbt_run_results. Before a successful get_dbt_node_error return, keep both
+new_hypothesis_ids and new_hypothesis_root_cause_codes set to [] and keep hypothesis_ids set
+to []. Only get_relation_schema may register hypotheses, and it may register the two ontology
+hypotheses only once, with the two parallel lists. Use the evidence-driven order
+get_dbt_run_results, get_dbt_node_error, upstream get_dbt_lineage, get_relation_schema,
+then downstream get_dbt_lineage when those gaps are needed.
+
+Match gap_kind to its tool: LOCATE_FAILURE to get_dbt_run_results, EXPLAIN_FAILURE to
+get_dbt_node_error, DISCOVER_SOURCE_RELATION to upstream get_dbt_lineage,
+DISCRIMINATE_SCHEMA to get_relation_schema, and MAP_IMPACT to downstream get_dbt_lineage.
+Use a fresh gap_id for every tool call. If a controller rejects a call before evidence is
+returned, correct its transport fields and use a fresh gap_id; do not resend rejected
+hypothesis lists. Never repeat a successful query or re-register an existing hypothesis.
+After registration, hypothesis_ids may contain only already registered IDs.
 
 For CONFIRMED, return KernelDecision with one supported selected hypothesis, at least one
 refuted alternative, and explicit ClaimEvidence entries for the root cause and every
-affected asset. Cite only current-run EvidenceRecord IDs. The Diagnostic Kernel validates
-the claims but does not create claims or citations for you. If a required gap remains open,
+affected asset. Root-cause claims must cite both the successful node-error record and the
+successful relation-schema record. The failed node asset must cite its node-error record;
+each downstream affected asset must cite the successful downstream lineage record. Cite
+only current-run EvidenceRecord IDs from closed gaps. The Diagnostic Kernel validates the
+claims but does not create claims or citations for you. If a required gap remains open,
 return INSUFFICIENT_EVIDENCE instead of guessing. Never return hidden reasoning.
 """.strip()
 

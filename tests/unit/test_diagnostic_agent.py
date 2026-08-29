@@ -433,12 +433,19 @@ def _runner(
 
 
 def test_prompt_exports_m6_gap_driven_contract() -> None:
+    normalized_prompt = " ".join(SYSTEM_PROMPT.split())
     assert SYSTEM_PROMPT_VERSION == "m6.diagnosis.v1"
     assert SYSTEM_PROMPT_SHA256
     assert "InvestigationIntent" in SYSTEM_PROMPT
     assert "SOURCE_SCHEMA_COLUMN_RENAMED" in SYSTEM_PROMPT
     assert "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED" in SYSTEM_PROMPT
     assert "at least two candidate hypotheses" in SYSTEM_PROMPT
+    assert "Begin with get_dbt_run_results" in normalized_prompt
+    assert "new_hypothesis_ids and new_hypothesis_root_cause_codes set to []" in normalized_prompt
+    assert "Only get_relation_schema may register hypotheses" in normalized_prompt
+    assert "Use a fresh gap_id for every tool call" in normalized_prompt
+    assert "Root-cause claims must cite both" in normalized_prompt
+    assert "downstream lineage record" in normalized_prompt
     assert "Ground Truth" not in SYSTEM_PROMPT
     assert "schema_rename_payment_amount" not in SYSTEM_PROMPT
     assert "schema_type_change_payment_amount" not in SYSTEM_PROMPT
