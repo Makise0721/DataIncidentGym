@@ -9,6 +9,11 @@ from typer.testing import CliRunner
 import data_incident_gym.cli as cli
 from data_incident_gym.baseline import BaselineError, make_baseline_summary
 from data_incident_gym.diagnosis import Diagnosis, DiagnosisMetrics, DiagnosisRunResult
+from data_incident_gym.diagnostic_kernel import (
+    InvestigationState,
+    KernelFinalStatus,
+    KernelStateTraceEvent,
+)
 from data_incident_gym.doctor import (
     DoctorCheck,
     DoctorCheckCode,
@@ -253,10 +258,36 @@ def _diagnosis(status: str) -> Diagnosis:
 
 
 def _diagnosis_result(status: str) -> DiagnosisRunResult:
+    final_status = KernelFinalStatus(status)
+    state = InvestigationState(
+        schema_version="m6.investigation.v1",
+        incident_case_id="schema_rename_payment_amount",
+        run_id="a" * 32,
+        revision=0,
+        allowed_root_cause_codes=(
+            "SOURCE_SCHEMA_COLUMN_RENAMED",
+            "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        ),
+        hypotheses=(),
+        gaps=(),
+        assessments=(),
+        claims=(),
+        evidence_inventory=(),
+        tool_fingerprints=(),
+        model_request_limit=8,
+        model_requests_used=1,
+        model_requests_remaining=7,
+        tool_call_limit=8,
+        tool_calls_used=0,
+        tool_calls_remaining=8,
+        final_status=final_status,
+        gate_reason=("MODEL_RUNTIME_ERROR" if status == "MODEL_ERROR" else status),
+    )
     return DiagnosisRunResult(
         diagnosis=_diagnosis(status),
         evidence_records=(),
-        trace=(),
+        trace=(KernelStateTraceEvent(event_type="KERNEL_STATE", state=state),),
+        investigation_state=state,
         metrics=DiagnosisMetrics(
             provider="openai-compatible",
             model="mimo-v2.5",
@@ -281,6 +312,10 @@ def test_top_level_help_adds_only_diagnose_and_diagnose_options_are_bounded() ->
     assert diagnose_help.exit_code == 0
     assert "case_id" in diagnose_help_text
     assert "--run-id" in diagnose_help_text
+    assert "schema_rename_payment_amount" in diagnose_help_text
+    assert "schema_type_change_payment_amount" in diagnose_help_text
+    assert "Ollama" not in diagnose_help_text
+    assert "MiMo" not in diagnose_help_text
     for forbidden in (
         "--path",
         "--sql",
@@ -490,7 +525,7 @@ def _evaluation(status: EvaluationStatus) -> EvaluationResult:
         for code in EvaluationCheckCode
     )
     return EvaluationResult(
-        schema_version="m5.evaluation.v1",
+        schema_version="m6.evaluation.v1",
         incident_case_id="schema_rename_payment_amount",
         run_id="a" * 32,
         status=status,
@@ -558,6 +593,10 @@ def test_eval_run_has_one_case_argument_and_rejects_unscoped_options() -> None:
     help_result = runner.invoke(cli.app, ["eval", "run", "--help"])
     assert help_result.exit_code == 0
     assert "case_id" in _plain_help(help_result.stdout)
+    assert "schema_rename_payment_amount" in help_result.stdout
+    assert "schema_type_change_payment_amount" in help_result.stdout
+    assert "Ollama" not in help_result.stdout
+    assert "MiMo" not in help_result.stdout
     for forbidden in (
         "--repeat",
         "--runs",

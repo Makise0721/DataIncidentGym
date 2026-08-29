@@ -12,7 +12,7 @@ from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.doctor import DoctorRunner, DoctorStatus
 from data_incident_gym.evaluation import EvaluationStatus
 from data_incident_gym.evaluation_runner import EvaluationRunner, EvaluationWorkflowError
-from data_incident_gym.incidents import IncidentCaseError
+from data_incident_gym.incidents import SUPPORTED_CASE_IDS, IncidentCaseError
 from data_incident_gym.lab import IncidentLab, LabError
 from data_incident_gym.run_context import RunContextError, resolve_active_run
 
@@ -84,7 +84,15 @@ def pipeline_build() -> None:
     typer.echo("summary: .dig/baseline-summary.json")
 
 
-@app.command("diagnose")
+@app.command(
+    "diagnose",
+    help=(
+        "使用固定案例和已验证运行的只读证据进行诊断。\n"
+        "支持案例：\n- "
+        + "\n- ".join(SUPPORTED_CASE_IDS)
+        + "。"
+    ),
+)
 def diagnose(
     case_id: str,
     run_id: str | None = typer.Option(None, "--run-id"),
@@ -116,7 +124,14 @@ def diagnose(
         raise typer.Exit(code=1)
 
 
-@eval_app.command("run")
+@eval_app.command(
+    "run",
+    help=(
+        "对一个固定案例执行一次独立的完整评测。\n支持案例：\n- "
+        + "\n- ".join(SUPPORTED_CASE_IDS)
+        + "。"
+    ),
+)
 def eval_run(case_id: str) -> None:
     """对一个固定案例执行一次独立的完整评测。"""
     try:
