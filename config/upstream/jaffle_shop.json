@@ -1,0 +1,8 @@
+{
+  "name": "dbt-labs/jaffle_shop_duckdb",
+  "repository_url": "https://github.com/dbt-labs/jaffle_shop_duckdb.git",
+  "branch": "duckdb",
+  "commit": "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb",
+  "license": "Apache-2.0",
+  "path": "third_party/jaffle_shop"
+}

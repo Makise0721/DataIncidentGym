@@ -1,0 +1,4 @@
+[submodule "third_party/jaffle_shop"]
+	path = third_party/jaffle_shop
+	url = https://github.com/dbt-labs/jaffle_shop_duckdb.git
+	branch = duckdb

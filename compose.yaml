@@ -1,0 +1,21 @@
+name: data-incident-gym
+
+services:
+  postgres:
+    image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_DB: ${DIG_POSTGRES_DATABASE:-data_incident_gym}
+      POSTGRES_USER: ${DIG_POSTGRES_USER:-dig_admin}
+      POSTGRES_PASSWORD: ${DIG_POSTGRES_PASSWORD:-dig_admin}
+    ports:
+      - "${DIG_POSTGRES_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - dig_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  dig_postgres_data:
