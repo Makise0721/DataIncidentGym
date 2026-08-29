@@ -331,14 +331,17 @@ def _full_tool_calls() -> list[tuple[str, dict[str, object]]]:
     return [
         (
             "get_dbt_run_results",
-            {"run_id": RUN_ID, "intent": _intent("g_failure", "LOCATE_FAILURE")},
+            {
+                "run_id": RUN_ID,
+                **_intent("g_failure", "LOCATE_FAILURE"),
+            },
         ),
         (
             "get_dbt_node_error",
             {
                 "run_id": RUN_ID,
                 "node_id": FAILED_NODE,
-                "intent": _intent("g_explain", "EXPLAIN_FAILURE"),
+                **_intent("g_explain", "EXPLAIN_FAILURE"),
             },
         ),
         (
@@ -346,14 +349,14 @@ def _full_tool_calls() -> list[tuple[str, dict[str, object]]]:
             {
                 "node_id": FAILED_NODE,
                 "direction": "upstream",
-                "intent": _intent("g_source", "DISCOVER_SOURCE_RELATION"),
+                **_intent("g_source", "DISCOVER_SOURCE_RELATION"),
             },
         ),
         (
             "get_relation_schema",
             {
                 "relation_name": "raw_payments",
-                "intent": _intent(
+                **_intent(
                     "g_schema",
                     "DISCRIMINATE_SCHEMA",
                     hypothesis_ids=("h_rename", "h_type"),
@@ -375,7 +378,7 @@ def _full_tool_calls() -> list[tuple[str, dict[str, object]]]:
             {
                 "node_id": FAILED_NODE,
                 "direction": "downstream",
-                "intent": _intent("g_impact", "MAP_IMPACT"),
+                **_intent("g_impact", "MAP_IMPACT"),
             },
         ),
     ]
@@ -491,10 +494,9 @@ async def test_runner_registers_four_tools_and_returns_model_claims(tmp_path: Pa
         for item in registration_model.last_model_request_parameters.function_tools
         if item.name == "get_dbt_run_results"
     )
-    intent_schema = run_results_tool.parameters_json_schema["$defs"][
-        "InvestigationIntentTransport"
-    ]
-    assert set(intent_schema["properties"]) == {
+    tool_schema = run_results_tool.parameters_json_schema
+    assert set(tool_schema["properties"]) == {
+        "run_id",
         "gap_id",
         "gap_kind",
         "hypothesis_ids",
@@ -502,14 +504,14 @@ async def test_runner_registers_four_tools_and_returns_model_claims(tmp_path: Pa
         "new_hypothesis_root_cause_codes",
     }
     assert all(
-        intent_schema["properties"][name]["type"] == "array"
+        tool_schema["properties"][name]["type"] == "array"
         for name in (
             "hypothesis_ids",
             "new_hypothesis_ids",
             "new_hypothesis_root_cause_codes",
         )
     )
-    assert "new_hypotheses" not in intent_schema["properties"]
+    assert "intent" not in tool_schema["properties"]
 
     model = _full_scripted_model(_confirmed_payload(root_code="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"))
     result = await _runner(tmp_path, model, tools).diagnose(CASE_ID)
@@ -553,7 +555,7 @@ async def test_exact_duplicate_call_is_blocked_before_second_m3_execution(tmp_pa
                         "get_dbt_run_results",
                         {
                             "run_id": RUN_ID,
-                            "intent": _intent("g_duplicate", "LOCATE_FAILURE"),
+                            **_intent("g_duplicate", "LOCATE_FAILURE"),
                         },
                         tool_call_id="duplicate",
                     )
@@ -607,7 +609,7 @@ async def test_invalid_tool_arguments_are_classified_before_tool_entry(
             parts=[
                 ToolCallPart(
                     "get_dbt_run_results",
-                    {"run_id": RUN_ID, "intent": {"gap_id": "invalid"}},
+                    {"run_id": RUN_ID, "gap_id": "invalid"},
                     tool_call_id="invalid-tool-arguments",
                 )
             ]
@@ -632,9 +634,6 @@ async def test_flat_list_intent_transport_reaches_tool_entry(tmp_path: Path) -> 
     transport_intent = {
         "gap_id": "g_failure",
         "gap_kind": "LOCATE_FAILURE",
-        "hypothesis_ids": [],
-        "new_hypothesis_ids": [],
-        "new_hypothesis_root_cause_codes": [],
     }
 
     def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
@@ -647,7 +646,7 @@ async def test_flat_list_intent_transport_reaches_tool_entry(tmp_path: Path) -> 
                 parts=[
                     ToolCallPart(
                         "get_dbt_run_results",
-                        {"run_id": RUN_ID, "intent": transport_intent},
+                        {"run_id": RUN_ID, **transport_intent},
                         tool_call_id="flat-intent",
                     )
                 ]
@@ -952,7 +951,7 @@ async def test_trace_redacts_prompt_completion_credentials_path_and_sql(tmp_path
                         "get_relation_schema",
                         {
                             "relation_name": sensitive,
-                            "intent": _intent("g_schema", "DISCRIMINATE_SCHEMA"),
+                            **_intent("g_schema", "DISCRIMINATE_SCHEMA"),
                         },
                         tool_call_id="sensitive",
                     )

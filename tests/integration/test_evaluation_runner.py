@@ -94,7 +94,7 @@ def _scripted_diagnosis(
             "get_dbt_run_results",
             {
                 "run_id": initial_run_id,
-                "intent": _intent("g_failure", "LOCATE_FAILURE"),
+                **_intent("g_failure", "LOCATE_FAILURE"),
             },
             "run-results",
         )
@@ -105,7 +105,7 @@ def _scripted_diagnosis(
             {
                 "run_id": run_results[-1].run_id,
                 "node_id": run_fact.failed_nodes[0],
-                "intent": _intent("g_explain", "EXPLAIN_FAILURE"),
+                **_intent("g_explain", "EXPLAIN_FAILURE"),
             },
             "node-error",
         )
@@ -115,7 +115,7 @@ def _scripted_diagnosis(
             {
                 "node_id": node_errors[-1].content.node_id,
                 "direction": "upstream",
-                "intent": _intent("g_source", "DISCOVER_SOURCE_RELATION"),
+                **_intent("g_source", "DISCOVER_SOURCE_RELATION"),
             },
             "upstream-lineage",
         )
@@ -130,7 +130,7 @@ def _scripted_diagnosis(
             "get_relation_schema",
             {
                 "relation_name": seed.name,
-                "intent": _intent(
+                **_intent(
                     "g_schema",
                     "DISCRIMINATE_SCHEMA",
                     hypothesis_ids=("h_rename", "h_type"),
@@ -154,7 +154,7 @@ def _scripted_diagnosis(
             {
                 "node_id": node_errors[-1].content.node_id,
                 "direction": "downstream",
-                "intent": _intent(
+                **_intent(
                     "g_impact",
                     "MAP_IMPACT",
                     hypothesis_ids=("h_rename", "h_type"),

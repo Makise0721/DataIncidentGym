@@ -52,10 +52,11 @@ from data_incident_gym.run_context import resolve_run_context
 
 SYSTEM_PROMPT = """
 Diagnose one verified data incident using only the four registered read-only evidence tools.
-Every tool call must include a flat InvestigationIntentTransport naming one observable
-EvidenceGap. Use JSON lists for hypothesis_ids, new_hypothesis_ids, and
-new_hypothesis_root_cause_codes; the two new-hypothesis lists must be parallel and in the
-same order. The controller converts this transport object into its strict InvestigationIntent.
+Every tool call must provide the flat InvestigationIntentTransport fields as top-level
+arguments: gap_id, gap_kind, hypothesis_ids, new_hypothesis_ids, and
+new_hypothesis_root_cause_codes. Use JSON lists for the three list fields; the two
+new-hypothesis lists must be parallel and in the same order. The controller converts these
+transport fields into its strict InvestigationIntent.
 Tool arguments must come from the verified run context or prior structured evidence.
 
 Maintain at least two candidate hypotheses before returning CONFIRMED. Use only this
@@ -109,25 +110,47 @@ class ModelIdentity:
     model: str
 
 
+_TransportGapId = Annotated[
+    StrictStr,
+    Field(description="The gap identifier, such as g_failure."),
+]
+_TransportGapKind = Annotated[
+    EvidenceGapKind,
+    Field(description="The observable evidence gap kind."),
+]
+_TransportHypothesisIds = Annotated[
+    list[StrictStr],
+    Field(
+        default_factory=list,
+        description="Known hypothesis identifiers referenced by this gap.",
+    ),
+]
+_TransportNewHypothesisIds = Annotated[
+    list[StrictStr],
+    Field(
+        default_factory=list,
+        description="New hypothesis identifiers, parallel to new_hypothesis_root_cause_codes.",
+    ),
+]
+_TransportNewHypothesisCodes = Annotated[
+    list[StrictStr],
+    Field(
+        default_factory=list,
+        description="New hypothesis root-cause codes, parallel to new_hypothesis_ids.",
+    ),
+]
+
+
 class InvestigationIntentTransport(BaseModel):
     """Shallow JSON transport for model tool calls; the Kernel still owns strict intent rules."""
 
     model_config = ConfigDict(extra="forbid")
 
-    gap_id: StrictStr = Field(description="The gap identifier, such as g_failure.")
-    gap_kind: EvidenceGapKind = Field(description="The observable evidence gap kind.")
-    hypothesis_ids: list[StrictStr] = Field(
-        default_factory=list,
-        description="Known hypothesis identifiers referenced by this gap.",
-    )
-    new_hypothesis_ids: list[StrictStr] = Field(
-        default_factory=list,
-        description="New hypothesis identifiers, parallel to new_hypothesis_root_cause_codes.",
-    )
-    new_hypothesis_root_cause_codes: list[StrictStr] = Field(
-        default_factory=list,
-        description="New hypothesis root-cause codes, parallel to new_hypothesis_ids.",
-    )
+    gap_id: _TransportGapId
+    gap_kind: _TransportGapKind
+    hypothesis_ids: _TransportHypothesisIds
+    new_hypothesis_ids: _TransportNewHypothesisIds
+    new_hypothesis_root_cause_codes: _TransportNewHypothesisCodes
 
     @model_validator(mode="after")
     def require_parallel_new_hypotheses(self) -> InvestigationIntentTransport:
@@ -154,6 +177,23 @@ class InvestigationIntentTransport(BaseModel):
                 )
             ),
         )
+
+
+def _transport_intent(
+    *,
+    gap_id: str,
+    gap_kind: EvidenceGapKind,
+    hypothesis_ids: list[str],
+    new_hypothesis_ids: list[str],
+    new_hypothesis_root_cause_codes: list[str],
+) -> InvestigationIntentTransport:
+    return InvestigationIntentTransport(
+        gap_id=gap_id,
+        gap_kind=gap_kind,
+        hypothesis_ids=hypothesis_ids,
+        new_hypothesis_ids=new_hypothesis_ids,
+        new_hypothesis_root_cause_codes=new_hypothesis_root_cause_codes,
+    )
 
 
 _DEFAULT_MODEL_IDENTITY = ModelIdentity("pydantic-function", "scripted-kernel-model")
@@ -545,14 +585,24 @@ class DiagnosisRunner:
                 str,
                 Field(description="The exact verified run_id from the diagnostic context."),
             ],
-            intent: InvestigationIntentTransport,
+            gap_id: _TransportGapId,
+            gap_kind: _TransportGapKind,
+            hypothesis_ids: _TransportHypothesisIds,
+            new_hypothesis_ids: _TransportNewHypothesisIds,
+            new_hypothesis_root_cause_codes: _TransportNewHypothesisCodes,
         ) -> tuple[EvidenceRecord, ...]:
             """Return run results for the verified run and close a locate-failure gap."""
             return execute(
                 ctx,
                 "get_dbt_run_results",
                 {"run_id": run_id},
-                intent,
+                _transport_intent(
+                    gap_id=gap_id,
+                    gap_kind=gap_kind,
+                    hypothesis_ids=hypothesis_ids,
+                    new_hypothesis_ids=new_hypothesis_ids,
+                    new_hypothesis_root_cause_codes=new_hypothesis_root_cause_codes,
+                ),
                 lambda: self._tools.get_dbt_run_results(run_id),
             )
 
@@ -567,14 +617,24 @@ class DiagnosisRunner:
                 str,
                 Field(description="An exact failed node_id returned by run results."),
             ],
-            intent: InvestigationIntentTransport,
+            gap_id: _TransportGapId,
+            gap_kind: _TransportGapKind,
+            hypothesis_ids: _TransportHypothesisIds,
+            new_hypothesis_ids: _TransportNewHypothesisIds,
+            new_hypothesis_root_cause_codes: _TransportNewHypothesisCodes,
         ) -> tuple[EvidenceRecord, ...]:
             """Return the error for a failed node proven by run-results evidence."""
             return execute(
                 ctx,
                 "get_dbt_node_error",
                 {"node_id": node_id, "run_id": run_id},
-                intent,
+                _transport_intent(
+                    gap_id=gap_id,
+                    gap_kind=gap_kind,
+                    hypothesis_ids=hypothesis_ids,
+                    new_hypothesis_ids=new_hypothesis_ids,
+                    new_hypothesis_root_cause_codes=new_hypothesis_root_cause_codes,
+                ),
                 lambda: self._tools.get_dbt_node_error(run_id, node_id),
             )
 
@@ -585,14 +645,24 @@ class DiagnosisRunner:
                 str,
                 Field(description="An exact unqualified relation name from prior lineage."),
             ],
-            intent: InvestigationIntentTransport,
+            gap_id: _TransportGapId,
+            gap_kind: _TransportGapKind,
+            hypothesis_ids: _TransportHypothesisIds,
+            new_hypothesis_ids: _TransportNewHypothesisIds,
+            new_hypothesis_root_cause_codes: _TransportNewHypothesisCodes,
         ) -> tuple[EvidenceRecord, ...]:
             """Return catalog metadata for a relation proven by upstream lineage."""
             return execute(
                 ctx,
                 "get_relation_schema",
                 {"relation_name": relation_name},
-                intent,
+                _transport_intent(
+                    gap_id=gap_id,
+                    gap_kind=gap_kind,
+                    hypothesis_ids=hypothesis_ids,
+                    new_hypothesis_ids=new_hypothesis_ids,
+                    new_hypothesis_root_cause_codes=new_hypothesis_root_cause_codes,
+                ),
                 lambda: self._tools.get_relation_schema(relation_name),
             )
 
@@ -604,14 +674,24 @@ class DiagnosisRunner:
                 Field(description="An exact node_id returned by run results or prior lineage."),
             ],
             direction: Literal["upstream", "downstream"],
-            intent: InvestigationIntentTransport,
+            gap_id: _TransportGapId,
+            gap_kind: _TransportGapKind,
+            hypothesis_ids: _TransportHypothesisIds,
+            new_hypothesis_ids: _TransportNewHypothesisIds,
+            new_hypothesis_root_cause_codes: _TransportNewHypothesisCodes,
         ) -> tuple[EvidenceRecord, ...]:
             """Return bounded lineage for a node proven by structured evidence."""
             return execute(
                 ctx,
                 "get_dbt_lineage",
                 {"direction": direction, "node_id": node_id},
-                intent,
+                _transport_intent(
+                    gap_id=gap_id,
+                    gap_kind=gap_kind,
+                    hypothesis_ids=hypothesis_ids,
+                    new_hypothesis_ids=new_hypothesis_ids,
+                    new_hypothesis_root_cause_codes=new_hypothesis_root_cause_codes,
+                ),
                 lambda: self._tools.get_dbt_lineage(node_id, direction),
             )
 
