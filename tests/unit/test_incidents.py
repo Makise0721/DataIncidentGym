@@ -5,6 +5,10 @@ import pytest
 
 from data_incident_gym.incidents import (
     CASE_ID,
+    SUPPORTED_CASE_IDS,
+    TYPE_CHANGE_CASE_ID,
+    ColumnRenameInjection,
+    ColumnTypeChangeInjection,
     IncidentCaseError,
     load_ground_truth,
     parse_ground_truth,
@@ -61,6 +65,55 @@ def test_committed_ground_truth_is_strict_and_canonical(project_root: Path) -> N
     )
     assert len(truth.digest()) == 64
     assert truth.to_json().endswith("\n")
+
+
+def test_supported_case_registry_preserves_m5_digest(project_root: Path) -> None:
+    assert SUPPORTED_CASE_IDS == (
+        "schema_rename_payment_amount",
+        "schema_type_change_payment_amount",
+    )
+    rename = load_ground_truth(CASE_ID, project_root)
+    assert isinstance(rename.injection, ColumnRenameInjection)
+    assert rename.digest() == (
+        "c2fa0d97b603c37a21d07123481b2a9d09a34dbd3aab38e6e102a55d59ce4491"
+    )
+
+
+def test_type_change_ground_truth_is_strict_and_canonical(project_root: Path) -> None:
+    truth = load_ground_truth(TYPE_CHANGE_CASE_ID, project_root)
+    assert truth.incident_case_id == TYPE_CHANGE_CASE_ID
+    assert truth.root_cause_code == "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"
+    assert truth.direct_failure == "model.jaffle_shop.stg_payments"
+    assert truth.affected_assets == (
+        "model.jaffle_shop.stg_payments",
+        "model.jaffle_shop.orders",
+        "model.jaffle_shop.customers",
+    )
+    assert isinstance(truth.injection, ColumnTypeChangeInjection)
+    assert truth.injection.model_dump() == {
+        "relation": "raw_payments",
+        "column": "amount",
+        "from_type": "integer",
+        "to_type": "text",
+    }
+    assert tuple(
+        (column.name, column.data_type)
+        for column in truth.expected_schema.fault_column_metadata
+    ) == (
+        ("id", "integer"),
+        ("order_id", "integer"),
+        ("payment_method", "text"),
+        ("amount", "text"),
+    )
+    assert len(truth.digest()) == 64
+
+
+def test_loader_rejects_unregistered_well_formed_case(tmp_path: Path) -> None:
+    target = tmp_path / "config/incidents/unregistered_case.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("{}", encoding="utf-8")
+    with pytest.raises(IncidentCaseError, match="未知故障案例"):
+        load_ground_truth("unregistered_case", tmp_path)
 
 
 def test_ground_truth_canonical_digest_is_stable_across_json_key_order(
