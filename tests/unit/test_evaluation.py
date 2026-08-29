@@ -193,6 +193,7 @@ def _kernel_state(
         tool_calls_remaining=4,
         final_status=KernelFinalStatus.CONFIRMED,
         gate_reason="CONFIRMED",
+        selected_hypothesis_id=selected_id,
     )
 
 

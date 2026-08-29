@@ -207,16 +207,13 @@ class DeterministicEvaluator:
         )
 
         assessment_by_id = {item.hypothesis_id: item for item in state.assessments}
-        selected_ids = tuple(
-            item.hypothesis_id
-            for item in state.hypotheses
-            if item.root_cause_code == diagnosis.root_cause_code
-        )
+        selected_id = state.selected_hypothesis_id
         selected_supported = (
             diagnosis.status == DiagnosisStatus.CONFIRMED
-            and len(selected_ids) == 1
-            and assessment_by_id.get(selected_ids[0]) is not None
-            and assessment_by_id[selected_ids[0]].verdict == HypothesisVerdict.SUPPORTED
+            and selected_id is not None
+            and selected_id in {item.hypothesis_id for item in state.hypotheses}
+            and assessment_by_id.get(selected_id) is not None
+            and assessment_by_id[selected_id].verdict == HypothesisVerdict.SUPPORTED
         )
         investigation_state_valid = investigation_state_valid and (
             diagnosis.status != DiagnosisStatus.CONFIRMED or selected_supported
@@ -228,7 +225,7 @@ class DeterministicEvaluator:
             for evidence_id in gap.evidence_ids
         }
         refuted_alternative = any(
-            assessment.hypothesis_id not in selected_ids
+            assessment.hypothesis_id != selected_id
             and assessment.verdict == HypothesisVerdict.REFUTED
             and bool(assessment.evidence_ids)
             and set(assessment.evidence_ids).issubset(closed_evidence_ids)

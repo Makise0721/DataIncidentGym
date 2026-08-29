@@ -284,6 +284,16 @@ def test_toolset_rejects_invalid_missing_or_mismatched_run(tmp_path: Path) -> No
         tools.get_dbt_run_results(OTHER_RUN_ID)
 
 
+def test_artifact_reader_does_not_validate_ground_truth_digest(tmp_path: Path) -> None:
+    run_root = _write_run(tmp_path)
+    metadata_path = run_root / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["ground_truth_digest"] = "not-a-digest"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    EvidenceTools.for_run(RUN_ID, DiagnosticSettings(_env_file=None), tmp_path)
+
+
 def test_artifact_reader_rejects_duplicate_keys_and_tampered_mapping(tmp_path: Path) -> None:
     run_root = _write_run(tmp_path)
     metadata_path = run_root / "metadata.json"

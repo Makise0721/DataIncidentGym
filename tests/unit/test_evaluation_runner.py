@@ -14,6 +14,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisStatus,
 )
 from data_incident_gym.diagnostic_kernel import (
+    Hypothesis,
     InvestigationState,
     KernelFinalStatus,
     KernelStateTraceEvent,
@@ -80,7 +81,14 @@ def _diagnosis_run(status: DiagnosisStatus = DiagnosisStatus.CONFIRMED) -> Diagn
             "SOURCE_SCHEMA_COLUMN_RENAMED",
             "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
         ),
-        hypotheses=(),
+        hypotheses=(
+            Hypothesis(
+                hypothesis_id="h_selected",
+                root_cause_code="SOURCE_SCHEMA_COLUMN_RENAMED",
+            ),
+        )
+        if status is DiagnosisStatus.CONFIRMED
+        else (),
         gaps=(),
         assessments=(),
         claims=(),
@@ -98,6 +106,7 @@ def _diagnosis_run(status: DiagnosisStatus = DiagnosisStatus.CONFIRMED) -> Diagn
             if status is DiagnosisStatus.MODEL_ERROR
             else status.value
         ),
+        selected_hypothesis_id=("h_selected" if status is DiagnosisStatus.CONFIRMED else None),
     )
     return DiagnosisRunResult(
         diagnosis=_diagnosis(status),

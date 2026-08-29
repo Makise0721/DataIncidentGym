@@ -34,6 +34,7 @@ from data_incident_gym.evidence import (
     RunStateDriftError,
     raise_without_context,
 )
+from data_incident_gym.run_context import _METADATA_KEYS as _RUN_METADATA_KEYS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -42,14 +43,6 @@ _EXPECTED_ARTIFACTS = {
     "run_results": "dbt/target/run_results.json",
     "dbt_log": "dbt/logs/dbt.log",
     "schema": "schema.json",
-}
-_EXPECTED_METADATA_KEYS = {
-    "schema_version",
-    "run_id",
-    "incident_case_id",
-    "dbt_exit_code",
-    "ground_truth_digest",
-    "artifacts",
 }
 _RUN_FILES = {
     "metadata": Path("metadata.json"),
@@ -148,7 +141,7 @@ class _RunArtifacts:
         return value
 
     def _validate_metadata(self) -> None:
-        if set(self.metadata) != _EXPECTED_METADATA_KEYS:
+        if set(self.metadata) != _RUN_METADATA_KEYS:
             _invalid_artifact()
         if self.metadata.get("schema_version") != "m2.run.v1":
             _invalid_artifact()
@@ -157,9 +150,6 @@ class _RunArtifacts:
         if not isinstance(self.metadata.get("incident_case_id"), str):
             _invalid_artifact()
         if type(self.metadata.get("dbt_exit_code")) is not int:
-            _invalid_artifact()
-        digest = self.metadata.get("ground_truth_digest")
-        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
             _invalid_artifact()
         artifacts = self.metadata.get("artifacts")
         if artifacts != _EXPECTED_ARTIFACTS:

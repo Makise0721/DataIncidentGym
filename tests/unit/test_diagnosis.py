@@ -196,6 +196,25 @@ def test_kernel_decision_rejects_controller_fields_and_bad_status_shape() -> Non
         )
 
 
+def test_kernel_decision_rejects_blank_recommended_actions() -> None:
+    from data_incident_gym.diagnostic_kernel import KernelDecision
+
+    with pytest.raises(ValidationError, match="recommended_actions"):
+        KernelDecision.model_validate(
+            {
+                "status": "INSUFFICIENT_EVIDENCE",
+                "incident_case_id": CASE_ID,
+                "run_id": RUN_ID,
+                "selected_hypothesis_id": None,
+                "assessments": (),
+                "claims": (),
+                "summary": "More evidence is required.",
+                "recommended_actions": ("",),
+                "confidence": 0.2,
+            }
+        )
+
+
 def test_diagnosis_run_result_contains_terminal_kernel_state() -> None:
     kernel = DiagnosticKernel.start(
         incident_case_id=CASE_ID,

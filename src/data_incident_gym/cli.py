@@ -183,7 +183,7 @@ def lab_reset(case_id: str) -> None:
 
 @lab_app.command("inject")
 def lab_inject(case_id: str) -> None:
-    """向健康基线注入固定字段改名故障。"""
+    """向健康基线注入固定字段变更故障。"""
     try:
         result = create_incident_lab().inject(case_id)
     except (LabError, IncidentCaseError) as exc:

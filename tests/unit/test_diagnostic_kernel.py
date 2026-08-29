@@ -95,6 +95,15 @@ def _kernel() -> DiagnosticKernel:
     )
 
 
+def test_hypothesis_assessment_requires_evidence_ids() -> None:
+    with pytest.raises(ValidationError, match="assessment evidence_ids"):
+        HypothesisAssessment(
+            hypothesis_id="h_rename",
+            verdict=HypothesisVerdict.REFUTED,
+            evidence_ids=(),
+        )
+
+
 def _run_results_record(*, run_id: str = RUN_ID) -> EvidenceRecord:
     return EvidenceRecord.create(
         run_id=run_id,
@@ -750,6 +759,7 @@ def test_confirmed_rename_requires_supported_selected_and_refuted_alternative() 
     state = kernel.snapshot(model_requests_used=5)
     assert state.final_status is KernelFinalStatus.CONFIRMED
     assert state.gate_reason == "CONFIRMED"
+    assert state.selected_hypothesis_id == decision.selected_hypothesis_id
     assert state.assessments == decision.assessments
     assert state.claims == decision.claims
 

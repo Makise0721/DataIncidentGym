@@ -87,6 +87,8 @@ class HypothesisAssessment(BaseModel):
 
     @model_validator(mode="after")
     def reject_duplicate_evidence_ids(self) -> Self:
+        if not self.evidence_ids:
+            raise ValueError("assessment evidence_ids must not be empty")
         _reject_duplicates(self.evidence_ids, "assessment evidence_ids")
         return self
 
@@ -180,6 +182,8 @@ class KernelDecision(BaseModel):
         _reject_duplicates(self.recommended_actions, "recommended_actions")
         if not self.summary.strip():
             raise ValueError("summary must not be blank")
+        if any(not action.strip() for action in self.recommended_actions):
+            raise ValueError("recommended_actions must not be blank")
         if self.status == "CONFIRMED":
             if self.selected_hypothesis_id is None:
                 raise ValueError("CONFIRMED requires selected_hypothesis_id")
@@ -227,6 +231,7 @@ class InvestigationState(BaseModel):
     tool_calls_remaining: Annotated[StrictInt, Field(ge=0)]
     final_status: KernelFinalStatus | None
     gate_reason: StrictStr | None
+    selected_hypothesis_id: StrictStr | None
 
     @model_validator(mode="after")
     def validate_invariants(self) -> Self:
@@ -255,6 +260,16 @@ class InvestigationState(BaseModel):
             raise ValueError("tool call usage exceeds limit")
         if self.tool_calls_remaining != self.tool_call_limit - self.tool_calls_used:
             raise ValueError("tool call remaining count is inconsistent")
+        hypothesis_ids = {item.hypothesis_id for item in self.hypotheses}
+        if self.final_status == KernelFinalStatus.CONFIRMED:
+            if self.selected_hypothesis_id is None:
+                raise ValueError("CONFIRMED state requires selected_hypothesis_id")
+            if self.selected_hypothesis_id not in hypothesis_ids:
+                raise ValueError("selected_hypothesis_id must reference a hypothesis")
+        elif self.selected_hypothesis_id is not None:
+            raise ValueError(
+                "non-confirmed state cannot contain selected_hypothesis_id"
+            )
         return self
 
 
@@ -369,6 +384,7 @@ class DiagnosticKernel:
         self._prepared_calls: dict[str, PreparedToolCall] = {}
         self._final_status: KernelFinalStatus | None = None
         self._gate_reason: str | None = None
+        self._selected_hypothesis_id: str | None = None
 
     @classmethod
     def start(
@@ -425,6 +441,7 @@ class DiagnosticKernel:
             tool_calls_remaining=self._tool_call_limit - len(self._fingerprints),
             final_status=self._final_status,
             gate_reason=self._gate_reason,
+            selected_hypothesis_id=self._selected_hypothesis_id,
         )
 
     def _error(self, code: str, fingerprint: str | None = None) -> None:
@@ -850,6 +867,7 @@ class DiagnosticKernel:
         selected = next(item for item in self._hypotheses if item.hypothesis_id == selected_id)
         self._assessments = decision.assessments
         self._claims = decision.claims
+        self._selected_hypothesis_id = selected_id
         self._final_status = KernelFinalStatus.CONFIRMED
         self._gate_reason = "CONFIRMED"
         self._revision += 1

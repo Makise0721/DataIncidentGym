@@ -10,7 +10,6 @@ from data_incident_gym.artifacts import ARTIFACT_FILENAMES
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evaluation_runner import EvaluationAttemptResult, EvaluationRunner
-from data_incident_gym.incidents import SUPPORTED_CASE_IDS
 from data_incident_gym.lab import IncidentLab
 
 pytestmark = [
@@ -22,7 +21,10 @@ pytestmark = [
     ),
 ]
 
-CASE_IDS = SUPPORTED_CASE_IDS
+CASE_IDS = (
+    "schema_rename_payment_amount",
+    "schema_type_change_payment_amount",
+)
 SAMPLES_PER_CASE = 3
 MINIMUM_PASSES_PER_CASE = 2
 
@@ -56,6 +58,7 @@ async def test_real_model_passes_two_of_three_for_each_incident() -> None:
     settings = Settings(_env_file=None)
     diagnostic_settings = DiagnosticSettings(_env_file=None)
     observations: list[SampleObservation] = []
+    cleanup_errors: list[str] = []
     lab = IncidentLab(settings, PROJECT_ROOT)
 
     for case_id in CASE_IDS:
@@ -86,7 +89,10 @@ async def test_real_model_passes_two_of_three_for_each_incident() -> None:
                         )
                     )
         finally:
-            lab.reset(case_id)
+            try:
+                lab.reset(case_id)
+            except Exception:
+                cleanup_errors.append(case_id)
 
     assert len(observations) == len(CASE_IDS) * SAMPLES_PER_CASE
     for observation in observations:
@@ -102,6 +108,9 @@ async def test_real_model_passes_two_of_three_for_each_incident() -> None:
             assert {
                 path.name for path in observation.artifact_dir.iterdir()
             } == set(ARTIFACT_FILENAMES)
+
+    if cleanup_errors:
+        pytest.fail(f"incident cleanup failed for: {', '.join(cleanup_errors)}")
 
     for case_id in CASE_IDS:
         case_samples = tuple(

@@ -10,6 +10,7 @@ import data_incident_gym.cli as cli
 from data_incident_gym.baseline import BaselineError, make_baseline_summary
 from data_incident_gym.diagnosis import Diagnosis, DiagnosisMetrics, DiagnosisRunResult
 from data_incident_gym.diagnostic_kernel import (
+    Hypothesis,
     InvestigationState,
     KernelFinalStatus,
     KernelStateTraceEvent,
@@ -268,7 +269,14 @@ def _diagnosis_result(status: str) -> DiagnosisRunResult:
             "SOURCE_SCHEMA_COLUMN_RENAMED",
             "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
         ),
-        hypotheses=(),
+        hypotheses=(
+            Hypothesis(
+                hypothesis_id="h_selected",
+                root_cause_code="SOURCE_SCHEMA_COLUMN_RENAMED",
+            ),
+        )
+        if status == "CONFIRMED"
+        else (),
         gaps=(),
         assessments=(),
         claims=(),
@@ -282,6 +290,7 @@ def _diagnosis_result(status: str) -> DiagnosisRunResult:
         tool_calls_remaining=8,
         final_status=final_status,
         gate_reason=("MODEL_RUNTIME_ERROR" if status == "MODEL_ERROR" else status),
+        selected_hypothesis_id=("h_selected" if status == "CONFIRMED" else None),
     )
     return DiagnosisRunResult(
         diagnosis=_diagnosis(status),
