@@ -414,6 +414,7 @@ def test_type_case_injects_and_reset_applies_inverse_mutation(
             (relation, column, source, target)
         ),
     )
+    monkeypatch.setattr(lab, "_drop_type_change_dependency", lambda: None)
 
     assert lab.inject(TYPE_CHANGE_CASE_ID).state == "INJECTED"
     assert changes == [("raw_payments", "amount", "integer", "text")]

@@ -320,6 +320,25 @@ class IncidentLab:
                 )
             ) from None
 
+    def _drop_type_change_dependency(self) -> None:
+        statement = sql.SQL("DROP VIEW IF EXISTS {}.{}").format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier("stg_payments"),
+        )
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.transaction(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement)
+        except Exception as exc:
+            raise self._clean(
+                IncidentExecutionError(
+                    f"无法准备字段类型变化：{self._redact(str(exc))}"
+                )
+            ) from None
+
     def _apply_mutation(self, truth: GroundTruth, *, inject: bool) -> None:
         mutation = truth.injection
         if isinstance(mutation, ColumnRenameInjection):
@@ -329,6 +348,8 @@ class IncidentLab:
             return
         if not isinstance(mutation, ColumnTypeChangeInjection):
             raise InvalidIncidentState("故障注入契约类型无效")
+        if inject:
+            self._drop_type_change_dependency()
         source_type = mutation.from_type if inject else mutation.to_type
         target_type = mutation.to_type if inject else mutation.from_type
         self._change_column_type(
