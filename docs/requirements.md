@@ -544,6 +544,21 @@ doctor 的成功不能替代完整 P0 评测；它只证明依赖和最小能力
 4. 孤立支付记录。
 5. 静默行数下降。
 
+#### M6：Diagnostic Kernel v1 与字段类型变化纵切
+
+M6 只交付第一个 P1 纵切：
+
+- 保留 schema_rename_payment_amount，并新增 schema_type_change_payment_amount；
+- 新案例把 raw_payments.amount 从 integer 改为 text，root_cause_code 为 SOURCE_SCHEMA_COLUMN_TYPE_CHANGED；
+- Diagnosis Agent 显式维护候选假设、EvidenceGap、claim-evidence bindings 和剩余预算；
+- CONFIRMED 前至少有两个候选假设、一个受支持的选中假设和一个被证据反驳的替代假设；
+- 模型负责 root cause、affected assets 与 evidence IDs；Diagnostic Kernel 只验证、拒绝和投影模型声明，不替模型生成答案；
+- evaluator 继续独立读取 Ground Truth，并对冻结的 InvestigationState、Diagnosis、EvidenceRecord 与 trace 做确定性评分；
+- 六文件产物合同不变，最终 InvestigationState 作为 trace.jsonl 的类型化终态事件保存并进入 report.md；
+- 两个案例分别执行精确三个真实模型样本，每个案例至少两个 PASSED；失败全部保留并进入分母。
+
+M6 不实现静态 Skill baseline、消融、Accuracy/F1、跨变体结论、用户自定义故障 DSL、自由 SQL、写工具或自动修复。
+
 ### P2：真实编排与血缘平台
 
 - Airflow。
