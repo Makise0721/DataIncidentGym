@@ -11,8 +11,16 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
-from pydantic_ai.exceptions import ToolFailed, UnexpectedModelBehavior, UsageLimitExceeded
-from pydantic_ai.models import Model
+from pydantic_ai.exceptions import (
+    IncompleteToolCall,
+    ModelAPIError,
+    ToolFailed,
+    ToolRetryError,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
+)
+from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -23,11 +31,13 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisStatus,
     EvidenceGateTraceEvent,
+    ModelProtocolTraceEvent,
     ToolTraceEvent,
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.diagnostic_kernel import (
     DiagnosticKernel,
+    EvidenceGapStatus,
     InvestigationIntent,
     KernelDecision,
     KernelError,
@@ -97,6 +107,14 @@ class ModelIdentity:
 _DEFAULT_MODEL_IDENTITY = ModelIdentity("pydantic-function", "scripted-kernel-model")
 
 
+@dataclass(frozen=True)
+class _ModelResponseObservation:
+    function_tool_names: tuple[str, ...]
+    output_tool_names: tuple[str, ...]
+    has_tool_call: bool
+    has_text_output: bool
+
+
 @dataclass
 class _RunState:
     kernel: DiagnosticKernel
@@ -105,6 +123,56 @@ class _RunState:
     usage: RunUsage = field(default_factory=RunUsage)
     successful_calls: int = 0
     outcome: KernelOutcome | None = None
+    last_model_response: _ModelResponseObservation | None = None
+    protocol_failure: tuple[str, str, str | None] | None = None
+    protocol_trace_recorded: bool = False
+
+    def record_model_response(
+        self, response: ModelResponse, model_request_parameters: ModelRequestParameters
+    ) -> None:
+        self.protocol_failure = None
+        self.protocol_trace_recorded = False
+        declared_function_tools = {
+            tool.name for tool in model_request_parameters.function_tools
+        }
+        declared_output_tools = {
+            tool.name for tool in model_request_parameters.output_tools
+        }
+        self.last_model_response = _ModelResponseObservation(
+            function_tool_names=tuple(
+                part.tool_name
+                for part in response.parts
+                if isinstance(part, ToolCallPart)
+                and part.tool_name in declared_function_tools
+            ),
+            output_tool_names=tuple(
+                part.tool_name
+                for part in response.parts
+                if isinstance(part, ToolCallPart)
+                and part.tool_name in declared_output_tools
+            ),
+            has_tool_call=any(isinstance(part, ToolCallPart) for part in response.parts),
+            has_text_output=any(isinstance(part, TextPart) for part in response.parts),
+        )
+
+    def set_protocol_failure(
+        self, *, category: str, stage: str, tool_name: str | None
+    ) -> None:
+        self.protocol_failure = (category, stage, tool_name)
+
+    def append_protocol_trace(self) -> None:
+        if self.protocol_trace_recorded or self.protocol_failure is None:
+            return
+        category, stage, tool_name = self.protocol_failure
+        self.trace.append(
+            ModelProtocolTraceEvent(
+                event_type="MODEL_PROTOCOL",
+                stage=stage,
+                tool_name=tool_name,
+                category=category,
+            )
+        )
+        self.protocol_trace_recorded = True
 
     def record_tool_trace(
         self,
@@ -127,6 +195,72 @@ class _RunState:
                 elapsed_ms=max(0, int((monotonic() - started_at) * 1000)),
             )
         )
+
+
+class _ModelObservationAdapter(Model):
+    """Observe only safe response shape facts before PydanticAI validates them."""
+
+    def __init__(self, model: Model, state: _RunState) -> None:
+        super().__init__(settings=model.settings, profile=model.profile)
+        self._model = model
+        self._state = state
+
+    @property
+    def provider(self):
+        return self._model.provider
+
+    @property
+    def profile(self):
+        return self._model.profile
+
+    @property
+    def model_name(self) -> str:
+        return self._model.model_name
+
+    @property
+    def system(self) -> str:
+        return self._model.system
+
+    @property
+    def base_url(self) -> str | None:
+        return self._model.base_url
+
+    @property
+    def tool_deferral_mode(self):
+        return self._model.tool_deferral_mode
+
+    @property
+    def tool_addition_mode(self):
+        return self._model.tool_addition_mode
+
+    def prepare_request(
+        self,
+        model_settings,
+        model_request_parameters: ModelRequestParameters,
+    ):
+        return self._model.prepare_request(model_settings, model_request_parameters)
+
+    def prepare_messages(
+        self,
+        messages,
+        model_request_parameters: ModelRequestParameters | None = None,
+    ):
+        return self._model.prepare_messages(messages, model_request_parameters)
+
+    def resolve_prompt_cache_retention(self, model_settings):
+        return self._model.resolve_prompt_cache_retention(model_settings)
+
+    async def request(
+        self,
+        messages,
+        model_settings,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        response = await self._model.request(
+            messages, model_settings, model_request_parameters
+        )
+        self._state.record_model_response(response, model_request_parameters)
+        return response
 
 
 class _ControllerInvariantError(RuntimeError):
@@ -172,6 +306,61 @@ def _diagnosis_from_outcome(state: _RunState, outcome: KernelOutcome) -> Diagnos
     )
 
 
+def _last_observed_tool_name(
+    state: _RunState, *, output: bool
+) -> str | None:
+    observation = state.last_model_response
+    if observation is None:
+        return None
+    names = observation.output_tool_names if output else observation.function_tool_names
+    return names[-1] if names else None
+
+
+def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
+    if isinstance(error, (ModelAPIError, IncompleteToolCall)):
+        state.set_protocol_failure(
+            category="PROVIDER_PROTOCOL_FAILURE",
+            stage="PROVIDER_RESPONSE",
+            tool_name=None,
+        )
+        return
+
+    observation = state.last_model_response
+    if isinstance(error, UnexpectedModelBehavior | ToolRetryError | ValueError | TypeError):
+        if (
+            state.protocol_failure is not None
+            and state.protocol_failure[1] == "OUTPUT_VALIDATION"
+        ):
+            return
+        if observation is not None and observation.output_tool_names:
+            state.set_protocol_failure(
+                category="OUTPUT_SCHEMA_REJECTED",
+                stage="OUTPUT_SCHEMA_VALIDATION",
+                tool_name=_last_observed_tool_name(state, output=True),
+            )
+            return
+        if observation is not None and observation.function_tool_names:
+            state.set_protocol_failure(
+                category="TOOL_ARGUMENT_REJECTED",
+                stage="TOOL_ARGUMENT_VALIDATION",
+                tool_name=_last_observed_tool_name(state, output=False),
+            )
+            return
+        if observation is not None and observation.has_text_output:
+            state.set_protocol_failure(
+                category="OUTPUT_SCHEMA_REJECTED",
+                stage="OUTPUT_SCHEMA_VALIDATION",
+                tool_name=None,
+            )
+            return
+
+    state.set_protocol_failure(
+        category="PROVIDER_PROTOCOL_FAILURE",
+        stage="PROVIDER_RESPONSE",
+        tool_name=None,
+    )
+
+
 class DiagnosisRunner:
     def __init__(
         self,
@@ -214,9 +403,9 @@ class DiagnosisRunner:
         assert model_identity is not None
         return cls(run_id, settings, project_root, model, tools, model_identity)
 
-    def _agent(self) -> Agent[_RunState, KernelDecision]:
+    def _agent(self, state: _RunState) -> Agent[_RunState, KernelDecision]:
         agent = Agent(
-            self._model,
+            _ModelObservationAdapter(self._model, state),
             deps_type=_RunState,
             output_type=KernelDecision,
             system_prompt=SYSTEM_PROMPT,
@@ -378,9 +567,26 @@ class DiagnosisRunner:
             ctx: RunContext[_RunState], output: KernelDecision
         ) -> KernelDecision:
             state = ctx.deps
+            if output.status == "INSUFFICIENT_EVIDENCE" and not any(
+                gap.status in {EvidenceGapStatus.CLOSED, EvidenceGapStatus.BLOCKED}
+                for gap in state.kernel.snapshot(
+                    model_requests_used=state.usage.requests
+                ).gaps
+            ):
+                state.set_protocol_failure(
+                    category="PREMATURE_FINALIZATION",
+                    stage="OUTPUT_VALIDATION",
+                    tool_name=_last_observed_tool_name(state, output=True),
+                )
+                raise ModelRetry("INVESTIGATION_REQUIRED")
             try:
                 outcome = state.kernel.finalize(output)
             except KernelError as error:
+                state.set_protocol_failure(
+                    category="OUTPUT_SCHEMA_REJECTED",
+                    stage="OUTPUT_VALIDATION",
+                    tool_name=_last_observed_tool_name(state, output=True),
+                )
                 state.trace.append(
                     EvidenceGateTraceEvent(
                         event_type="EVIDENCE_GATE",
@@ -455,7 +661,7 @@ class DiagnosisRunner:
             tool_call_limit=8,
         )
         state = _RunState(kernel)
-        agent = self._agent()
+        agent = self._agent(state)
         prompt = (
             f"Investigate incident case {context.incident_case_id!r} for verified run "
             f"{context.run_id!r}. Use the read-only evidence tools and return KernelDecision."
@@ -477,9 +683,26 @@ class DiagnosisRunner:
             return self._model_error_result(state, "MODEL_TIMEOUT")
         except UsageLimitExceeded:
             return self._model_error_result(state, "MODEL_REQUEST_LIMIT")
-        except (UnexpectedModelBehavior, ModelRetry, ToolFailed, ValueError, TypeError):
+        except (
+            IncompleteToolCall,
+            ModelAPIError,
+            UnexpectedModelBehavior,
+            ModelRetry,
+            ToolFailed,
+            ToolRetryError,
+            ValueError,
+            TypeError,
+        ) as error:
+            _record_protocol_failure(state, error)
+            state.append_protocol_trace()
             return self._model_error_result(state, "MODEL_PROTOCOL_ERROR")
         except _ControllerInvariantError:
+            state.set_protocol_failure(
+                category="PROVIDER_PROTOCOL_FAILURE",
+                stage="PROVIDER_RESPONSE",
+                tool_name=None,
+            )
+            state.append_protocol_trace()
             return self._model_error_result(state, "MODEL_PROTOCOL_ERROR")
         except Exception:
             return self._model_error_result(state, "MODEL_RUNTIME_ERROR")

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisRunResult,
+    ModelProtocolTraceEvent,
     ToolTraceEvent,
 )
 from data_incident_gym.diagnostic_agent import (
@@ -381,6 +382,20 @@ def test_tool_trace_event_requires_nonnegative_strict_elapsed_ms() -> None:
         ToolTraceEvent.model_validate({**event.model_dump(), "elapsed_ms": -1})
     with pytest.raises(ValidationError):
         ToolTraceEvent.model_validate({**event.model_dump(), "elapsed_ms": 1.0})
+
+
+def test_model_protocol_trace_event_is_safe_and_strict() -> None:
+    event = ModelProtocolTraceEvent(
+        event_type="MODEL_PROTOCOL",
+        stage="TOOL_ARGUMENT_VALIDATION",
+        tool_name="get_dbt_run_results",
+        category="TOOL_ARGUMENT_REJECTED",
+    )
+    assert ModelProtocolTraceEvent.model_validate_json(event.model_dump_json()) == event
+    with pytest.raises(ValidationError):
+        ModelProtocolTraceEvent.model_validate({**event.model_dump(), "unexpected": "value"})
+    with pytest.raises(ValidationError):
+        ModelProtocolTraceEvent.model_validate({**event.model_dump(), "tool_name": " "})
 
 
 def test_diagnosis_prompt_is_m6_versioned_hashed_and_case_agnostic() -> None:

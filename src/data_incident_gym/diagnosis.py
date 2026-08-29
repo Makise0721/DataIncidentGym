@@ -121,8 +121,30 @@ class EvidenceGateTraceEvent(BaseModel):
     accepted: StrictBool
 
 
+class ModelProtocolTraceEvent(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    event_type: Literal["MODEL_PROTOCOL"]
+    stage: Literal[
+        "TOOL_ARGUMENT_VALIDATION",
+        "OUTPUT_SCHEMA_VALIDATION",
+        "OUTPUT_VALIDATION",
+        "PROVIDER_RESPONSE",
+    ]
+    tool_name: NonBlankStr | None
+    category: Literal[
+        "TOOL_ARGUMENT_REJECTED",
+        "OUTPUT_SCHEMA_REJECTED",
+        "PREMATURE_FINALIZATION",
+        "PROVIDER_PROTOCOL_FAILURE",
+    ]
+
+
 TraceEvent = Annotated[
-    ToolTraceEvent | EvidenceGateTraceEvent | KernelStateTraceEvent,
+    ToolTraceEvent
+    | EvidenceGateTraceEvent
+    | ModelProtocolTraceEvent
+    | KernelStateTraceEvent,
     Field(discriminator="event_type"),
 ]
 

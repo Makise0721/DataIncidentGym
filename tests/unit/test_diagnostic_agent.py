@@ -5,7 +5,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.exceptions import IncompleteToolCall, ModelAPIError
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
@@ -552,21 +559,219 @@ async def test_output_validation_retries_then_model_error(tmp_path: Path) -> Non
         for event in result.trace
         if event.event_type == "EVIDENCE_GATE"
     ] == ["DECISION_SCOPE_MISMATCH"] * 3 + ["MODEL_PROTOCOL_ERROR"]
+    protocol_event = next(
+        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
+    )
+    assert protocol_event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert protocol_event.stage == "OUTPUT_VALIDATION"
+    assert protocol_event.tool_name
 
 
 @pytest.mark.asyncio
-async def test_model_returned_insufficient_preserves_empty_claims(tmp_path: Path) -> None:
+async def test_invalid_tool_arguments_are_classified_before_tool_entry(
+    tmp_path: Path,
+) -> None:
+    tools = SyntheticEvidenceTools()
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    "get_dbt_run_results",
+                    {"run_id": RUN_ID, "intent": {"gap_id": "invalid"}},
+                    tool_call_id="invalid-tool-arguments",
+                )
+            ]
+        )
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+    protocol_event = next(
+        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
+    )
+    assert protocol_event.category == "TOOL_ARGUMENT_REJECTED"
+    assert protocol_event.stage == "TOOL_ARGUMENT_VALIDATION"
+    assert protocol_event.tool_name == "get_dbt_run_results"
+    assert tools.calls == []
+    assert result.investigation_state.tool_calls_used == 0
+    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
+    assert "invalid-tool-arguments" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_mixed_function_and_output_calls_classify_output_path(
+    tmp_path: Path,
+) -> None:
+    tools = SyntheticEvidenceTools()
+    calls = _full_tool_calls()[:3]
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        tool_returns = sum(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        )
+        tool_name, arguments = calls[tool_returns]
+        return ModelResponse(
+            parts=[
+                ToolCallPart(tool_name, arguments, tool_call_id=f"function-{tool_returns}"),
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    {"status": "NOT_A_KERNEL_DECISION"},
+                    tool_call_id=f"output-{tool_returns}",
+                ),
+            ]
+        )
+
+    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+    protocol_event = next(
+        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
+    )
+    assert protocol_event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert protocol_event.stage == "OUTPUT_SCHEMA_VALIDATION"
+    assert protocol_event.tool_name
+    assert len(tools.calls) == 3
+    assert result.investigation_state.tool_calls_used == 3
+
+
+@pytest.mark.asyncio
+async def test_plain_text_is_classified_as_output_schema_rejection(
+    tmp_path: Path,
+) -> None:
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("plain output secret=TEST_REDACTED_VALUE")])
+
+    result = await _runner(
+        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
+    ).diagnose(CASE_ID)
+    protocol_event = next(
+        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
+    )
+    assert protocol_event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert protocol_event.stage == "OUTPUT_SCHEMA_VALIDATION"
+    assert protocol_event.tool_name is None
+    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
+    assert "plain output secret=TEST_REDACTED_VALUE" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_invalid_kernel_decision_is_classified_as_output_schema_rejection(
+    tmp_path: Path,
+) -> None:
+    output_tool_name: str | None = None
+    model_requests = 0
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        nonlocal model_requests, output_tool_name
+        model_requests += 1
+        output_tool_name = agent_info.output_tools[0].name
+        return _output_call(agent_info, {"status": "NOT_A_KERNEL_DECISION"})
+
+    result = await _runner(
+        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
+    ).diagnose(CASE_ID)
+    protocol_event = next(
+        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
+    )
+    assert protocol_event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert protocol_event.stage == "OUTPUT_SCHEMA_VALIDATION"
+    assert protocol_event.tool_name == output_tool_name
+    assert model_requests == 3
+    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_premature_finalization_requires_investigation_gap(tmp_path: Path) -> None:
     def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
         return _output_call(agent_info, _insufficient_payload())
 
     result = await _runner(
         tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
     ).diagnose(CASE_ID)
+    protocol_event = next(
+        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
+    )
+    assert protocol_event.category == "PREMATURE_FINALIZATION"
+    assert protocol_event.stage == "OUTPUT_VALIDATION"
+    assert protocol_event.tool_name
+    assert result.diagnosis.status.value == "MODEL_ERROR"
+    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_provider_protocol_failure_is_classified_without_raw_error(
+    tmp_path: Path,
+) -> None:
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        raise ModelAPIError("scripted-model", "provider raw secret=TEST_REDACTED_VALUE")
+
+    result = await _runner(
+        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
+    ).diagnose(CASE_ID)
+    protocol_event = next(
+        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
+    )
+    assert protocol_event.category == "PROVIDER_PROTOCOL_FAILURE"
+    assert protocol_event.stage == "PROVIDER_RESPONSE"
+    assert protocol_event.tool_name is None
+    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
+    assert "provider raw secret=TEST_REDACTED_VALUE" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_incomplete_provider_response_is_classified_without_raw_error(
+    tmp_path: Path,
+) -> None:
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        raise IncompleteToolCall(
+            "provider raw secret=TEST_REDACTED_VALUE",
+            body="raw provider body=TEST_REDACTED_VALUE",
+        )
+
+    result = await _runner(
+        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
+    ).diagnose(CASE_ID)
+    protocol_event = next(
+        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
+    )
+    assert protocol_event.category == "PROVIDER_PROTOCOL_FAILURE"
+    assert protocol_event.stage == "PROVIDER_RESPONSE"
+    assert protocol_event.tool_name is None
+    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
+    serialized = result.model_dump_json()
+    assert "provider raw secret=TEST_REDACTED_VALUE" not in serialized
+    assert "raw provider body=TEST_REDACTED_VALUE" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_model_returned_insufficient_preserves_empty_claims(tmp_path: Path) -> None:
+    tools = SyntheticEvidenceTools()
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        if not any(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        ):
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_dbt_run_results",
+                        _full_tool_calls()[0][1],
+                        tool_call_id="run-results",
+                    )
+                ]
+            )
+        return _output_call(agent_info, _insufficient_payload())
+
+    result = await _runner(
+        tmp_path, FunctionModel(scripted), tools
+    ).diagnose(CASE_ID)
     assert result.diagnosis.status.value == "INSUFFICIENT_EVIDENCE"
     assert result.diagnosis.root_cause_code is None
     assert result.diagnosis.affected_assets == ()
     assert result.diagnosis.evidence_ids == ()
-    assert result.investigation_state.gaps == ()
+    assert len(result.investigation_state.gaps) == 1
+    assert result.investigation_state.gaps[0].status.value == "CLOSED"
 
 
 @pytest.mark.asyncio
@@ -625,10 +830,10 @@ async def test_evidence_tool_error_exposes_only_stable_code_and_blocks_gap(
 
 
 @pytest.mark.asyncio
-async def test_testmodel_output_path_is_structured_and_safe(tmp_path: Path) -> None:
+async def test_functionmodel_output_path_is_structured_and_safe(tmp_path: Path) -> None:
     result = await _runner(
         tmp_path,
-        TestModel(call_tools=[], custom_output_args=_insufficient_payload()),
+        _full_scripted_model(_insufficient_payload()),
         SyntheticEvidenceTools(),
     ).diagnose(CASE_ID)
     assert result.diagnosis.status.value == "INSUFFICIENT_EVIDENCE"
