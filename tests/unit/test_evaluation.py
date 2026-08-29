@@ -720,6 +720,71 @@ def test_kernel_mutations_fail_closed(
     }
 
 
+def test_evaluator_rejects_selected_hypothesis_root_claim_mismatch(valid_inputs) -> None:
+    truth, verification, diagnosis_run = valid_inputs
+    state = diagnosis_run.investigation_state
+    alternate_code = next(
+        code for code in APPROVED_ROOT_CAUSE_CODES if code != truth.root_cause_code
+    )
+    selected = state.hypotheses[0].model_copy(update={"root_cause_code": alternate_code})
+    mutated = _with_terminal_state(
+        diagnosis_run,
+        state.model_copy(update={"hypotheses": (selected, *state.hypotheses[1:])}),
+    )
+
+    result = _evaluate((truth, verification, mutated))
+
+    assert result.status == EvaluationStatus.FAILED
+    assert "INVESTIGATION_STATE_VALID" in {
+        check.code.value for check in result.checks if not check.passed
+    }
+
+
+def test_evaluator_rejects_unassessed_hypothesis(valid_inputs) -> None:
+    truth, verification, diagnosis_run = valid_inputs
+    state = diagnosis_run.investigation_state
+    extra = Hypothesis(
+        hypothesis_id="h_unassessed",
+        root_cause_code=truth.root_cause_code,
+    )
+    mutated = _with_terminal_state(
+        diagnosis_run,
+        state.model_copy(update={"hypotheses": (*state.hypotheses, extra)}),
+    )
+
+    result = _evaluate((truth, verification, mutated))
+
+    assert result.status == EvaluationStatus.FAILED
+    assert "INVESTIGATION_STATE_VALID" in {
+        check.code.value for check in result.checks if not check.passed
+    }
+
+
+@pytest.mark.parametrize("reference", ["assessment", "gap"])
+def test_evaluator_rejects_non_current_kernel_evidence_references(
+    valid_inputs, reference: str
+) -> None:
+    truth, verification, diagnosis_run = valid_inputs
+    state = diagnosis_run.investigation_state
+    unknown_id = "ev_" + "f" * 64
+    if reference == "assessment":
+        assessment = state.assessments[0].model_copy(update={"evidence_ids": (unknown_id,)})
+        mutated_state = state.model_copy(
+            update={"assessments": (assessment, *state.assessments[1:])}
+        )
+    else:
+        gap = state.gaps[0].model_copy(update={"evidence_ids": (unknown_id,)})
+        mutated_state = state.model_copy(update={"gaps": (gap, *state.gaps[1:])})
+    mutated = _with_terminal_state(diagnosis_run, mutated_state)
+
+    result = _evaluate((truth, verification, mutated))
+
+    assert result.status == EvaluationStatus.FAILED
+    assert "INVESTIGATION_STATE_VALID" in {
+        check.code.value for check in result.checks if not check.passed
+    }
+
+
 def _check(result: EvaluationResult, code: str) -> EvaluationCheck:
     return next(check for check in result.checks if check.code.value == code)
 

@@ -15,10 +15,10 @@
 
 ## 评测检查
 
-| 检查 | 结果 | 期望 | 实际 | 原因码 |
-| --- | --- | --- | --- | --- |
+| 检查 | 结果 | 原因码 |
+| --- | --- | --- |
 {% for check in evaluation.checks -%}
-| {{ check.code.value }} | {{ "通过" if check.passed else "失败" }} | {{ check.expected | join(", ") }} | {{ check.actual | join(", ") }} | {{ check.reason_code }} |
+| {{ check.code.value }} | {{ "通过" if check.passed else "失败" }} | {{ check.reason_code }} |
 {% endfor %}
 
 ## Diagnosis

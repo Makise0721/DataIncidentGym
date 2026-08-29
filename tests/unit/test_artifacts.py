@@ -528,6 +528,27 @@ def test_report_is_deterministic_chinese_and_contains_every_failed_check(
     assert all(check.reason_code in report for check in failed_artifact_run.evaluation.checks)
 
 
+def test_report_does_not_render_evaluation_expected_or_actual_values(
+    tmp_path: Path, failed_artifact_run: ArtifactRun
+) -> None:
+    expected_sentinel = "GROUND_TRUTH_EXPECTED_SENTINEL"
+    actual_sentinel = "GROUND_TRUTH_ACTUAL_SENTINEL"
+    checks = tuple(
+        check.model_copy(
+            update={"expected": (expected_sentinel,), "actual": (actual_sentinel,)}
+        )
+        for check in failed_artifact_run.evaluation.checks
+    )
+    evaluation = failed_artifact_run.evaluation.model_copy(update={"checks": checks})
+    run = failed_artifact_run.model_copy(update={"evaluation": evaluation})
+
+    output = ArtifactWriter(tmp_path, run_command=fake_clean_git("2" * 40)).write(run)
+    report = read(output / "report.md")
+
+    assert expected_sentinel not in report
+    assert actual_sentinel not in report
+
+
 def test_writer_refuses_existing_run_directory_instead_of_overwriting(
     tmp_path: Path, artifact_run: ArtifactRun
 ) -> None:

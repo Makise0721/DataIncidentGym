@@ -166,6 +166,34 @@ class DeterministicEvaluator:
         hypothesis_ids = tuple(item.hypothesis_id for item in state.hypotheses)
         gap_ids = tuple(item.gap_id for item in state.gaps)
         assessment_ids = tuple(item.hypothesis_id for item in state.assessments)
+        hypothesis_id_set = set(hypothesis_ids)
+        hypothesis_by_id = {
+            item.hypothesis_id: item for item in state.hypotheses
+        }
+        assessment_by_id = {
+            item.hypothesis_id: item for item in state.assessments
+        }
+        selected_id = state.selected_hypothesis_id
+        hypothesis_assessments_complete = (
+            diagnosis.status != DiagnosisStatus.CONFIRMED
+            or (
+                len(assessment_ids) == len(hypothesis_ids)
+                and set(assessment_ids) == hypothesis_id_set
+            )
+        )
+        root_claim_values = tuple(
+            item.value for item in state.claims if item.kind == ClaimKind.ROOT_CAUSE
+        )
+        selected_root_claim_aligned = (
+            diagnosis.status != DiagnosisStatus.CONFIRMED
+            or (
+                selected_id is not None
+                and selected_id in hypothesis_by_id
+                and len(root_claim_values) == 1
+                and root_claim_values[0]
+                == hypothesis_by_id[selected_id].root_cause_code
+            )
+        )
         claim_keys = tuple((item.kind, item.value) for item in state.claims)
         state_hypothesis_ref_sequences = tuple(
             item.hypothesis_ids for item in state.gaps
@@ -187,6 +215,30 @@ class DeterministicEvaluator:
             len(values) == len(set(values))
             for values in state_duplicate_sequences
         )
+        closed_evidence_ids = {
+            evidence_id
+            for gap in state.gaps
+            if gap.status == EvidenceGapStatus.CLOSED
+            for evidence_id in gap.evidence_ids
+        }
+        inventory_id_set = set(inventory_ids)
+        gap_hypothesis_refs_valid = all(
+            set(gap.hypothesis_ids).issubset(hypothesis_id_set)
+            for gap in state.gaps
+        )
+        gap_evidence_refs_valid = all(
+            set(gap.evidence_ids).issubset(inventory_id_set)
+            and (
+                (gap.status == EvidenceGapStatus.CLOSED and bool(gap.evidence_ids))
+                or (gap.status != EvidenceGapStatus.CLOSED and not gap.evidence_ids)
+            )
+            for gap in state.gaps
+        )
+        assessment_evidence_refs_valid = all(
+            set(assessment.evidence_ids).issubset(inventory_id_set)
+            and set(assessment.evidence_ids).issubset(closed_evidence_ids)
+            for assessment in state.assessments
+        )
         approved_ontology = (
             "SOURCE_SCHEMA_COLUMN_RENAMED",
             "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
@@ -199,15 +251,15 @@ class DeterministicEvaluator:
                 state_final_valid,
                 tuple(state.allowed_root_cause_codes) == approved_ontology,
                 state_duplicate_free,
-                all(
-                    record.run_id == diagnosis.run_id
-                    for record in diagnosis_run.evidence_records
-                ),
+                hypothesis_assessments_complete,
+                selected_root_claim_aligned,
+                gap_hypothesis_refs_valid,
+                gap_evidence_refs_valid,
+                assessment_evidence_refs_valid,
+                all(record.run_id == diagnosis.run_id for record in diagnosis_run.evidence_records),
             )
         )
 
-        assessment_by_id = {item.hypothesis_id: item for item in state.assessments}
-        selected_id = state.selected_hypothesis_id
         selected_supported = (
             diagnosis.status == DiagnosisStatus.CONFIRMED
             and selected_id is not None
@@ -218,12 +270,6 @@ class DeterministicEvaluator:
         investigation_state_valid = investigation_state_valid and (
             diagnosis.status != DiagnosisStatus.CONFIRMED or selected_supported
         )
-        closed_evidence_ids = {
-            evidence_id
-            for gap in state.gaps
-            if gap.status == EvidenceGapStatus.CLOSED
-            for evidence_id in gap.evidence_ids
-        }
         refuted_alternative = any(
             assessment.hypothesis_id != selected_id
             and assessment.verdict == HypothesisVerdict.REFUTED
