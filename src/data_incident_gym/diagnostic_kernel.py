@@ -738,6 +738,9 @@ class DiagnosticKernel:
         self,
         decision: KernelDecision,
     ) -> tuple[dict[str, EvidenceRecord], tuple[str, ...], tuple[str, ...]]:
+        claim_keys = tuple((item.kind, item.value) for item in decision.claims)
+        if len(claim_keys) != len(set(claim_keys)):
+            self._error("DUPLICATE_CLAIM")
         if len(self._hypotheses) < 2:
             self._error("ALTERNATIVE_HYPOTHESIS_REQUIRED")
         if any(
