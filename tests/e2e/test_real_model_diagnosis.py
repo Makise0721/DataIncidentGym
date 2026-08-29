@@ -17,13 +17,13 @@ pytestmark = [
     pytest.mark.real_model,
     pytest.mark.skipif(
         os.getenv("DIG_RUN_REAL_MODEL_TESTS") != "1",
-        reason="set DIG_RUN_REAL_MODEL_TESTS=1 to enable the real-model probe",
+        reason="set DIG_RUN_REAL_MODEL_TESTS=1 to enable the real-model troubleshooting probe",
     ),
 ]
 
 
 @pytest.mark.asyncio
-async def test_default_model_diagnosis_uses_real_m3_tools_and_strict_output() -> None:
+async def test_configured_model_diagnosis_uses_real_read_only_tools_and_strict_output() -> None:
     lab = IncidentLab(Settings(_env_file=None), PROJECT_ROOT)
     lab.reset(CASE_ID)
     try:
@@ -35,7 +35,7 @@ async def test_default_model_diagnosis_uses_real_m3_tools_and_strict_output() ->
         result = await runner.diagnose(CASE_ID)
 
         assert result.metrics.provider == "openai-compatible"
-        assert result.metrics.model == "mimo-v2.5"
+        assert result.metrics.model
         assert result.metrics.successful_tool_calls >= 1
         assert result.metrics.model_requests <= 8
         assert result.metrics.tool_call_attempts <= 8
@@ -47,7 +47,11 @@ async def test_default_model_diagnosis_uses_real_m3_tools_and_strict_output() ->
         assert result.diagnosis.run_id == run.run_id
         assert result.metrics.elapsed_ms <= 300_000
         assert Diagnosis.model_validate(result.diagnosis.model_dump()) == result.diagnosis
-        assert {event.tool_name for event in result.trace if event.event_type == "TOOL_CALL"} <= {
+        assert {
+            event.tool_name
+            for event in result.trace
+            if event.event_type == "TOOL_CALL"
+        } <= {
             "get_dbt_run_results",
             "get_dbt_node_error",
             "get_relation_schema",
@@ -55,7 +59,9 @@ async def test_default_model_diagnosis_uses_real_m3_tools_and_strict_output() ->
         }
         if result.diagnosis.status == DiagnosisStatus.CONFIRMED:
             inventory = {record.evidence_id: record for record in result.evidence_records}
-            cited = tuple(inventory[evidence_id] for evidence_id in result.diagnosis.evidence_ids)
+            cited = tuple(
+                inventory[evidence_id] for evidence_id in result.diagnosis.evidence_ids
+            )
             assert {record.evidence_type for record in cited} >= {
                 EvidenceType.DBT_NODE_ERROR,
                 EvidenceType.RELATION_SCHEMA,
