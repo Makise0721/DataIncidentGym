@@ -25,6 +25,13 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.profiles import (
+    AggregateSnapshotReader,
+    ProfileError,
+    load_profile_snapshot,
+    load_profile_spec,
+    settings_connection_kwargs,
+)
 
 RunCommand = Callable[..., CompletedProcess[str]]
 DatabaseConnect = Callable[..., Any]
@@ -60,6 +67,10 @@ class DoctorCheckCode(StrEnum):
     COMPOSE_POSTGRES = "COMPOSE_POSTGRES"
     POSTGRES_CONNECTION = "POSTGRES_CONNECTION"
     DBT_PROFILE_CONNECTION = "DBT_PROFILE_CONNECTION"
+    PROFILE_SPEC = "PROFILE_SPEC"
+    PROFILE_SNAPSHOT = "PROFILE_SNAPSHOT"
+    PROFILE_READ_ONLY = "PROFILE_READ_ONLY"
+    PROFILE_BOUNDS = "PROFILE_BOUNDS"
     MODEL_ENDPOINT = "MODEL_ENDPOINT"
     MODEL_PRESENT = "MODEL_PRESENT"
     MODEL_TOOL_STRUCTURED_OUTPUT = "MODEL_TOOL_STRUCTURED_OUTPUT"
@@ -74,6 +85,10 @@ RECOMMENDATION_BY_CHECK = {
     DoctorCheckCode.COMPOSE_POSTGRES: "START_POSTGRES_COMPOSE",
     DoctorCheckCode.POSTGRES_CONNECTION: "CHECK_POSTGRES_SETTINGS",
     DoctorCheckCode.DBT_PROFILE_CONNECTION: "CHECK_DBT_PROFILE",
+    DoctorCheckCode.PROFILE_SPEC: "CHECK_PROFILE_SPEC",
+    DoctorCheckCode.PROFILE_SNAPSHOT: "CHECK_PROFILE_SNAPSHOT",
+    DoctorCheckCode.PROFILE_READ_ONLY: "CHECK_PROFILE_READ_ONLY",
+    DoctorCheckCode.PROFILE_BOUNDS: "CHECK_PROFILE_BOUNDS",
     DoctorCheckCode.MODEL_ENDPOINT: "CHECK_MODEL_ENDPOINT",
     DoctorCheckCode.MODEL_PRESENT: "CHECK_MIMO_MODEL_ACCESS",
     DoctorCheckCode.MODEL_TOOL_STRUCTURED_OUTPUT: "CHECK_MODEL_TOOL_CALLING",
@@ -357,6 +372,103 @@ class DoctorRunner:
             "CONNECTED" if passed else "UNAVAILABLE",
         )
 
+    def _profile_checks(
+        self,
+        postgres_available: bool,
+    ) -> tuple[DoctorCheck, DoctorCheck, DoctorCheck, DoctorCheck]:
+        profile_spec = None
+        try:
+            profile_spec = load_profile_spec(self._project_root)
+            spec_check = self._check(DoctorCheckCode.PROFILE_SPEC, True, "LOADED")
+        except Exception:
+            spec_check = self._check(DoctorCheckCode.PROFILE_SPEC, False, "UNAVAILABLE")
+
+        baseline_snapshot = None
+        if profile_spec is not None:
+            try:
+                baseline_snapshot = load_profile_snapshot(
+                    self._project_root / ".dig" / "baseline" / "profile_snapshot.json"
+                )
+                snapshot_ok = (
+                    baseline_snapshot.profile_spec_sha256 == profile_spec.digest()
+                    and any(
+                        item.relation_name == "raw_orders"
+                        for item in baseline_snapshot.current
+                    )
+                    and any(
+                        item.relation_name == "raw_orders"
+                        for item in baseline_snapshot.history
+                    )
+                )
+            except Exception:
+                snapshot_ok = False
+        else:
+            snapshot_ok = False
+        snapshot_check = self._check(
+            DoctorCheckCode.PROFILE_SNAPSHOT,
+            snapshot_ok,
+            "LOADED" if snapshot_ok else "UNAVAILABLE",
+        )
+
+        read_only_ok = False
+        if postgres_available and profile_spec is not None and baseline_snapshot is not None:
+            try:
+                reader = AggregateSnapshotReader(
+                    schema_name=self._diagnostic_settings.postgres_schema,
+                    spec=profile_spec,
+                    db_connect=self._db_connect,
+                    connection_kwargs={
+                        **settings_connection_kwargs(self._diagnostic_settings),
+                    },
+                    read_only=True,
+                )
+                current = reader.read_current("raw_orders")
+                history = reader.read_history("raw_orders")
+                baseline_current = next(
+                    item
+                    for item in baseline_snapshot.current
+                    if item.relation_name == "raw_orders"
+                )
+                baseline_history = next(
+                    item
+                    for item in baseline_snapshot.history
+                    if item.relation_name == "raw_orders"
+                )
+                read_only_ok = current == baseline_current and history == baseline_history
+            except Exception:
+                read_only_ok = False
+        read_only_check = self._check(
+            DoctorCheckCode.PROFILE_READ_ONLY,
+            read_only_ok,
+            "READ_ONLY_AND_MATCHED" if read_only_ok else "UNAVAILABLE",
+        )
+
+        bounds_ok = False
+        if profile_spec is not None:
+            try:
+                if profile_spec.max_group_rows > 128 or profile_spec.max_history_points > 90:
+                    raise ProfileError("profile bounds exceed fixed limits")
+                reader = AggregateSnapshotReader(
+                    schema_name=self._diagnostic_settings.postgres_schema,
+                    spec=profile_spec,
+                    db_connect=self._db_connect,
+                    connection_kwargs={
+                        **settings_connection_kwargs(self._diagnostic_settings),
+                    },
+                )
+                try:
+                    reader.read_current("invalid_relation")
+                except ProfileError:
+                    bounds_ok = True
+            except Exception:
+                bounds_ok = False
+        bounds_check = self._check(
+            DoctorCheckCode.PROFILE_BOUNDS,
+            bounds_ok,
+            "BOUNDS_AND_INVALID_PROBE" if bounds_ok else "UNAVAILABLE",
+        )
+        return spec_check, snapshot_check, read_only_check, bounds_check
+
     def _endpoint_check(self) -> tuple[DoctorCheck, bool, set[str]]:
         endpoint = self._diagnostic_settings.model_base_url.rstrip("/") + "/models"
         try:
@@ -474,6 +586,7 @@ class DoctorRunner:
             )
         )
         checks.append(dbt_check)
+        checks.extend(self._profile_checks(postgres_check.passed))
         endpoint_check, endpoint_ok, model_ids = self._endpoint_check()
         checks.append(endpoint_check)
         model_check = self._model_present_check(endpoint_ok, model_ids)

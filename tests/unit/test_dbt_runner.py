@@ -8,7 +8,7 @@ from data_incident_gym.config import Settings
 from data_incident_gym.dbt_runner import DbtExecutionError, DbtRunner
 
 
-def test_healthy_run_seeds_then_builds_while_incident_run_never_seeds(
+def test_healthy_run_seeds_then_builds_while_scenario_run_never_seeds(
     tmp_path: Path,
 ) -> None:
     calls: list[tuple[list[str], dict[str, object]]] = []
@@ -21,7 +21,7 @@ def test_healthy_run_seeds_then_builds_while_incident_run_never_seeds(
     runner = DbtRunner(settings, tmp_path, fake_run)
 
     runner.run_healthy(tmp_path / "healthy/target", tmp_path / "healthy/logs")
-    incident = runner.run_incident(
+    scenario = runner.run_scenario(
         tmp_path / "incident/target",
         tmp_path / "incident/logs",
     )
@@ -91,10 +91,10 @@ def test_healthy_run_seeds_then_builds_while_incident_run_never_seeds(
         env = kwargs["env"]
         assert isinstance(env, dict)
         assert env["DIG_POSTGRES_PASSWORD"] == "runner-secret"
-    assert incident.return_code == 0
+    assert scenario.return_code == 0
 
 
-def test_incident_run_returns_redacted_nonzero_result(tmp_path: Path) -> None:
+def test_scenario_run_returns_redacted_nonzero_result(tmp_path: Path) -> None:
     def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
         return CompletedProcess(
             command,
@@ -104,7 +104,7 @@ def test_incident_run_returns_redacted_nonzero_result(tmp_path: Path) -> None:
         )
 
     settings = Settings(_env_file=None, postgres_password="database-secret")
-    result = DbtRunner(settings, tmp_path, fake_run).run_incident(
+    result = DbtRunner(settings, tmp_path, fake_run).run_scenario(
         tmp_path / "target",
         tmp_path / "logs",
     )
@@ -155,7 +155,7 @@ def test_execution_failures_do_not_retain_unredacted_cause(
     settings = Settings(_env_file=None, postgres_password="database-secret")
 
     with pytest.raises(DbtExecutionError) as error:
-        DbtRunner(settings, tmp_path, fake_run).run_incident(
+        DbtRunner(settings, tmp_path, fake_run).run_scenario(
             tmp_path / "target",
             tmp_path / "logs",
         )

@@ -19,6 +19,13 @@ from data_incident_gym.dbt_runner import (
     raise_without_context,
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.profiles import (
+    PROFILE_SPEC_PATH,
+    ProfileError,
+    ProfileSnapshot,
+    build_profile_snapshot,
+)
+from data_incident_gym.profiles import write_profile_snapshot as persist_profile_snapshot
 from data_incident_gym.read_only_db import ReadOnlyProvisioningError, ReadOnlyRoleProvisioner
 
 RunCommand = Callable[..., CompletedProcess[str]]
@@ -324,6 +331,23 @@ class BaselineBuilder:
         except ReadOnlyProvisioningError as exc:
             raise_without_context(BaselineError(str(exc)))
 
+    def inspect_profile_snapshot(self) -> ProfileSnapshot:
+        try:
+            return build_profile_snapshot(
+                settings=self.settings,
+                project_root=self.project_root,
+                db_connect=self.db_connect,
+            )
+        except ProfileError as exc:
+            raise_without_context(BaselineError(str(exc)))
+
+    def write_profile_snapshot(self, snapshot: ProfileSnapshot) -> None:
+        snapshot_path = self.project_root / ".dig" / "baseline" / "profile_snapshot.json"
+        try:
+            persist_profile_snapshot(snapshot_path, snapshot)
+        except ProfileError as exc:
+            raise_without_context(BaselineError(str(exc)))
+
     def write_summary(self, summary: BaselineSummary) -> None:
         summary_path = self.project_root / ".dig" / "baseline-summary.json"
         try:
@@ -341,5 +365,10 @@ class BaselineBuilder:
         self.validate_dbt_artifacts()
         self.provision_read_only_role()
         summary = self.inspect_database()
+        profile_snapshot = None
+        if (self.project_root / PROFILE_SPEC_PATH).is_file():
+            profile_snapshot = self.inspect_profile_snapshot()
         self.write_summary(summary)
+        if profile_snapshot is not None:
+            self.write_profile_snapshot(profile_snapshot)
         return summary

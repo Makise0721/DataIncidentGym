@@ -126,10 +126,10 @@ class DbtRunner:
         )
         self._ensure_success("执行 dbt build", build)
 
-    def run_incident(self, target_path: Path, log_path: Path) -> DbtRunResult:
+    def run_scenario(self, target_path: Path, log_path: Path) -> DbtRunResult:
         self._prepare(target_path, log_path)
         return self._invoke(
-            "执行故障 dbt build",
+            "执行场景 dbt build",
             self._command(
                 "build",
                 target_path,

@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from enum import StrEnum
 
 import typer
 
 from data_incident_gym.baseline import BaselineBuilder, BaselineError
 from data_incident_gym.config import Settings
-from data_incident_gym.diagnosis import DiagnosisStatus
+from data_incident_gym.diagnosis import DiagnosisStatus, DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import DiagnosisRunner
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.doctor import DoctorRunner, DoctorStatus
 from data_incident_gym.evaluation import EvaluationStatus
 from data_incident_gym.evaluation_runner import EvaluationRunner, EvaluationWorkflowError
-from data_incident_gym.incidents import SUPPORTED_CASE_IDS, IncidentCaseError
 from data_incident_gym.lab import IncidentLab, LabError
 from data_incident_gym.run_context import RunContextError, resolve_active_run
+from data_incident_gym.scenarios import SUPPORTED_SCENARIO_IDS, ScenarioError
 
 app = typer.Typer(help="可复现的数据事故诊断实验场。")
 pipeline_app = typer.Typer(help="构建并检查 dbt 数据管道。")
@@ -24,6 +25,26 @@ app.add_typer(pipeline_app, name="pipeline")
 app.add_typer(lab_app, name="lab")
 app.add_typer(eval_app, name="eval")
 
+
+class CliStrategy(StrEnum):
+    DIAGNOSTIC_KERNEL = "diagnostic-kernel"
+    STATIC_SKILL = "static-skill"
+
+
+RUN_ID_OPTION = typer.Option(None, "--run-id")
+STRATEGY_OPTION = typer.Option(
+    CliStrategy.DIAGNOSTIC_KERNEL,
+    "--strategy",
+    help="诊断策略：diagnostic-kernel 或 static-skill。",
+)
+
+
+def _diagnostic_strategy(strategy: CliStrategy) -> DiagnosticStrategy:
+    return {
+        CliStrategy.DIAGNOSTIC_KERNEL: DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+        CliStrategy.STATIC_SKILL: DiagnosticStrategy.STATIC_SKILL,
+    }[strategy]
+
 DOCTOR_RECOMMENDATIONS_ZH = {
     "USE_PYTHON_3_12": "建议使用 Python 3.12.10。",
     "INSTALL_UV_0_11_24": "建议安装并使用 uv 0.11.24。",
@@ -31,6 +52,10 @@ DOCTOR_RECOMMENDATIONS_ZH = {
     "START_POSTGRES_COMPOSE": "建议启动 compose 中的 postgres 服务。",
     "CHECK_POSTGRES_SETTINGS": "建议检查独立 diagnostic PostgreSQL 连接配置。",
     "CHECK_DBT_PROFILE": "建议检查独立 diagnostic dbt profile 与连接。",
+    "CHECK_PROFILE_SPEC": "建议检查 ProfileSpec 配置。",
+    "CHECK_PROFILE_SNAPSHOT": "建议先构建健康基线并生成 profile snapshot。",
+    "CHECK_PROFILE_READ_ONLY": "建议检查诊断账号的只读聚合读取和基线一致性。",
+    "CHECK_PROFILE_BOUNDS": "建议检查 profile 输出上限和非法关系探针。",
     "CHECK_MODEL_ENDPOINT": "建议检查模型服务 endpoint 与 MIMO_API_KEY 配置。",
     "CHECK_MIMO_MODEL_ACCESS": "建议确认 MiMo 账号可访问 mimo-v2.5。",
     "CHECK_MODEL_TOOL_CALLING": "建议检查模型的工具调用和结构化输出能力。",
@@ -45,8 +70,11 @@ def create_incident_lab() -> IncidentLab:
     return IncidentLab(Settings())
 
 
-def create_diagnosis_runner(run_id: str) -> DiagnosisRunner:
-    return DiagnosisRunner.for_run(run_id, DiagnosticSettings())
+def create_diagnosis_runner(
+    run_id: str,
+    strategy: DiagnosticStrategy = DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+) -> DiagnosisRunner:
+    return DiagnosisRunner.for_run(run_id, DiagnosticSettings(), strategy)
 
 
 def create_evaluation_runner() -> EvaluationRunner:
@@ -57,7 +85,7 @@ def create_doctor_runner() -> DoctorRunner:
     return DoctorRunner.for_project(DiagnosticSettings())
 
 
-def _exit_lab_error(error: LabError | IncidentCaseError) -> None:
+def _exit_lab_error(error: LabError | ScenarioError) -> None:
     code = getattr(error, "code", "INCIDENT_CASE_ERROR")
     typer.echo(f"故障实验失败 [{code}]：{error}", err=True)
     raise typer.Exit(code=1) from error
@@ -89,22 +117,28 @@ def pipeline_build() -> None:
     help=(
         "使用固定案例和已验证运行的只读证据进行诊断。\n"
         "支持案例：\n- "
-        + "\n- ".join(SUPPORTED_CASE_IDS)
+        + "\n- ".join(SUPPORTED_SCENARIO_IDS)
         + "。"
     ),
 )
 def diagnose(
     case_id: str,
-    run_id: str | None = typer.Option(None, "--run-id"),
+    run_id: str | None = RUN_ID_OPTION,
+    strategy: CliStrategy = STRATEGY_OPTION,
 ) -> None:
     """使用固定案例和已验证运行的只读证据进行诊断。"""
     try:
         selected_run_id = (
             run_id
             if run_id is not None
-            else resolve_active_run(incident_case_id=case_id).run_id
+            else resolve_active_run().run_id
         )
-        result = asyncio.run(create_diagnosis_runner(selected_run_id).diagnose(case_id))
+        result = asyncio.run(
+            create_diagnosis_runner(
+                selected_run_id,
+                _diagnostic_strategy(strategy),
+            ).diagnose()
+        )
     except RunContextError:
         _exit_diagnosis_error()
     except Exception:
@@ -114,6 +148,7 @@ def diagnose(
         {
             DiagnosisStatus.CONFIRMED: "诊断完成。",
             DiagnosisStatus.INSUFFICIENT_EVIDENCE: "证据不足，拒绝确认。",
+            DiagnosisStatus.NO_INCIDENT: "未发现事故，健康证据成立。",
             DiagnosisStatus.MODEL_ERROR: "诊断失败。",
         }[result.diagnosis.status]
     )
@@ -128,14 +163,19 @@ def diagnose(
     "run",
     help=(
         "对一个固定案例执行一次独立的完整评测。\n支持案例：\n- "
-        + "\n- ".join(SUPPORTED_CASE_IDS)
+        + "\n- ".join(SUPPORTED_SCENARIO_IDS)
         + "。"
     ),
 )
-def eval_run(case_id: str) -> None:
+def eval_run(
+    case_id: str,
+    strategy: CliStrategy = STRATEGY_OPTION,
+) -> None:
     """对一个固定案例执行一次独立的完整评测。"""
     try:
-        result = asyncio.run(create_evaluation_runner().run(case_id))
+        result = asyncio.run(
+            create_evaluation_runner().run(case_id, _diagnostic_strategy(strategy))
+        )
     except EvaluationWorkflowError as error:
         typer.echo(f"评测运行失败 [{error.code}]。", err=True)
         raise typer.Exit(code=1) from None
@@ -174,7 +214,7 @@ def lab_reset(case_id: str) -> None:
     """把固定案例恢复为健康状态。"""
     try:
         result = create_incident_lab().reset(case_id)
-    except (LabError, IncidentCaseError) as exc:
+    except (LabError, ScenarioError) as exc:
         _exit_lab_error(exc)
     typer.echo("故障案例重置成功。")
     typer.echo(f"state: {result.state}")
@@ -185,8 +225,8 @@ def lab_reset(case_id: str) -> None:
 def lab_inject(case_id: str) -> None:
     """向健康基线注入固定字段变更故障。"""
     try:
-        result = create_incident_lab().inject(case_id)
-    except (LabError, IncidentCaseError) as exc:
+        result = create_incident_lab().prepare(case_id)
+    except (LabError, ScenarioError) as exc:
         _exit_lab_error(exc)
     typer.echo("故障注入成功。")
     typer.echo(f"state: {result.state}")
@@ -198,10 +238,10 @@ def lab_build(case_id: str) -> None:
     """运行无 seed 的 dbt build 并验证预期故障。"""
     try:
         result = create_incident_lab().build(case_id)
-    except (LabError, IncidentCaseError) as exc:
+    except (LabError, ScenarioError) as exc:
         _exit_lab_error(exc)
     typer.echo("预期故障复现成功。")
-    typer.echo(f"status: {result.verification.status}")
+    typer.echo(f"status: {result.verification_status}")
     typer.echo(f"run_id: {result.run_id}")
     typer.echo(f"dbt_exit_code: {result.dbt_exit_code}")
     typer.echo(f"artifacts: {result.artifact_dir}")
