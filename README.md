@@ -4,7 +4,7 @@ DataIncidentGym 是一个可复现的数据事故诊断实验场：它在真实 
 
 ## 当前状态
 
-项目当前包含 M7 的确定性基建切片，形成“健康基线 → 隔离场景 → 证据调查 → 结构化诊断 → 确定性评测 → 六文件报告 → 健康恢复”的闭环。M7 的 4/17 个 P1 场景已实现；8 次真实模型开发 smoke、正式 94-run benchmark 和策略优劣结论尚未开始。
+项目当前包含 M7 的确定性基建切片，形成“健康基线 → 隔离场景 → 证据调查 → 结构化诊断 → 确定性评测 → 六文件报告 → 健康恢复”的闭环。M7 的 4/17 个 P1 场景已实现；两套分别授权的 8 格真实模型开发 smoke 已执行，最新一套工程与安全协议完整但 evaluator 为 0/8，因此 M7 smoke 尚未通过。正式 94-run benchmark 和策略优劣结论尚未开始。
 
 当前固定支持四个 P1 场景和一个 P0 回归场景：
 
@@ -126,7 +126,7 @@ uv lock --check
 git diff --check
 ```
 
-`integration` 和普通 `e2e` 需要 Docker Desktop 与 PostgreSQL。真实模型测试默认跳过；M7 的开发 smoke 需要单独授权，且固定为 4 个 P1 场景 × 2 个策略 = 8 次请求，不计入正式 94-run benchmark。真实模型验收必须显式启用，会产生外部模型请求：
+`integration` 和普通 `e2e` 需要 Docker Desktop 与 PostgreSQL。真实模型测试默认跳过；每套 M7 开发 smoke 都需要单独授权，且固定为 4 个 P1 场景 × 2 个策略 = 8 个诊断运行，不允许重试或替换样本，也不计入正式 94-run benchmark。真实模型验收必须显式启用，会产生外部模型请求：
 
 ```powershell
 $env:DIG_RUN_REAL_MODEL_TESTS = '1'
