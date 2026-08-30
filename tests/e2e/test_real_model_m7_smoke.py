@@ -43,8 +43,8 @@ async def test_m7_real_model_smoke_cell_runs_once(
     strategy: DiagnosticStrategy,
 ) -> None:
     result = await EvaluationRunner.for_project(
-        Settings(_env_file=None),
-        DiagnosticSettings(_env_file=None),
+        Settings(),
+        DiagnosticSettings(),
         PROJECT_ROOT,
     ).run(case_id, strategy)
 

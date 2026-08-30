@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models.function import FunctionModel
 
 from data_incident_gym.diagnosis import DiagnosticStrategy
@@ -122,6 +123,19 @@ def test_static_prompt_is_generic_and_kernel_intent_is_not_a_business_argument()
     assert BASE_PROMPT.strip()
 
 
+def test_kernel_prompt_exposes_the_exact_intent_transport_contract() -> None:
+    assert '"schema_version":"p1.kernel_intent.v1"' in KERNEL_PROMPT
+    assert '"new_hypotheses":[]' in KERNEL_PROMPT
+    assert "LOCATE_FAILURE -> get_dbt_run_results" in KERNEL_PROMPT
+    assert "EXPLAIN_FAILURE -> get_dbt_node_error" in KERNEL_PROMPT
+    assert "DISCOVER_SOURCE_RELATION -> get_dbt_lineage upstream" in KERNEL_PROMPT
+    assert "DISCRIMINATE_SCHEMA -> get_relation_schema" in KERNEL_PROMPT
+    assert "MAP_IMPACT -> get_dbt_lineage downstream" in KERNEL_PROMPT
+    assert "PROFILE_RELATION -> get_relation_data_profile" in KERNEL_PROMPT
+    assert "COMPARE_HISTORY -> get_relation_history" in KERNEL_PROMPT
+    assert '"root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"' in KERNEL_PROMPT
+
+
 class _FailingAgent:
     def __init__(self, error: Exception) -> None:
         self._error = error
@@ -177,3 +191,22 @@ async def test_protocol_failure_maps_to_safe_terminal_model_error(
     assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
     assert result.trace[-1].event_type == "DIAGNOSIS_TERMINAL"
     assert "provider body secret=never" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_tool_budget_exhaustion_is_not_reported_as_request_limit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _static_runner(tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_agent",
+        lambda _: _FailingAgent(
+            UsageLimitExceeded("The next tool call would exceed the tool_calls_limit of 8")
+        ),
+    )
+
+    result = await runner.diagnose()
+
+    assert result.diagnosis.summary == "MODEL_TOOL_CALL_LIMIT"

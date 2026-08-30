@@ -59,7 +59,7 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v1"
+KERNEL_PROMPT_VERSION = "p1.kernel.v2"
 STATIC_PROMPT_VERSION = "p1.static.v1"
 CONTROLLER_PROTOCOL_VERSION = "p1.controller.v1"
 
@@ -112,6 +112,7 @@ SYSTEM_PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 _MODEL_ERROR_REASONS = {
     "MODEL_DECLINED",
     "MODEL_REQUEST_LIMIT",
+    "MODEL_TOOL_CALL_LIMIT",
     "MODEL_TIMEOUT",
     "MODEL_PROTOCOL_ERROR",
     "MODEL_RUNTIME_ERROR",
@@ -608,6 +609,12 @@ def _kernel_retry_message(code: str) -> str:
         "EVIDENCE_GAP_OPEN": "Close all decisive evidence gaps before confirming.",
     }
     return f"{code}: {messages.get(code, 'Correct the structured investigation decision.')}"
+
+
+def _usage_limit_reason(error: UsageLimitExceeded) -> str:
+    if "tool_calls_limit" in str(error):
+        return "MODEL_TOOL_CALL_LIMIT"
+    return "MODEL_REQUEST_LIMIT"
 
 
 def _tool_schema_payload(agent: Agent[Any, Any]) -> list[dict[str, object]]:
@@ -1232,8 +1239,8 @@ class DiagnosisRunner:
             return self._result(state)
         except TimeoutError:
             return self._model_error_result(state, "MODEL_TIMEOUT")
-        except UsageLimitExceeded:
-            return self._model_error_result(state, "MODEL_REQUEST_LIMIT")
+        except UsageLimitExceeded as error:
+            return self._model_error_result(state, _usage_limit_reason(error))
         except (
             IncompleteToolCall,
             ModelAPIError,
