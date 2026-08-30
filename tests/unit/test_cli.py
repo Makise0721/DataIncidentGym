@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import click
 from typer.testing import CliRunner
 
 from data_incident_gym.cli import CliStrategy, _diagnostic_strategy, app
@@ -21,8 +22,9 @@ def test_eval_help_exposes_both_strategies_and_catalog() -> None:
     result = runner.invoke(app, ["eval", "run", "--help"])
 
     assert result.exit_code == 0
-    assert "--strategy" in result.stdout
-    assert all(case_id in result.stdout for case_id in SUPPORTED_SCENARIO_IDS)
+    help_text = click.unstyle(result.stdout)
+    assert "--strategy" in help_text
+    assert all(case_id in help_text for case_id in SUPPORTED_SCENARIO_IDS)
 
 
 def test_cli_strategy_maps_to_the_common_diagnostic_strategy() -> None:
