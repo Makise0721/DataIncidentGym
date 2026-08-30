@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from data_incident_gym.baseline import ColumnSummary, RelationSummary
+from data_incident_gym.baseline import EXPECTED_RELATION_COUNTS, ColumnSummary, RelationSummary
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.lab import (
     IncidentExecutionError,
@@ -102,6 +102,27 @@ def test_scenario_run_is_the_single_public_run_shape() -> None:
 
     assert run.verification_status is ScenarioVerificationStatus.HEALTHY_CONTROL
     assert run.dbt_exit_code == 0
+
+
+def test_no_mutation_preparation_uses_the_full_baseline_projection(monkeypatch) -> None:
+    lab = _lab(PROJECT_ROOT)
+    scenario = load_scenario_spec("order_volume_pattern_a")
+    inspected: list[tuple[str, ...]] = []
+    monkeypatch.setattr(lab, "_load_case", lambda _: scenario)
+    monkeypatch.setattr(lab, "_start_postgres", lambda: None)
+    monkeypatch.setattr(lab, "_clear_active_run", lambda: None)
+    monkeypatch.setattr(
+        lab,
+        "_inspect_relations",
+        lambda names: inspected.append(tuple(names)) or (),
+    )
+    monkeypatch.setattr(lab, "_fingerprint", lambda *_: "a" * 64)
+
+    result = lab.prepare("order_volume_pattern_a")
+
+    assert result.state == "HEALTHY"
+    assert result.fingerprint == "a" * 64
+    assert inspected == [tuple(EXPECTED_RELATION_COUNTS)]
 
 
 def test_reset_clears_stale_active_run_before_recovery_failure(tmp_path: Path, monkeypatch) -> None:

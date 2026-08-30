@@ -13,6 +13,7 @@ from psycopg import sql
 
 from data_incident_gym.baseline import (
     CATALOG_COLUMNS_QUERY,
+    EXPECTED_RELATION_COUNTS,
     BaselineBuilder,
     BaselineSummary,
     ColumnSummary,
@@ -451,7 +452,7 @@ class IncidentLab:
             for mutation in spec.reset_and_injection_contract.mutations
         )
         if no_mutation:
-            relations = self._inspect_relations(("raw_customers", "raw_orders", "raw_payments"))
+            relations = self._inspect_relations(tuple(EXPECTED_RELATION_COUNTS))
             return PreparationResult(
                 case_id,
                 "HEALTHY",
