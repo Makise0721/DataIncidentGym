@@ -9,9 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.exceptions import UsageLimitExceeded
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from data_incident_gym.diagnosis import DiagnosticStrategy
+from data_incident_gym.diagnosis import Diagnosis, DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import (
     BASE_PROMPT,
     KERNEL_PROMPT,
@@ -123,6 +124,21 @@ def test_static_prompt_is_generic_and_kernel_intent_is_not_a_business_argument()
     assert BASE_PROMPT.strip()
 
 
+def test_static_prompt_exposes_the_shared_m7_claim_contract() -> None:
+    for root_cause_code in (
+        "SOURCE_SCHEMA_COLUMN_RENAMED",
+        "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        "TRANSFORMATION_COLUMN_CAST_CHANGED",
+    ):
+        assert root_cause_code in STATIC_PROMPT
+    assert "direct failed node" in STATIC_PROMPT
+    assert "downstream model assets" in STATIC_PROMPT
+    assert (
+        "upstream source relations are causal inputs, not affected assets"
+        in STATIC_PROMPT.lower()
+    )
+
+
 def test_kernel_prompt_exposes_the_exact_intent_transport_contract() -> None:
     assert '"schema_version":"p1.kernel_intent.v1"' in KERNEL_PROMPT
     assert '"new_hypotheses":[]' in KERNEL_PROMPT
@@ -148,17 +164,70 @@ class _FailingAgent:
         raise self._error
 
 
-def _static_runner(tmp_path: Path) -> DiagnosisRunner:
+def _static_runner(
+    tmp_path: Path,
+    model: FunctionModel | None = None,
+) -> DiagnosisRunner:
     _write_public_run(tmp_path)
     return DiagnosisRunner.for_run(
         RUN_ID,
         _settings(),
         DiagnosticStrategy.STATIC_SKILL,
         tmp_path,
-        model=FunctionModel(lambda _messages, _info: None),
+        model=model or FunctionModel(lambda _messages, _info: None),
         tools=SimpleNamespace(),
         model_identity=ModelIdentity("synthetic", "synthetic-model"),
     )
+
+
+@pytest.mark.asyncio
+async def test_static_model_schema_excludes_controller_generated_error(tmp_path: Path) -> None:
+    observed_schema: dict[str, object] = {}
+
+    def capture_schema(_messages: object, agent_info: AgentInfo):
+        observed_schema.update(agent_info.output_tools[0].parameters_json_schema)
+        raise UsageLimitExceeded("stop after schema capture")
+
+    result = await _static_runner(tmp_path, FunctionModel(capture_schema)).diagnose()
+
+    assert result.diagnosis.summary == "MODEL_REQUEST_LIMIT"
+    assert '"MODEL_ERROR"' not in json.dumps(observed_schema, sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_static_decision_is_projected_to_public_diagnosis(tmp_path: Path) -> None:
+    def return_decision(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    {
+                        "status": "INSUFFICIENT_EVIDENCE",
+                        "run_id": RUN_ID,
+                        "root_cause_code": None,
+                        "summary": "More evidence is required.",
+                        "affected_assets": [],
+                        "evidence_ids": [],
+                        "claims": [],
+                        "unresolved_evidence": [
+                            {
+                                "evidence_kind": "RELATION_SCHEMA",
+                                "subject": "raw_orders",
+                                "reason_code": "NOT_OBSERVABLE",
+                            }
+                        ],
+                        "recommended_actions": ["Collect relation schema evidence."],
+                        "confidence": 0.2,
+                    },
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    result = await _static_runner(tmp_path, FunctionModel(return_decision)).diagnose()
+
+    persisted = Diagnosis.model_validate(result.diagnosis.model_dump(mode="json"))
+    assert persisted == result.diagnosis
 
 
 @pytest.mark.asyncio

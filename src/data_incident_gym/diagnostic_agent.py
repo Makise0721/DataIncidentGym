@@ -60,7 +60,7 @@ from data_incident_gym.run_context import ObservableRunContext, resolve_run_cont
 
 BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v2"
-STATIC_PROMPT_VERSION = "p1.static.v1"
+STATIC_PROMPT_VERSION = "p1.static.v2"
 CONTROLLER_PROTOCOL_VERSION = "p1.controller.v1"
 
 MODEL_REQUEST_LIMIT = 8
@@ -117,6 +117,16 @@ _MODEL_ERROR_REASONS = {
     "MODEL_PROTOCOL_ERROR",
     "MODEL_RUNTIME_ERROR",
 }
+
+
+class _StaticDecision(Diagnosis):
+    status: Literal[
+        DiagnosisStatus.CONFIRMED,
+        DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        DiagnosisStatus.NO_INCIDENT,
+    ]
+
+
 _SAFE_TOOL_ERRORS = {
     "EVIDENCE_TOOL_ERROR",
     "INVALID_ARTIFACT",
@@ -959,7 +969,7 @@ class DiagnosisRunner:
         output_type: type[BaseModel] = (
             KernelDecision
             if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
-            else Diagnosis
+            else _StaticDecision
         )
         schema_agent = Agent(self._model, deps_type=_RunState, output_type=output_type)
         _register_evidence_tools(schema_agent)
@@ -972,7 +982,7 @@ class DiagnosisRunner:
         output_type: type[BaseModel] = (
             KernelDecision
             if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
-            else Diagnosis
+            else _StaticDecision
         )
         return _sha256_json(
             {
@@ -1027,7 +1037,7 @@ class DiagnosisRunner:
         output_type: type[BaseModel] = (
             KernelDecision
             if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
-            else Diagnosis
+            else _StaticDecision
         )
         agent: Agent[_RunState, Any] = Agent(
             _ModelObservationAdapter(self._model, state),
@@ -1096,7 +1106,7 @@ class DiagnosisRunner:
                     tool_name=None,
                 )
                 raise ModelRetry("DIAGNOSIS_EVIDENCE_ID_UNKNOWN")
-            current.static_diagnosis = output
+            current.static_diagnosis = Diagnosis.model_validate(output.model_dump(mode="json"))
             current.trace.append(
                 EvidenceGateTraceEvent(
                     event_type="EVIDENCE_GATE",

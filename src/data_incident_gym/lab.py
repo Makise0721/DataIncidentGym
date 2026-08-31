@@ -401,14 +401,40 @@ class IncidentLab:
 
     def _restore_mutations(self, spec: ScenarioSpec) -> None:
         for mutation in reversed(spec.reset_and_injection_contract.mutations):
+            if isinstance(mutation, NoMutation):
+                continue
+            relation = self._healthy_relation(mutation.relation)
+            columns = self._column_map(relation)
             if isinstance(mutation, ColumnRenameMutation):
+                is_healthy = (
+                    mutation.from_column in columns and mutation.to_column not in columns
+                )
+                is_injected = (
+                    mutation.from_column not in columns and mutation.to_column in columns
+                )
+                if is_healthy:
+                    continue
+                if not is_injected:
+                    raise InvalidIncidentState("restore 拒绝未知 rename mutation 状态")
                 self._rename_column(mutation, restore=True)
             elif isinstance(mutation, ColumnTypeMutation):
+                column = columns.get(mutation.column)
+                if column is None:
+                    raise InvalidIncidentState("restore 要求 type mutation 字段存在")
+                if column.data_type == mutation.from_type:
+                    continue
+                if column.data_type != mutation.to_type:
+                    raise InvalidIncidentState("restore 拒绝未知 type mutation 状态")
                 self._drop_dependency(mutation.relation)
                 self._change_column_type(mutation, restore=True)
             elif isinstance(mutation, AddNullableColumnMutation):
+                column = columns.get(mutation.column)
+                if column is None:
+                    continue
+                if column.data_type != mutation.data_type or not column.nullable:
+                    raise InvalidIncidentState("restore 拒绝未知 distractor mutation 状态")
                 self._drop_nullable_column(mutation)
-            elif not isinstance(mutation, NoMutation):
+            else:
                 raise InvalidIncidentState("存在未授权 mutation")
 
     def _verify_restored(self, spec: ScenarioSpec) -> None:

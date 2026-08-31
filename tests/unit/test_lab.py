@@ -71,6 +71,23 @@ def test_lab_restores_declared_mutations_in_reverse_order(tmp_path: Path, monkey
     lab = _lab(tmp_path)
     scenario = load_scenario_spec("schema_type_change_order_customer_a")
     calls: list[tuple[str, str]] = []
+    injected_relations = {
+        "raw_orders": RelationSummary(
+            "raw_orders",
+            99,
+            (ColumnSummary("user_id", "text", True, 2),),
+        ),
+        "raw_payments": RelationSummary(
+            "raw_payments",
+            113,
+            (ColumnSummary("source_batch_note", "text", True, 5),),
+        ),
+    }
+    monkeypatch.setattr(
+        lab,
+        "_healthy_relation",
+        lambda relation: injected_relations[relation],
+    )
     monkeypatch.setattr(lab, "_drop_dependency", lambda relation: calls.append(("drop", relation)))
     monkeypatch.setattr(
         lab,
@@ -146,6 +163,39 @@ def test_reset_clears_stale_active_run_before_recovery_failure(tmp_path: Path, m
 
     assert not active.exists()
     assert not temporary.exists()
+
+
+def test_restore_accepts_schema_already_restored_by_partial_reset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("schema_rename_payment_amount")
+    healthy = RelationSummary(
+        "raw_payments",
+        113,
+        (ColumnSummary("amount", "integer", True, 4),),
+    )
+    rename_calls: list[bool] = []
+    monkeypatch.setattr(lab, "_load_case", lambda _: scenario)
+    monkeypatch.setattr(lab, "_healthy_relation", lambda _: healthy)
+    monkeypatch.setattr(
+        lab,
+        "_rename_column",
+        lambda _mutation, *, restore: rename_calls.append(restore),
+    )
+    monkeypatch.setattr(lab, "_clear_active_run", lambda: None)
+    monkeypatch.setattr(lab, "_start_postgres", lambda: None)
+    monkeypatch.setattr(
+        lab,
+        "_build_healthy_baseline",
+        lambda: SimpleNamespace(fingerprint="a" * 64),
+    )
+
+    result = lab.restore("schema_rename_payment_amount")
+
+    assert result.state == "HEALTHY"
+    assert rename_calls == []
 
 
 def test_build_rejects_unprepared_or_unknown_schema_drift(tmp_path: Path, monkeypatch) -> None:
