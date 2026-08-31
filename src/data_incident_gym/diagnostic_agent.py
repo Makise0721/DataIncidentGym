@@ -51,6 +51,7 @@ from data_incident_gym.diagnostic_kernel import (
     InvestigationState,
     KernelDecision,
     KernelError,
+    KernelFinalStatus,
     KernelOutcome,
     PreparedToolCall,
 )
@@ -846,13 +847,18 @@ def _diagnosis_from_kernel(state: _RunState, outcome: KernelOutcome) -> Diagnosi
     if state.kernel is None:
         raise RuntimeError("Kernel is not initialized")
     snapshot = state.kernel.snapshot(model_requests_used=state.usage.requests)
+    evidence_ids = (
+        tuple(record.evidence_id for record in state.kernel.evidence_records)
+        if outcome.status is KernelFinalStatus.CONFIRMED
+        else outcome.evidence_ids
+    )
     return Diagnosis(
         status=DiagnosisStatus(outcome.status.value),
         run_id=snapshot.run_id,
         root_cause_code=outcome.root_cause_code,
         summary=outcome.summary,
         affected_assets=outcome.affected_assets,
-        evidence_ids=outcome.evidence_ids,
+        evidence_ids=evidence_ids,
         claims=_claims_to_diagnosis_claims(state),
         unresolved_evidence=outcome.unresolved_evidence,
         recommended_actions=outcome.recommended_actions,

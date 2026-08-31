@@ -20,6 +20,7 @@ from data_incident_gym.diagnostic_kernel import KernelDecision
 
 RUN_ID = "a" * 32
 EVIDENCE_ID = "ev_" + "b" * 64
+EXTRA_EVIDENCE_ID = "ev_" + "c" * 64
 
 
 def _policy(strategy: DiagnosticStrategy) -> PolicyIdentity:
@@ -122,6 +123,32 @@ def test_common_diagnosis_supports_all_four_terminal_statuses() -> None:
         item.status
         for item in (confirmed, insufficient, no_incident, model_error)
     } == set(DiagnosisStatus)
+
+
+def test_confirmed_diagnosis_keeps_inventory_beyond_claim_evidence() -> None:
+    root = RootCauseClaim(
+        kind="ROOT_CAUSE",
+        value="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        evidence_ids=(EVIDENCE_ID,),
+    )
+    asset = AffectedAssetClaim(
+        kind="AFFECTED_ASSET",
+        value="model.jaffle_shop.stg_payments",
+        evidence_ids=(EVIDENCE_ID,),
+    )
+
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.CONFIRMED,
+        run_id=RUN_ID,
+        root_cause_code=root.root_cause_code,
+        summary="The source type changed.",
+        affected_assets=(asset.asset,),
+        evidence_ids=(EVIDENCE_ID, EXTRA_EVIDENCE_ID),
+        claims=(root, asset),
+        confidence=0.9,
+    )
+
+    assert diagnosis.evidence_ids == (EVIDENCE_ID, EXTRA_EVIDENCE_ID)
 
 
 def test_diagnosis_run_result_has_strategy_specific_trace_shape() -> None:

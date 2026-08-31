@@ -205,8 +205,8 @@ class Diagnosis(BaseModel):
                 raise ValueError("CONFIRMED requires exactly one projected root cause")
             if not asset_claims or self.affected_assets != projected_assets:
                 raise ValueError("CONFIRMED affected assets must project from claims")
-            if self.evidence_ids != projected_evidence or not self.evidence_ids:
-                raise ValueError("CONFIRMED evidence_ids must project from claims")
+            if not self.evidence_ids or not set(projected_evidence).issubset(self.evidence_ids):
+                raise ValueError("CONFIRMED evidence_ids must cover claim evidence")
             if self.unresolved_evidence:
                 raise ValueError("CONFIRMED cannot contain unresolved evidence")
         elif self.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE:
