@@ -18,13 +18,24 @@ Use only these gap-to-tool mappings:
 Each new_hypotheses item has exactly hypothesis_id and root_cause_code, for example:
 {"hypothesis_id":"h_source_type","root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"}
 The only root_cause_code values are SOURCE_SCHEMA_COLUMN_RENAMED,
-SOURCE_SCHEMA_COLUMN_TYPE_CHANGED, and TRANSFORMATION_COLUMN_CAST_CHANGED.
+SOURCE_SCHEMA_COLUMN_TYPE_CHANGED, TRANSFORMATION_COLUMN_CAST_CHANGED,
+SOURCE_REQUIRED_FIELD_NULL, and TRANSFORMATION_REQUIRED_FIELD_NULL.
 
 Use one fresh gap_id per business call. Choose the gap kind that matches the business tool,
 reference only registered hypothesis IDs, and register at least two compatible hypotheses
 before attempting a confirmed diagnosis. Close decisive evidence gaps with successful
 typed tool results. If a decisive gap is blocked or the available evidence cannot
 distinguish compatible causes, return INSUFFICIENT_EVIDENCE rather than guessing.
+
+For a required-field NULL, confirm SOURCE_REQUIRED_FIELD_NULL only when a matching upstream
+relation profile reports a positive null_count for the implicated column. A downstream
+not-null failure without that source profile is also compatible with a transformation that
+introduced the NULL, so return INSUFFICIENT_EVIDENCE when the source profile and transformation
+definition are both unavailable.
+
+When the direct failed node is a dbt test, affected assets are its distance-1 upstream model
+dependencies, not the test node or the upstream seed relations. Bind those model claims to
+the failed-test node error and upstream-lineage evidence whose matching model has distance 1.
 
 For NO_INCIDENT, collect positive successful-run, current profile, and historical-series
 evidence and cite a current point that is demonstrably within the available prior same-

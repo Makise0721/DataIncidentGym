@@ -798,6 +798,17 @@ class DiagnosticKernel:
                     for node in record.content.related_nodes
                 )
                 for record in records
+            ) and not any(
+                isinstance(record.content, DbtLineageFact)
+                and record.content.direction == "upstream"
+                and record.content.node_id in {error.node_id for error in node_errors}
+                and any(
+                    node.node_id == claim.value
+                    and node.resource_type == "model"
+                    and node.distance == 1
+                    for node in record.content.related_nodes
+                )
+                for record in records
             ):
                 self._error("ASSET_CLAIM_EVIDENCE_INCOMPATIBLE")
         evidence_ids = tuple(
@@ -956,6 +967,14 @@ class DiagnosticKernel:
                 and gap.status is EvidenceGapStatus.BLOCKED
             )
         }
+        blocked_profiles = {
+            (gap.subject, gap.error_code)
+            for gap in self._gaps
+            if (
+                gap.gap_kind is EvidenceGapKind.PROFILE_RELATION
+                and gap.status is EvidenceGapStatus.BLOCKED
+            )
+        }
         known_subjects = {
             node_id
             for record in self._records
@@ -977,6 +996,9 @@ class DiagnosticKernel:
         for item in declarations:
             if item.evidence_kind == "RELATION_SCHEMA":
                 if (item.subject, item.reason_code) not in blocked_schema:
+                    self._error("UNRESOLVED_EVIDENCE_UNBOUND")
+            elif item.evidence_kind == "RELATION_DATA_PROFILE":
+                if (item.subject, item.reason_code) not in blocked_profiles:
                     self._error("UNRESOLVED_EVIDENCE_UNBOUND")
             elif item.subject not in known_subjects:
                 self._error("UNRESOLVED_EVIDENCE_UNBOUND")
@@ -1004,7 +1026,11 @@ class DiagnosticKernel:
         self._revision += 1
         derived_unresolved = tuple(
             UnresolvedEvidence(
-                evidence_kind="RELATION_SCHEMA",
+                evidence_kind=(
+                    "RELATION_DATA_PROFILE"
+                    if gap.gap_kind is EvidenceGapKind.PROFILE_RELATION
+                    else "RELATION_SCHEMA"
+                ),
                 subject=gap.subject,
                 reason_code="RELATION_NOT_ALLOWED"
                 if gap.status is EvidenceGapStatus.BLOCKED
@@ -1012,7 +1038,8 @@ class DiagnosticKernel:
             )
             for gap in self._gaps
             if gap.status in {EvidenceGapStatus.OPEN, EvidenceGapStatus.BLOCKED}
-            and gap.gap_kind is EvidenceGapKind.DISCRIMINATE_SCHEMA
+            and gap.gap_kind
+            in {EvidenceGapKind.DISCRIMINATE_SCHEMA, EvidenceGapKind.PROFILE_RELATION}
         )
         unresolved = tuple(dict.fromkeys((*derived_unresolved, *decision.unresolved_evidence)))
         return KernelOutcome(

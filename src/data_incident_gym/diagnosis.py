@@ -128,7 +128,11 @@ DiagnosisClaim = Annotated[
 class UnresolvedEvidence(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    evidence_kind: Literal["RELATION_SCHEMA", "TRANSFORMATION_DEFINITION"]
+    evidence_kind: Literal[
+        "RELATION_SCHEMA",
+        "RELATION_DATA_PROFILE",
+        "TRANSFORMATION_DEFINITION",
+    ]
     subject: NonBlankStr
     reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED"]
 

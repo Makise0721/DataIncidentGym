@@ -15,8 +15,12 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from data_incident_gym.diagnosis import Diagnosis, DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import (
     BASE_PROMPT,
+    CONTROLLER_PROTOCOL_VERSION,
     KERNEL_PROMPT,
+    KERNEL_PROMPT_VERSION,
+    P1_ROOT_CAUSE_CODES,
     STATIC_PROMPT,
+    STATIC_PROMPT_VERSION,
     TOOL_NAMES,
     DiagnosisBudget,
     DiagnosisRunner,
@@ -137,6 +141,27 @@ def test_static_prompt_exposes_the_shared_m7_claim_contract() -> None:
         "upstream source relations are causal inputs, not affected assets"
         in STATIC_PROMPT.lower()
     )
+
+
+def test_both_prompts_expose_the_shared_m8_ontology_and_test_claim_rule() -> None:
+    expected = (
+        "SOURCE_SCHEMA_COLUMN_RENAMED",
+        "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        "TRANSFORMATION_COLUMN_CAST_CHANGED",
+        "SOURCE_REQUIRED_FIELD_NULL",
+        "TRANSFORMATION_REQUIRED_FIELD_NULL",
+    )
+
+    assert expected == P1_ROOT_CAUSE_CODES
+    assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
+        "p1.kernel.v3",
+        "p1.static.v3",
+        "p1.controller.v2",
+    )
+    for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
+        assert all(code in prompt for code in expected)
+        assert "distance-1 upstream model" in prompt
+        assert "source profile" in prompt.lower()
 
 
 def test_kernel_prompt_exposes_the_exact_intent_transport_contract() -> None:

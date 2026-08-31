@@ -59,9 +59,17 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v2"
-STATIC_PROMPT_VERSION = "p1.static.v2"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v1"
+KERNEL_PROMPT_VERSION = "p1.kernel.v3"
+STATIC_PROMPT_VERSION = "p1.static.v3"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v2"
+
+P1_ROOT_CAUSE_CODES = (
+    "SOURCE_SCHEMA_COLUMN_RENAMED",
+    "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+    "TRANSFORMATION_COLUMN_CAST_CHANGED",
+    "SOURCE_REQUIRED_FIELD_NULL",
+    "TRANSFORMATION_REQUIRED_FIELD_NULL",
+)
 
 MODEL_REQUEST_LIMIT = 8
 TOOL_CALL_LIMIT = 8
@@ -1009,11 +1017,7 @@ class DiagnosisRunner:
         brief_subjects = set(context.incident_brief.subjects)
         return DiagnosticKernel.start(
             run_id=self._run_id,
-            allowed_root_cause_codes=(
-                "SOURCE_SCHEMA_COLUMN_RENAMED",
-                "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
-                "TRANSFORMATION_COLUMN_CAST_CHANGED",
-            ),
+            allowed_root_cause_codes=P1_ROOT_CAUSE_CODES,
             model_request_limit=self._budget.model_request_limit,
             tool_call_limit=self._budget.tool_call_limit,
             observable_schema_relations=tuple(
@@ -1284,6 +1288,7 @@ __all__ = [
     "KERNEL_PROMPT",
     "KERNEL_PROMPT_VERSION",
     "ModelIdentity",
+    "P1_ROOT_CAUSE_CODES",
     "STATIC_PROMPT",
     "STATIC_PROMPT_VERSION",
     "SYSTEM_PROMPT",

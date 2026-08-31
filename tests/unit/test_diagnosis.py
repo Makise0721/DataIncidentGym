@@ -179,6 +179,24 @@ def test_kernel_decision_rejects_unresolved_evidence_for_terminal_statuses() -> 
         )
 
 
+def test_insufficient_diagnosis_accepts_profile_evidence_gap() -> None:
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="The source profile is unavailable.",
+        unresolved_evidence=(
+            {
+                "evidence_kind": "RELATION_DATA_PROFILE",
+                "subject": "raw_orders",
+                "reason_code": "RELATION_NOT_ALLOWED",
+            },
+        ),
+        confidence=0.2,
+    )
+
+    assert diagnosis.unresolved_evidence[0].evidence_kind == "RELATION_DATA_PROFILE"
+
+
 def test_diagnosis_is_frozen_and_rejects_extra_fields() -> None:
     diagnosis = Diagnosis(
         status=DiagnosisStatus.MODEL_ERROR,

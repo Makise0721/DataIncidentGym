@@ -17,12 +17,15 @@ from data_incident_gym.diagnostic_agent import (
 from data_incident_gym.run_context import resolve_run_context
 from data_incident_gym.scenarios import load_scenario_spec
 
-RUN_IDS = ("a" * 32, "b" * 32, "c" * 32, "d" * 32)
+RUN_IDS = tuple(f"{digit}" * 32 for digit in "0123456")
 CASE_IDS = (
     "schema_type_change_payment_amount",
     "schema_type_change_order_customer_a",
     "schema_type_change_order_customer_b",
     "order_volume_pattern_a",
+    "required_null_payment_id",
+    "required_null_order_customer_a",
+    "required_null_order_customer_b",
 )
 
 
@@ -70,7 +73,7 @@ def _write_public_run(project_root: Path, *, run_id: str, case_id: str) -> None:
     )
 
 
-def test_each_m7_case_exposes_identical_policy_surface(tmp_path: Path) -> None:
+def test_each_p1_case_exposes_identical_policy_surface(tmp_path: Path) -> None:
     settings = _settings()
     model = FunctionModel(lambda _messages, _info: None)
 
