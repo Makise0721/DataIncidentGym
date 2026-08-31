@@ -28,6 +28,7 @@ from data_incident_gym.scenarios import (
     ColumnRenameMutation,
     ColumnTypeMutation,
     ScenarioSpec,
+    SetFieldNullMutation,
 )
 
 
@@ -303,10 +304,33 @@ def _root_cause_evidence_compatible(
         (
             item
             for item in scenario.reset_and_injection_contract.mutations
-            if isinstance(item, (ColumnRenameMutation, ColumnTypeMutation))
+            if isinstance(item, (ColumnRenameMutation, ColumnTypeMutation, SetFieldNullMutation))
         ),
         None,
     )
+    if isinstance(mutation, SetFieldNullMutation):
+        profile = next(
+            (
+                record.content
+                for record in root_records
+                if isinstance(record.content, RelationDataProfileFact)
+                and record.content.relation_name == mutation.relation
+            ),
+            None,
+        )
+        column = next(
+            (
+                item
+                for item in profile.snapshot.columns
+                if item.column_name == mutation.column
+            ),
+            None,
+        ) if profile is not None else None
+        return (
+            root_cause_code == "SOURCE_REQUIRED_FIELD_NULL"
+            and column is not None
+            and column.null_count == 1
+        )
     schema = next(
         (
             record.content
@@ -374,7 +398,25 @@ def _claim_evidence_compatible(
             )
             for record in records
         )
-        if not direct and not downstream:
+        upstream_test_model = any(
+            isinstance(record.content, DbtLineageFact)
+            and record.content.direction == "upstream"
+            and record.content.node_id == scenario.direct_failure
+            and any(
+                node.node_id == claim.asset
+                and node.resource_type == "model"
+                and node.distance == 1
+                for node in record.content.related_nodes
+            )
+            for record in records
+        )
+        failed_test_claim = any(
+            isinstance(record.content, DbtNodeErrorFact)
+            and record.content.node_id == scenario.direct_failure
+            and record.content.resource_type == "test"
+            for record in records
+        ) and claim.asset == scenario.direct_failure
+        if failed_test_claim or (not direct and not downstream and not upstream_test_model):
             return False
     return True
 
@@ -406,7 +448,7 @@ def _insufficiency_matches(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunRe
         )
         if len(matching_events) != 1:
             return False
-        if not matching_events[0].error_code:
+        if matching_events[0].error_code != gap.reason_code:
             return False
     return True
 

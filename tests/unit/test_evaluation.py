@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
     Diagnosis,
@@ -13,6 +15,7 @@ from data_incident_gym.diagnosis import (
     HealthStateClaim,
     PolicyIdentity,
     RootCauseClaim,
+    ToolTraceEvent,
 )
 from data_incident_gym.evaluation import (
     DeterministicEvaluator,
@@ -22,6 +25,8 @@ from data_incident_gym.evaluation import (
     EvaluationStatus,
 )
 from data_incident_gym.evidence import (
+    DbtLineageFact,
+    DbtLineageNode,
     DbtNodeErrorFact,
     DbtRunResultsFact,
     EvidenceRecord,
@@ -424,3 +429,323 @@ def test_evaluator_rejects_root_evidence_for_an_unrelated_source_relation() -> N
 
     assert result.status is EvaluationStatus.FAILED
     assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
+
+
+def _m8_records(profile_relation: str) -> tuple[EvidenceRecord, ...]:
+    scenario = load_scenario_spec("required_null_order_customer_a")
+    assert scenario.direct_failure is not None
+    profile_spec = load_profile_spec()
+    test_id = scenario.direct_failure
+    model_id = "model.jaffle_shop.orders"
+    return (
+        EvidenceRecord.create(
+            run_id=RUN_ID,
+            evidence_type=EvidenceType.DBT_RUN_RESULTS,
+            source=EvidenceSource.DBT_RUN_RESULTS,
+            subject=RUN_ID,
+            observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+            content=DbtRunResultsFact(
+                kind="DBT_RUN_RESULTS",
+                run_id=RUN_ID,
+                run_status="FAILED",
+                dbt_exit_code=1,
+                failed_nodes=(test_id,),
+                skipped_nodes=(),
+            ),
+        ),
+        EvidenceRecord.create(
+            run_id=RUN_ID,
+            evidence_type=EvidenceType.DBT_NODE_ERROR,
+            source=EvidenceSource.DBT_RUN_RESULTS,
+            subject=test_id,
+            observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+            content=DbtNodeErrorFact(
+                kind="DBT_NODE_ERROR",
+                run_id=RUN_ID,
+                node_id=test_id,
+                resource_type="test",
+                status="fail",
+                message="required field is null",
+            ),
+        ),
+        EvidenceRecord.create(
+            run_id=RUN_ID,
+            evidence_type=EvidenceType.DBT_LINEAGE,
+            source=EvidenceSource.DBT_MANIFEST,
+            subject=test_id,
+            observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+            content=DbtLineageFact(
+                kind="DBT_LINEAGE",
+                run_id=RUN_ID,
+                node_id=test_id,
+                direction="upstream",
+                related_nodes=(
+                    DbtLineageNode(
+                        node_id=model_id,
+                        resource_type="model",
+                        name="orders",
+                        distance=1,
+                    ),
+                    DbtLineageNode(
+                        node_id="source.jaffle_shop.raw_orders",
+                        resource_type="source",
+                        name="raw_orders",
+                        distance=2,
+                    ),
+                ),
+            ),
+        ),
+        EvidenceRecord.create(
+            run_id=RUN_ID,
+            evidence_type=EvidenceType.RELATION_SCHEMA,
+            source=EvidenceSource.POSTGRES_CATALOG,
+            subject="raw_orders",
+            observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+            content=RelationSchemaFact(
+                kind="RELATION_SCHEMA",
+                run_id=RUN_ID,
+                schema_name="staging",
+                relation_name="raw_orders",
+                columns=(
+                    RelationSchemaColumn(
+                        name="user_id",
+                        data_type="integer",
+                        nullable=True,
+                        ordinal_position=2,
+                    ),
+                ),
+            ),
+        ),
+        EvidenceRecord.create(
+            run_id=RUN_ID,
+            evidence_type=EvidenceType.RELATION_DATA_PROFILE,
+            source=EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+            subject=profile_relation,
+            observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+            content=RelationDataProfileFact(
+                kind="RELATION_DATA_PROFILE",
+                run_id=RUN_ID,
+                relation_name=profile_relation,
+                profile_spec_version=profile_spec.schema_version,
+                profile_spec_sha256=profile_spec.digest(),
+                snapshot=(
+                    RelationProfileSnapshot(
+                        relation_name="raw_orders",
+                        row_count=99,
+                        columns=(
+                            ColumnProfileFact(
+                                column_name="user_id",
+                                null_count=1,
+                                distinct_count=98,
+                            ),
+                        ),
+                    )
+                    if profile_relation == "raw_orders"
+                    else RelationProfileSnapshot(
+                        relation_name="raw_customers",
+                        row_count=100,
+                        columns=(
+                            ColumnProfileFact(
+                                column_name="last_name",
+                                null_count=1,
+                                distinct_count=99,
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        ),
+    )
+
+
+def _m8_tool_trace(records: tuple[EvidenceRecord, ...]) -> tuple[ToolTraceEvent, ...]:
+    test_id = "test.jaffle_shop.not_null_orders_customer_id.c5f02694af"
+    relation = records[-1].content.relation_name
+    specs = (
+        ("get_dbt_run_results", {"run_id": RUN_ID}),
+        ("get_dbt_node_error", {"run_id": RUN_ID, "node_id": test_id}),
+        (
+            "get_dbt_lineage",
+            {"node_id": test_id, "direction": "upstream"},
+        ),
+        ("get_relation_schema", {"relation_name": "raw_orders"}),
+        ("get_relation_data_profile", {"relation_name": relation}),
+    )
+    return tuple(
+        ToolTraceEvent(
+            event_type="TOOL_CALL",
+            tool_name=tool_name,
+            arguments=arguments,
+            fingerprint=f"{index + 1:064x}",
+            evidence_ids=(record.evidence_id,),
+            elapsed_ms=1,
+        )
+        for index, ((tool_name, arguments), record) in enumerate(zip(specs, records, strict=True))
+    )
+
+
+def _m8_confirmed_run(profile_relation: str) -> DiagnosisRunResult:
+    scenario = load_scenario_spec("required_null_order_customer_a")
+    assert scenario.direct_failure is not None
+    records = _m8_records(profile_relation)
+    evidence_ids = tuple(record.evidence_id for record in records)
+    lineage_id = records[2].evidence_id
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.CONFIRMED,
+        run_id=RUN_ID,
+        root_cause_code="SOURCE_REQUIRED_FIELD_NULL",
+        summary="The required source field is null.",
+        affected_assets=("model.jaffle_shop.orders",),
+        evidence_ids=evidence_ids,
+        claims=(
+            RootCauseClaim(
+                kind="ROOT_CAUSE",
+                root_cause_code="SOURCE_REQUIRED_FIELD_NULL",
+                evidence_ids=evidence_ids,
+            ),
+            AffectedAssetClaim(
+                kind="AFFECTED_ASSET",
+                asset="model.jaffle_shop.orders",
+                evidence_ids=(lineage_id,),
+            ),
+        ),
+        confidence=0.9,
+    )
+    terminal = DiagnosisTerminalTraceEvent(
+        event_type="DIAGNOSIS_TERMINAL",
+        strategy=DiagnosticStrategy.STATIC_SKILL,
+        status=DiagnosisStatus.CONFIRMED,
+        evidence_inventory=evidence_ids,
+    )
+    return _model_error().model_copy(
+        update={
+            "diagnosis": diagnosis,
+            "evidence_records": records,
+            "trace": (*_m8_tool_trace(records), terminal),
+        }
+    )
+
+
+def test_evaluator_accepts_the_m8_source_null_and_test_model_claim() -> None:
+    case_id = "required_null_order_customer_a"
+    run = _m8_confirmed_run("raw_orders")
+    result = DeterministicEvaluator.evaluate(
+        load_scenario_spec(case_id),
+        _verification(case_id),
+        run,
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.PASSED
+    assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE not in result.failed_check_codes
+
+
+def test_evaluator_rejects_m8_distractor_profile_as_source_null_evidence() -> None:
+    case_id = "required_null_order_customer_a"
+    result = DeterministicEvaluator.evaluate(
+        load_scenario_spec(case_id),
+        _verification(case_id),
+        _m8_confirmed_run("raw_customers"),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.FAILED
+    assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
+
+
+def test_evaluator_rejects_failed_test_id_as_an_affected_asset() -> None:
+    case_id = "required_null_order_customer_a"
+    scenario = load_scenario_spec(case_id)
+    run = _m8_confirmed_run("raw_orders")
+    original = run.diagnosis
+    root_claim = next(claim for claim in original.claims if claim.kind == "ROOT_CAUSE")
+    node_error_id = run.evidence_records[1].evidence_id
+    invalid = Diagnosis(
+        status=DiagnosisStatus.CONFIRMED,
+        run_id=RUN_ID,
+        root_cause_code=original.root_cause_code,
+        summary=original.summary,
+        affected_assets=(scenario.direct_failure,),
+        evidence_ids=original.evidence_ids,
+        claims=(
+            root_claim,
+            AffectedAssetClaim(
+                kind="AFFECTED_ASSET",
+                asset=scenario.direct_failure,
+                evidence_ids=(node_error_id,),
+            ),
+        ),
+        confidence=original.confidence,
+    )
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _verification(case_id),
+        run.model_copy(update={"diagnosis": invalid}),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.FAILED
+    assert EvaluationCheckCode.AFFECTED_ASSETS_EXACT in result.failed_check_codes
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "error_code", "expected"),
+    (
+        ("get_relation_data_profile", "RELATION_NOT_ALLOWED", True),
+        ("get_relation_schema", "RELATION_NOT_ALLOWED", False),
+        ("get_relation_data_profile", None, False),
+        ("get_relation_data_profile", "RELATION_NOT_FOUND", False),
+    ),
+)
+def test_evaluator_requires_the_exact_failed_profile_gap_attempt(
+    tool_name: str,
+    error_code: str | None,
+    expected: bool,
+) -> None:
+    scenario = load_scenario_spec("required_null_order_customer_b")
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="The source profile and transformation are unavailable.",
+        unresolved_evidence=(
+            {
+                "evidence_kind": "RELATION_DATA_PROFILE",
+                "subject": "raw_orders",
+                "reason_code": "RELATION_NOT_ALLOWED",
+            },
+            {
+                "evidence_kind": "TRANSFORMATION_DEFINITION",
+                "subject": "model.jaffle_shop.stg_orders",
+                "reason_code": "NOT_OBSERVABLE",
+            },
+        ),
+        confidence=0.2,
+    )
+    event = ToolTraceEvent(
+        event_type="TOOL_CALL",
+        tool_name=tool_name,
+        arguments={"relation_name": "raw_orders"},
+        fingerprint="f" * 64,
+        evidence_ids=(),
+        error_code=error_code,
+        elapsed_ms=1,
+    )
+    terminal = DiagnosisTerminalTraceEvent(
+        event_type="DIAGNOSIS_TERMINAL",
+        strategy=DiagnosticStrategy.STATIC_SKILL,
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        evidence_inventory=(),
+    )
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _verification(scenario.incident_case_id),
+        _model_error().model_copy(update={"diagnosis": diagnosis, "trace": (event, terminal)}),
+        recovery_succeeded=True,
+    )
+
+    check = next(
+        check
+        for check in result.checks
+        if check.code is EvaluationCheckCode.INSUFFICIENCY_GAP_DECLARED
+    )
+    assert check.passed is expected
