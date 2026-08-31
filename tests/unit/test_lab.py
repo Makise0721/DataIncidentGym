@@ -15,7 +15,9 @@ from data_incident_gym.lab import (
 )
 from data_incident_gym.lab_verifier import ScenarioVerificationStatus
 from data_incident_gym.scenarios import (
+    DuplicatePaymentRowsMutation,
     SetFieldNullMutation,
+    duplicate_payment_rows,
     load_scenario_spec,
 )
 
@@ -366,3 +368,120 @@ def test_null_mutation_prepare_apply_validate_and_restore_states(
     current[0] = "unexpected"
     with pytest.raises(InvalidIncidentState, match="未知"):
         lab._restore_mutations(scenario)
+
+
+@pytest.mark.parametrize(
+    ("case_id", "healthy_count", "injected_count"),
+    (
+        ("duplicate_payment_record", 113, 114),
+        ("duplicate_payment_coupon_a", 113, 116),
+        ("duplicate_payment_coupon_b", 113, 116),
+    ),
+)
+def test_duplicate_payment_lifecycle_is_exact(
+    case_id: str,
+    healthy_count: int,
+    injected_count: int,
+) -> None:
+    scenario = load_scenario_spec(case_id)
+    mutation = next(
+        item
+        for item in scenario.reset_and_injection_contract.mutations
+        if isinstance(item, DuplicatePaymentRowsMutation)
+    )
+    pairs = duplicate_payment_rows(mutation)
+    assert healthy_count == 113
+    assert injected_count == 113 + len(pairs)
+    if mutation.mode == "EXACT_RECORD":
+        assert pairs == (
+            ((1, 1, "credit_card", 1000), (1, 1, "credit_card", 1000)),
+        )
+    else:
+        assert pairs == (
+            ((47, 42, "coupon", 1700), (114, 42, "coupon", 1700)),
+            ((66, 58, "coupon", 1800), (115, 58, "coupon", 1800)),
+            ((86, 76, "coupon", 200), (116, 76, "coupon", 200)),
+        )
+
+
+def test_duplicate_payment_state_distinguishes_frozen_batches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    states = {
+        "duplicate_payment_record": (113, 114, 1, 2),
+        "duplicate_payment_coupon_a": (113, 116, 1, 0),
+    }
+    for case_id, (healthy_total, injected_total, source_count, inserted_count) in states.items():
+        scenario = load_scenario_spec(case_id)
+        mutation = next(
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, DuplicatePaymentRowsMutation)
+        )
+        monkeypatch.setattr(lab, "_payment_row_total", lambda total=healthy_total: total)
+        monkeypatch.setattr(
+            lab,
+            "_payment_row_count",
+            lambda row, source_count=source_count, inserted_count=inserted_count: (
+                source_count if row[0] in mutation.source_payment_ids else inserted_count
+            ),
+        )
+        assert lab._duplicate_payment_state(mutation) == "HEALTHY"
+
+        monkeypatch.setattr(lab, "_payment_row_total", lambda total=injected_total: total)
+        monkeypatch.setattr(
+            lab,
+            "_payment_row_count",
+            lambda row, source_count=source_count: (
+                2 if mutation.mode == "EXACT_RECORD" else 1
+            ),
+        )
+        assert lab._duplicate_payment_state(mutation) == "INJECTED"
+
+
+def test_duplicate_payment_insert_row_guard_is_transactional(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("duplicate_payment_coupon_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, DuplicatePaymentRowsMutation)
+    )
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rowcount=0)
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+
+    with pytest.raises(InvalidIncidentState, match="精确行数"):
+        lab._insert_payment_duplicates(mutation)
+
+    assert connection.transaction_instance.saw_exception is True
+    assert all("raw_payments" in statement for statement, _ in calls)
+    assert calls[0][1] == (114, 42, "coupon", 1700, 115, 58, "coupon", 1800, 116, 76, "coupon", 200)
+
+
+def test_duplicate_payment_delete_row_guard_is_transactional(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("duplicate_payment_coupon_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, DuplicatePaymentRowsMutation)
+    )
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rowcount=0)
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+
+    with pytest.raises(InvalidIncidentState, match="精确行数"):
+        lab._delete_payment_duplicates(mutation)
+
+    assert connection.transaction_instance.saw_exception is True
+    assert all("ctid" in statement and "raw_payments" in statement for statement, _ in calls)
+    assert [parameters for _, parameters in calls] == [
+        (114, 42, "coupon", 1700),
+        (115, 58, "coupon", 1800),
+        (116, 76, "coupon", 200),
+    ]

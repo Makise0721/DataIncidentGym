@@ -44,10 +44,12 @@ from data_incident_gym.scenarios import (
     AddNullableColumnMutation,
     ColumnRenameMutation,
     ColumnTypeMutation,
+    DuplicatePaymentRowsMutation,
     NoMutation,
     ScenarioError,
     ScenarioSpec,
     SetFieldNullMutation,
+    duplicate_payment_rows,
     load_scenario_spec,
 )
 
@@ -342,6 +344,133 @@ class IncidentLab:
                 IncidentExecutionError(f"写入 NULL mutation 目标失败：{self._redact(str(exc))}")
             ) from None
 
+    def _payment_row_count(self, row: tuple[int, int, str, int]) -> int:
+        statement = sql.SQL(
+            "SELECT count(*) FROM {}.{} "
+            "WHERE id IS NOT DISTINCT FROM %s "
+            "AND order_id IS NOT DISTINCT FROM %s "
+            "AND payment_method IS NOT DISTINCT FROM %s "
+            "AND amount IS NOT DISTINCT FROM %s"
+        ).format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier("raw_payments"),
+        )
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement, row)
+                result = cursor.fetchone()
+        except LabError:
+            raise
+        except Exception as exc:
+            raise self._clean(
+                IncidentExecutionError(
+                    f"读取 duplicate-payment 状态失败：{self._redact(str(exc))}"
+                )
+            ) from None
+        if result is None:
+            raise InvalidIncidentState("duplicate-payment 计数不可用")
+        return int(result[0])
+
+    def _payment_row_total(self) -> int:
+        relation = self._healthy_relation("raw_payments")
+        return relation.row_count
+
+    def _duplicate_payment_state(self, mutation: DuplicatePaymentRowsMutation) -> CaseState:
+        pairs = duplicate_payment_rows(mutation)
+        baseline_count = EXPECTED_RELATION_COUNTS["raw_payments"]
+        total = self._payment_row_total()
+        source_rows = tuple(source for source, _ in pairs)
+        inserted_rows = tuple(inserted for _, inserted in pairs)
+        if mutation.mode == "EXACT_RECORD":
+            if total == baseline_count and all(
+                self._payment_row_count(row) == 1 for row in source_rows
+            ):
+                return "HEALTHY"
+            if total == baseline_count + len(inserted_rows) and all(
+                self._payment_row_count(row) == 2 for row in source_rows
+            ):
+                return "INJECTED"
+            return "DRIFTED"
+        if total == baseline_count and all(
+            self._payment_row_count(row) == 1 for row in source_rows
+        ) and all(self._payment_row_count(row) == 0 for row in inserted_rows):
+            return "HEALTHY"
+        if total == baseline_count + len(inserted_rows) and all(
+            self._payment_row_count(row) == 1 for row in source_rows
+        ) and all(self._payment_row_count(row) == 1 for row in inserted_rows):
+            return "INJECTED"
+        return "DRIFTED"
+
+    def _insert_payment_duplicates(self, mutation: DuplicatePaymentRowsMutation) -> None:
+        rows = tuple(inserted for _, inserted in duplicate_payment_rows(mutation))
+        values = sql.SQL(", ").join(sql.SQL("(%s, %s, %s, %s)") for _ in rows)
+        statement = sql.SQL(
+            "INSERT INTO {}.{} (id, order_id, payment_method, amount) VALUES {}"
+        ).format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+            values,
+        )
+        parameters = tuple(value for row in rows for value in row)
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.transaction(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement, parameters)
+                if cursor.rowcount != len(rows):
+                    raise InvalidIncidentState("duplicate-payment mutation 必须插入精确行数")
+        except LabError:
+            raise
+        except Exception as exc:
+            raise self._clean(
+                IncidentExecutionError(
+                    f"写入 duplicate-payment mutation 失败：{self._redact(str(exc))}"
+                )
+            ) from None
+
+    def _delete_payment_duplicates(self, mutation: DuplicatePaymentRowsMutation) -> None:
+        statement = sql.SQL(
+            "WITH target AS ("
+            "SELECT ctid FROM {}.{} "
+            "WHERE id IS NOT DISTINCT FROM %s "
+            "AND order_id IS NOT DISTINCT FROM %s "
+            "AND payment_method IS NOT DISTINCT FROM %s "
+            "AND amount IS NOT DISTINCT FROM %s "
+            "ORDER BY ctid DESC LIMIT 1"
+            ") DELETE FROM {}.{} WHERE ctid IN (SELECT ctid FROM target)"
+        ).format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+        )
+        inserted_rows = tuple(inserted for _, inserted in duplicate_payment_rows(mutation))
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.transaction(),
+                connection.cursor() as cursor,
+            ):
+                deleted = 0
+                for row in inserted_rows:
+                    cursor.execute(statement, row)
+                    deleted += cursor.rowcount
+                if deleted != len(inserted_rows):
+                    raise InvalidIncidentState("duplicate-payment restore 必须删除精确行数")
+        except LabError:
+            raise
+        except Exception as exc:
+            raise self._clean(
+                IncidentExecutionError(
+                    f"恢复 duplicate-payment mutation 失败：{self._redact(str(exc))}"
+                )
+            ) from None
+
     def _ensure_healthy_for_prepare(self, spec: ScenarioSpec) -> None:
         for mutation in spec.reset_and_injection_contract.mutations:
             if isinstance(mutation, NoMutation):
@@ -352,6 +481,10 @@ class IncidentLab:
                     or self._null_count(mutation) != 0
                 ):
                     raise InvalidIncidentState("prepare 要求初始 NULL mutation 状态为健康")
+                continue
+            if isinstance(mutation, DuplicatePaymentRowsMutation):
+                if self._duplicate_payment_state(mutation) != "HEALTHY":
+                    raise InvalidIncidentState("prepare 要求 duplicate-payment 状态为健康")
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -494,6 +627,8 @@ class IncidentLab:
                     expected_current=mutation.expected_value,
                     replacement=None,
                 )
+            elif isinstance(mutation, DuplicatePaymentRowsMutation):
+                self._insert_payment_duplicates(mutation)
             elif not isinstance(mutation, NoMutation):
                 raise InvalidIncidentState("存在未授权 mutation")
 
@@ -512,6 +647,14 @@ class IncidentLab:
                     expected_current=None,
                     replacement=mutation.expected_value,
                 )
+                continue
+            if isinstance(mutation, DuplicatePaymentRowsMutation):
+                state = self._duplicate_payment_state(mutation)
+                if state == "HEALTHY":
+                    continue
+                if state != "INJECTED":
+                    raise InvalidIncidentState("restore 拒绝未知 duplicate-payment mutation 状态")
+                self._delete_payment_duplicates(mutation)
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -557,6 +700,10 @@ class IncidentLab:
                     or self._null_count(mutation) != 0
                 ):
                     raise InvalidIncidentState("restore 后 NULL mutation 仍然存在")
+                continue
+            if isinstance(mutation, DuplicatePaymentRowsMutation):
+                if self._duplicate_payment_state(mutation) != "HEALTHY":
+                    raise InvalidIncidentState("restore 后 duplicate-payment mutation 仍然存在")
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -784,6 +931,10 @@ class IncidentLab:
                     or self._null_count(mutation) != 1
                 ):
                     raise InvalidIncidentState("build 要求已完成 NULL mutation")
+                continue
+            if isinstance(mutation, DuplicatePaymentRowsMutation):
+                if self._duplicate_payment_state(mutation) != "INJECTED":
+                    raise InvalidIncidentState("build 要求已完成 duplicate-payment mutation")
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)

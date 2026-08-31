@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from data_incident_gym.baseline import ColumnSummary, RelationSummary
 from data_incident_gym.config import Settings
 from data_incident_gym.lab_verifier import (
     IncidentVerifier,
@@ -11,6 +12,7 @@ from data_incident_gym.lab_verifier import (
     ScenarioVerification,
     ScenarioVerificationStatus,
 )
+from data_incident_gym.scenarios import load_scenario_spec
 
 RUN_ID = "a" * 32
 
@@ -113,3 +115,28 @@ def test_failed_test_maps_only_to_its_distance_one_model() -> None:
     }
 
     assert IncidentVerifier._affected_models(manifest, test_id) == {model_id}
+
+
+def test_mutation_schema_projects_all_mutations_on_one_relation_before_comparing() -> None:
+    scenario = load_scenario_spec("duplicate_payment_coupon_a")
+    baseline = RelationSummary(
+        "raw_payments",
+        113,
+        (
+            ColumnSummary("id", "integer", True, 1),
+            ColumnSummary("order_id", "integer", True, 2),
+            ColumnSummary("payment_method", "text", True, 3),
+            ColumnSummary("amount", "integer", True, 4),
+        ),
+    )
+    actual = RelationSummary(
+        "raw_payments",
+        116,
+        baseline.columns + (ColumnSummary("source_batch_note", "text", True, 5),),
+    )
+
+    IncidentVerifier._validate_mutation_schema(
+        scenario,
+        {"raw_payments": actual},
+        {"raw_payments": baseline},
+    )

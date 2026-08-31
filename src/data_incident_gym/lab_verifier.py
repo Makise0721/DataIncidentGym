@@ -18,14 +18,16 @@ from data_incident_gym.baseline import (
     make_baseline_summary,
 )
 from data_incident_gym.config import PROJECT_ROOT, Settings
-from data_incident_gym.profiles import ProfileError, load_profile_snapshot
+from data_incident_gym.profiles import ProfileError, ProfileSnapshot, load_profile_snapshot
 from data_incident_gym.scenarios import (
     AddNullableColumnMutation,
     ColumnRenameMutation,
     ColumnTypeMutation,
+    DuplicatePaymentRowsMutation,
     NoMutation,
     ScenarioSpec,
     SetFieldNullMutation,
+    duplicate_payment_rows,
     load_scenario_spec,
     parse_scenario_spec,
 )
@@ -41,6 +43,11 @@ _EXPECTED_RUNTIME_ARTIFACTS = {
     "profile_snapshot": "profile_snapshot.json",
     "incident_brief": "incident_brief.json",
 }
+_EXPECTED_PAYMENT_DUPLICATES = {
+    "duplicate_payment_record": (114, 1, 1, "credit_card", 56),
+    "duplicate_payment_coupon_a": (116, 0, 3, "coupon", 16),
+    "duplicate_payment_coupon_b": (116, 0, 3, "coupon", 16),
+}
 
 DatabaseConnect = Callable[..., Any]
 
@@ -51,6 +58,7 @@ class LabVerificationError(RuntimeError):
 
 class ScenarioVerificationStatus(StrEnum):
     EXPECTED_FAILURE = "EXPECTED_FAILURE"
+    EXPECTED_ANOMALY = "EXPECTED_ANOMALY"
     HEALTHY_CONTROL = "HEALTHY_CONTROL"
 
 
@@ -248,10 +256,10 @@ class IncidentVerifier:
             if not affected:
                 raise _clean(LabVerificationError("failed test has no tested model"))
             return affected
-        if start_node["resource_type"] != "model":
-            raise _clean(LabVerificationError("manifest 缺少直接失败模型"))
+        if start_node["resource_type"] not in {"model", "seed"}:
+            raise _clean(LabVerificationError("manifest 缺少可遍历的模型或 seed 节点"))
         found: set[str] = set()
-        pending = [start]
+        pending = [start] if start_node["resource_type"] == "model" else list(adjacency[start])
         while pending:
             node_id = pending.pop()
             if node_id in found:
@@ -261,7 +269,7 @@ class IncidentVerifier:
                 child_node = nodes[child]
                 if child_node.get("resource_type") == "model":
                     pending.append(child)
-        return found
+        return {node_id for node_id in found if nodes[node_id].get("resource_type") == "model"}
 
     @staticmethod
     def _read_schema(path: Path) -> tuple[str, tuple[RelationSummary, ...], str]:
@@ -390,6 +398,7 @@ class IncidentVerifier:
             if expected is None or actual is None:
                 raise _clean(LabVerificationError(f"mutation relation 未捕获：{mutation.relation}"))
             columns = list(expected.columns)
+            expected_row_count = expected.row_count
             column_map = {column.name: column for column in columns}
             if isinstance(mutation, ColumnRenameMutation):
                 if mutation.from_column not in column_map or mutation.to_column in column_map:
@@ -430,16 +439,22 @@ class IncidentVerifier:
                         max((item.ordinal_position for item in columns), default=0) + 1,
                     )
                 )
+            elif isinstance(mutation, DuplicatePaymentRowsMutation):
+                expected_row_count += len(mutation.inserted_payment_ids)
             elif isinstance(mutation, SetFieldNullMutation):
                 pass
             elif not isinstance(mutation, NoMutation):
                 raise _clean(LabVerificationError("未知 mutation"))
             expected_relations[mutation.relation] = RelationSummary(
                 mutation.relation,
-                expected.row_count,
+                expected_row_count,
                 tuple(columns),
             )
-            if actual != expected_relations[mutation.relation]:
+        for relation_name in {
+            mutation.relation for mutation in scenario.reset_and_injection_contract.mutations
+        }:
+            actual = relations.get(relation_name)
+            if actual != expected_relations[relation_name]:
                 raise _clean(LabVerificationError("fault schema 与声明 mutation 不匹配"))
 
     def _validate_null_mutations(self, scenario: ScenarioSpec) -> None:
@@ -488,6 +503,110 @@ class IncidentVerifier:
                         f"NULL mutation 数据状态不匹配：{mutation.relation}.{mutation.column}"
                     )
                 )
+
+    def _validate_payment_duplicates(
+        self,
+        scenario: ScenarioSpec,
+        profile: ProfileSnapshot,
+    ) -> None:
+        mutation = next(
+            (
+                item
+                for item in scenario.reset_and_injection_contract.mutations
+                if isinstance(item, DuplicatePaymentRowsMutation)
+            ),
+            None,
+        )
+        expected = _EXPECTED_PAYMENT_DUPLICATES.get(scenario.incident_case_id)
+        if mutation is None or expected is None:
+            raise _clean(LabVerificationError("duplicate-payment mutation 不在冻结私有集合中"))
+        table = sql.SQL("{}.{}").format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+        )
+        row_count_query = sql.SQL("SELECT count(*) FROM {}").format(table)
+        key_query = sql.SQL(
+            "SELECT COALESCE(sum(group_count - 1) FILTER (WHERE group_count > 1), 0) "
+            "FROM (SELECT id, count(*) AS group_count FROM {} GROUP BY id) grouped"
+        ).format(table)
+        fingerprint_query = sql.SQL(
+            "SELECT COALESCE(sum(group_count - 1) FILTER (WHERE group_count > 1), 0) "
+            "FROM (SELECT order_id, payment_method, amount, count(*) AS group_count "
+            "FROM {} GROUP BY order_id, payment_method, amount) grouped"
+        ).format(table)
+        channel_query = sql.SQL(
+            "SELECT count(*) FROM {} WHERE payment_method IS NOT DISTINCT FROM %s"
+        ).format(table)
+
+        def scalar(cursor: Any, query: sql.Composed, params: tuple[Any, ...] = ()) -> int:
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            if row is None:
+                raise LabVerificationError("duplicate-payment 聚合查询没有返回结果")
+            return int(row[0])
+
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.cursor() as cursor,
+            ):
+                observed = (
+                    scalar(cursor, row_count_query),
+                    scalar(cursor, key_query),
+                    scalar(cursor, fingerprint_query),
+                    expected[3],
+                    scalar(cursor, channel_query, (expected[3],)),
+                )
+        except LabVerificationError:
+            raise
+        except Exception as exc:
+            raise _clean(
+                LabVerificationError(f"无法验证 duplicate-payment 聚合：{exc}")
+            ) from None
+        if observed != expected:
+            raise _clean(LabVerificationError("duplicate-payment 私有聚合事实不匹配"))
+
+        public_snapshot = next(
+            (item for item in profile.current if item.relation_name == mutation.relation),
+            None,
+        )
+        profile_is_public = mutation.relation in scenario.observable_evidence_contract.profile_relations
+        if profile_is_public != (public_snapshot is not None):
+            raise _clean(LabVerificationError("duplicate-payment profile 公开边界不匹配"))
+        if public_snapshot is None:
+            return
+        key_fact = next(
+            (item for item in public_snapshot.business_key_duplicates if item.name == "id"),
+            None,
+        )
+        fingerprint_fact = next(
+            (
+                item
+                for item in public_snapshot.business_fingerprint_duplicates
+                if item.name == "order_payment_amount"
+            ),
+            None,
+        )
+        group_fact = next(
+            (item for item in public_snapshot.groups if item.name == "payment_method"),
+            None,
+        )
+        if key_fact is None or fingerprint_fact is None or group_fact is None:
+            raise _clean(LabVerificationError("duplicate-payment public profile 不完整"))
+        channel_count = next(
+            (
+                count
+                for values, count in zip(group_fact.values, group_fact.counts, strict=True)
+                if values == (expected[3],)
+            ),
+            None,
+        )
+        if (
+            key_fact.duplicate_count != expected[1]
+            or fingerprint_fact.duplicate_count != expected[2]
+            or channel_count != expected[4]
+        ):
+            raise _clean(LabVerificationError("duplicate-payment public profile 事实不匹配"))
 
     def _write_private_verification(
         self,
@@ -622,6 +741,37 @@ class IncidentVerifier:
             except (OSError, LabVerificationError, ProfileError):
                 raise _clean(LabVerificationError("health control 基线校验失败")) from None
             status = ScenarioVerificationStatus.HEALTHY_CONTROL
+        elif scenario.direct_failure is None:
+            if dbt_exit_code != 0 or failed_nodes or skipped_nodes:
+                raise _clean(LabVerificationError("data anomaly 场景的 dbt build 未健康完成"))
+            mutation = next(
+                item
+                for item in scenario.reset_and_injection_contract.mutations
+                if isinstance(item, DuplicatePaymentRowsMutation)
+            )
+            seed_nodes = tuple(
+                node_id
+                for node_id, node in manifest["nodes"].items()
+                if node.get("resource_type") == "seed" and node.get("name") == mutation.relation
+            )
+            if len(seed_nodes) != 1:
+                raise _clean(LabVerificationError("duplicate-payment seed anchor 不唯一"))
+            affected = self._affected_models(manifest, seed_nodes[0])
+            if affected != set(scenario.affected_assets):
+                raise _clean(LabVerificationError("data anomaly 影响模型集合不匹配"))
+            try:
+                _, baseline_relation_items, _ = self._read_schema(
+                    self.project_root / ".dig" / "baseline-summary.json"
+                )
+            except (OSError, LabVerificationError):
+                raise _clean(LabVerificationError("健康基线 schema 不可用")) from None
+            self._validate_mutation_schema(
+                scenario,
+                relations,
+                {item.name: item for item in baseline_relation_items},
+            )
+            self._validate_payment_duplicates(scenario, profile)
+            status = ScenarioVerificationStatus.EXPECTED_ANOMALY
         else:
             if dbt_exit_code == 0:
                 raise _clean(LabVerificationError("故障场景 dbt 意外成功"))
@@ -642,6 +792,11 @@ class IncidentVerifier:
                 {item.name: item for item in baseline_relation_items},
             )
             self._validate_null_mutations(scenario)
+            if any(
+                isinstance(item, DuplicatePaymentRowsMutation)
+                for item in scenario.reset_and_injection_contract.mutations
+            ):
+                self._validate_payment_duplicates(scenario, profile)
             status = ScenarioVerificationStatus.EXPECTED_FAILURE
 
         verification = ScenarioVerification(

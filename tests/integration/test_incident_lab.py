@@ -36,7 +36,11 @@ def test_scenario_lab_captures_private_verification_and_recovers(
         expected_status = (
             ScenarioVerificationStatus.HEALTHY_CONTROL
             if scenario.expected_status == "NO_INCIDENT"
-            else ScenarioVerificationStatus.EXPECTED_FAILURE
+            else (
+                ScenarioVerificationStatus.EXPECTED_ANOMALY
+                if scenario.direct_failure is None
+                else ScenarioVerificationStatus.EXPECTED_FAILURE
+            )
         )
         assert run.verification_status is expected_status
         assert verification.status is expected_status
@@ -124,3 +128,63 @@ def test_m8_profiles_and_fixed_null_targets_recover(
             )
             assert lab._read_null_target(mutation) == expected_restored[key]
             assert lab._null_count(mutation) == 0
+
+
+@pytest.mark.integration
+def test_m9_duplicate_profiles_and_recovery(project_root: Path) -> None:
+    lab = IncidentLab(Settings(_env_file=None), project_root)
+    expected_public = {
+        "duplicate_payment_record": (1, 1, ("credit_card", 56)),
+        "duplicate_payment_coupon_a": (0, 3, ("coupon", 16)),
+        "duplicate_payment_coupon_b": None,
+    }
+
+    for case_id, expected in expected_public.items():
+        scenario = load_scenario_spec(case_id, project_root)
+        baseline = lab.reset(case_id)
+        try:
+            lab.prepare(case_id)
+            run = lab.build(case_id)
+            verification = lab.verifier.load_verification(run.run_id)
+            assert verification.status is (
+                ScenarioVerificationStatus.EXPECTED_FAILURE
+                if scenario.direct_failure is not None
+                else ScenarioVerificationStatus.EXPECTED_ANOMALY
+            )
+            profile = load_profile_snapshot(run.artifact_dir / "profile_snapshot.json")
+            raw_payments = next(
+                (item for item in profile.current if item.relation_name == "raw_payments"),
+                None,
+            )
+            if expected is None:
+                assert raw_payments is None
+            else:
+                assert raw_payments is not None
+                key_count = next(
+                    item.duplicate_count
+                    for item in raw_payments.business_key_duplicates
+                    if item.name == "id"
+                )
+                fingerprint_count = next(
+                    item.duplicate_count
+                    for item in raw_payments.business_fingerprint_duplicates
+                    if item.name == "order_payment_amount"
+                )
+                payment_method_group = next(
+                    item for item in raw_payments.groups if item.name == "payment_method"
+                )
+                channel_count = next(
+                    count
+                    for values, count in zip(
+                        payment_method_group.values,
+                        payment_method_group.counts,
+                        strict=True,
+                    )
+                    if values == (expected[2][0],)
+                )
+                assert (key_count, fingerprint_count, (expected[2][0], channel_count)) == expected
+        finally:
+            recovered = lab.restore(case_id)
+
+        assert recovered.state == "HEALTHY"
+        assert recovered.fingerprint == baseline.fingerprint
