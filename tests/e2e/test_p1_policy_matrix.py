@@ -31,14 +31,19 @@ from data_incident_gym.evidence import (
 )
 from data_incident_gym.lab import IncidentLab
 from data_incident_gym.run_context import resolve_run_context
-from data_incident_gym.scenarios import P1_M7_SCENARIO_IDS, load_scenario_spec
+from data_incident_gym.scenarios import (
+    P1_M7_SCENARIO_IDS,
+    P1_M8_SCENARIO_IDS,
+    load_scenario_spec,
+)
 
-SMOKE_CASES = P1_M7_SCENARIO_IDS
-SMOKE_STRATEGIES = (
+MATRIX_CASES = P1_M7_SCENARIO_IDS + P1_M8_SCENARIO_IDS
+MATRIX_STRATEGIES = (
     DiagnosticStrategy.STATIC_SKILL,
     DiagnosticStrategy.DIAGNOSTIC_KERNEL,
 )
-assert len(SMOKE_CASES) * len(SMOKE_STRATEGIES) == 8
+assert len(MATRIX_CASES) == 7
+assert len(MATRIX_CASES) * len(MATRIX_STRATEGIES) == 14
 
 
 def _returned_records(
@@ -118,6 +123,7 @@ def _model_response(
     run_id: str,
     strategy: DiagnosticStrategy,
     schema_relations: tuple[str, ...],
+    profile_relations: tuple[str, ...],
 ) -> ModelResponse:
     run_records = _returned_records(messages, "get_dbt_run_results")
     node_errors = _returned_records(messages, "get_dbt_node_error")
@@ -228,6 +234,212 @@ def _model_response(
 
     source_relations = _source_relations(upstream)
     schema_attempts = _tool_attempts(messages, "get_relation_schema")
+
+    if getattr(node_errors[-1].content, "resource_type", None) == "test":
+        source_relation = next(
+            relation for relation in source_relations if relation in schema_relations
+        )
+        affected_model = next(
+            node.node_id
+            for record in upstream
+            for node in record.content.related_nodes
+            if node.resource_type == "model" and node.distance == 1
+        )
+        if schema_attempts == 0:
+            new_hypotheses = [
+                {
+                    "hypothesis_id": "h_source_null",
+                    "root_cause_code": "SOURCE_REQUIRED_FIELD_NULL",
+                },
+                {
+                    "hypothesis_id": "h_transform_null",
+                    "root_cause_code": "TRANSFORMATION_REQUIRED_FIELD_NULL",
+                },
+            ]
+            tool = _tool_call(
+                "get_relation_schema",
+                {"relation_name": source_relation},
+                "schema",
+            )
+            return _with_intent(
+                tool,
+                strategy,
+                _intent(
+                    "g_schema_null",
+                    "DISCRIMINATE_SCHEMA",
+                    new_hypotheses=new_hypotheses,
+                ),
+            )
+
+        profile_by_relation = {
+            record.content.relation_name: record
+            for record in profiles
+        }
+        distractor_relation = next(
+            (
+                relation
+                for relation in profile_relations
+                if relation not in source_relations
+            ),
+            None,
+        )
+        if distractor_relation is not None and distractor_relation not in profile_by_relation:
+            tool = _tool_call(
+                "get_relation_data_profile",
+                {"relation_name": distractor_relation},
+                "distractor-profile",
+            )
+            return _with_intent(
+                tool,
+                strategy,
+                _intent(
+                    "g_distractor_profile",
+                    "PROFILE_RELATION",
+                    hypothesis_ids=["h_source_null", "h_transform_null"],
+                ),
+            )
+
+        source_profile = profile_by_relation.get(source_relation)
+        profile_attempts = _tool_attempts(messages, "get_relation_data_profile")
+        if source_profile is None and profile_attempts < 2:
+            tool = _tool_call(
+                "get_relation_data_profile",
+                {"relation_name": source_relation},
+                "source-profile",
+            )
+            return _with_intent(
+                tool,
+                strategy,
+                _intent(
+                    "g_source_profile",
+                    "PROFILE_RELATION",
+                    hypothesis_ids=["h_source_null", "h_transform_null"],
+                ),
+            )
+
+        evidence_ids = [
+            record.evidence_id
+            for record in (*run_records, *node_errors, *lineages, *schemas, *profiles)
+        ]
+        node_error_id = node_errors[-1].evidence_id
+        lineage_id = next(
+            record.evidence_id
+            for record in upstream
+            if any(
+                node.node_id == affected_model and node.distance == 1
+                for node in record.content.related_nodes
+            )
+        )
+        if source_profile is None:
+            unresolved = [
+                {
+                    "evidence_kind": "RELATION_DATA_PROFILE",
+                    "subject": source_relation,
+                    "reason_code": "RELATION_NOT_ALLOWED",
+                },
+                {
+                    "evidence_kind": "TRANSFORMATION_DEFINITION",
+                    "subject": _transform_subject(upstream),
+                    "reason_code": "NOT_OBSERVABLE",
+                },
+            ]
+            if strategy is DiagnosticStrategy.STATIC_SKILL:
+                payload = {
+                    "status": "INSUFFICIENT_EVIDENCE",
+                    "run_id": run_id,
+                    "summary": (
+                        "Two compatible causes remain because decisive evidence is unavailable."
+                    ),
+                    "affected_assets": [],
+                    "evidence_ids": evidence_ids,
+                    "claims": [],
+                    "unresolved_evidence": unresolved,
+                    "recommended_actions": [
+                        "Collect the unavailable source and transformation facts."
+                    ],
+                    "confidence": 0.3,
+                }
+            else:
+                payload = {
+                    "status": "INSUFFICIENT_EVIDENCE",
+                    "run_id": run_id,
+                    "selected_hypothesis_id": None,
+                    "assessments": [],
+                    "claims": [],
+                    "unresolved_evidence": unresolved,
+                    "summary": (
+                        "Two compatible causes remain because decisive evidence is unavailable."
+                    ),
+                    "recommended_actions": [
+                        "Collect the unavailable source and transformation facts."
+                    ],
+                    "confidence": 0.3,
+                }
+            return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+
+        source_profile_id = source_profile.evidence_id
+        root_evidence_ids = [node_error_id, source_profile_id]
+        assets = (affected_model,)
+        if strategy is DiagnosticStrategy.STATIC_SKILL:
+            payload = {
+                "status": "CONFIRMED",
+                "run_id": run_id,
+                "root_cause_code": "SOURCE_REQUIRED_FIELD_NULL",
+                "summary": "The required source field is null.",
+                "affected_assets": assets,
+                "evidence_ids": evidence_ids,
+                "claims": [
+                    {
+                        "kind": "ROOT_CAUSE",
+                        "root_cause_code": "SOURCE_REQUIRED_FIELD_NULL",
+                        "evidence_ids": root_evidence_ids,
+                    },
+                    {
+                        "kind": "AFFECTED_ASSET",
+                        "asset": affected_model,
+                        "evidence_ids": [lineage_id],
+                    },
+                ],
+                "unresolved_evidence": [],
+                "recommended_actions": ["Restore the required source field."],
+                "confidence": 0.9,
+            }
+        else:
+            payload = {
+                "status": "CONFIRMED",
+                "run_id": run_id,
+                "selected_hypothesis_id": "h_source_null",
+                "assessments": [
+                    {
+                        "hypothesis_id": "h_source_null",
+                        "verdict": "SUPPORTED",
+                        "evidence_ids": root_evidence_ids,
+                    },
+                    {
+                        "hypothesis_id": "h_transform_null",
+                        "verdict": "REFUTED",
+                        "evidence_ids": [node_error_id, source_profile_id],
+                    },
+                ],
+                "claims": [
+                    {
+                        "kind": "ROOT_CAUSE",
+                        "value": "SOURCE_REQUIRED_FIELD_NULL",
+                        "evidence_ids": root_evidence_ids,
+                    },
+                    {
+                        "kind": "AFFECTED_ASSET",
+                        "value": affected_model,
+                        "evidence_ids": [lineage_id],
+                    },
+                ],
+                "unresolved_evidence": [],
+                "summary": "The required source field is null.",
+                "recommended_actions": ["Restore the required source field."],
+                "confidence": 0.9,
+            }
+        return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+
     if schema_attempts == 0:
         new_hypotheses = [
             {
@@ -501,6 +713,9 @@ def _runner(project_root: Path, strategy: DiagnosticStrategy) -> EvaluationRunne
                     schema_relations=tuple(
                         public_context.runtime["observable_relations"]["schema"]
                     ),
+                    profile_relations=tuple(
+                        public_context.runtime["observable_relations"]["profile"]
+                    ),
                 )
             ),
             model_identity=ModelIdentity(
@@ -522,10 +737,10 @@ def _runner(project_root: Path, strategy: DiagnosticStrategy) -> EvaluationRunne
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize("case_id", SMOKE_CASES, ids=SMOKE_CASES)
-@pytest.mark.parametrize("strategy", SMOKE_STRATEGIES, ids=lambda value: value.value)
+@pytest.mark.parametrize("case_id", MATRIX_CASES, ids=MATRIX_CASES)
+@pytest.mark.parametrize("strategy", MATRIX_STRATEGIES, ids=lambda value: value.value)
 @pytest.mark.asyncio
-async def test_m7_function_model_policy_matrix(
+async def test_p1_function_model_policy_matrix(
     project_root: Path,
     case_id: str,
     strategy: DiagnosticStrategy,
@@ -547,3 +762,43 @@ async def test_m7_function_model_policy_matrix(
         (result.artifact_dir / "diagnosis.json").read_text(encoding="utf-8")
     )
     assert diagnosis["status"] in {status.value for status in DiagnosisStatus}
+
+    if case_id in P1_M8_SCENARIO_IDS:
+        assert diagnosis["status"] == (
+            "INSUFFICIENT_EVIDENCE"
+            if case_id == "required_null_order_customer_b"
+            else "CONFIRMED"
+        )
+        if case_id == "required_null_order_customer_b":
+            assert diagnosis["root_cause_code"] is None
+            assert diagnosis["affected_assets"] == []
+            assert {
+                (item["evidence_kind"], item["subject"], item["reason_code"])
+                for item in diagnosis["unresolved_evidence"]
+            } == {
+                ("RELATION_DATA_PROFILE", "raw_orders", "RELATION_NOT_ALLOWED"),
+                ("TRANSFORMATION_DEFINITION", "model.jaffle_shop.stg_orders", "NOT_OBSERVABLE"),
+            }
+        else:
+            assert diagnosis["root_cause_code"] == "SOURCE_REQUIRED_FIELD_NULL"
+            assert diagnosis["affected_assets"] in (
+                ["model.jaffle_shop.stg_payments"],
+                ["model.jaffle_shop.orders"],
+            )
+
+    trace = [
+        json.loads(line)["event"]
+        for line in (result.artifact_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert all(
+        event["tool_name"] in {
+            "get_dbt_run_results",
+            "get_dbt_node_error",
+            "get_relation_schema",
+            "get_dbt_lineage",
+            "get_relation_data_profile",
+            "get_relation_history",
+        }
+        for event in trace
+        if event.get("event_type") == "TOOL_CALL"
+    )
