@@ -8,6 +8,7 @@ import pytest
 from data_incident_gym.config import Settings
 from data_incident_gym.lab import IncidentLab
 from data_incident_gym.lab_verifier import ScenarioVerificationStatus
+from data_incident_gym.profiles import load_profile_snapshot
 from data_incident_gym.scenarios import SUPPORTED_SCENARIO_IDS, load_scenario_spec
 
 
@@ -70,3 +71,56 @@ def test_scenario_lab_captures_private_verification_and_recovers(
 
     assert recovered.state == "HEALTHY"
     assert recovered.fingerprint == baseline.fingerprint
+
+
+@pytest.mark.integration
+def test_m8_profiles_and_fixed_null_targets_recover(
+    project_root: Path,
+) -> None:
+    lab = IncidentLab(Settings(_env_file=None), project_root)
+    expected_profiles = {
+        "required_null_payment_id": {("raw_payments", "id"): 1},
+        "required_null_order_customer_a": {
+            ("raw_orders", "user_id"): 1,
+            ("raw_customers", "last_name"): 1,
+        },
+        "required_null_order_customer_b": {
+            ("raw_customers", "last_name"): 1,
+        },
+    }
+    expected_restored = {
+        ("raw_payments", "id", "order_id", 1): 1,
+        ("raw_orders", "user_id", "id", 42): 92,
+        ("raw_customers", "last_name", "id", 7): "M.",
+    }
+
+    for case_id, expected in expected_profiles.items():
+        scenario = load_scenario_spec(case_id, project_root)
+        lab.reset(case_id)
+        try:
+            lab.prepare(case_id)
+            run = lab.build(case_id)
+            profile = load_profile_snapshot(run.artifact_dir / "profile_snapshot.json")
+            observed = {
+                (snapshot.relation_name, column.column_name): column.null_count
+                for snapshot in profile.current
+                for column in snapshot.columns
+                if (snapshot.relation_name, column.column_name) in expected
+            }
+            assert observed == expected
+            if case_id == "required_null_order_customer_b":
+                assert all(
+                    snapshot.relation_name != "raw_orders" for snapshot in profile.current
+                )
+        finally:
+            lab.restore(case_id)
+
+        for mutation in scenario.reset_and_injection_contract.mutations:
+            key = (
+                mutation.relation,
+                mutation.column,
+                mutation.selector_column,
+                mutation.selector_value,
+            )
+            assert lab._read_null_target(mutation) == expected_restored[key]
+            assert lab._null_count(mutation) == 0

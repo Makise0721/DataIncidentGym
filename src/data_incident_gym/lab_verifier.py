@@ -25,6 +25,7 @@ from data_incident_gym.scenarios import (
     ColumnTypeMutation,
     NoMutation,
     ScenarioSpec,
+    SetFieldNullMutation,
     load_scenario_spec,
     parse_scenario_spec,
 )
@@ -206,7 +207,7 @@ class IncidentVerifier:
         return tuple(self._inspect_relation(relation_name) for relation_name in relation_names)
 
     @staticmethod
-    def _model_descendants(manifest: dict[str, Any], start: str) -> set[str]:
+    def _affected_models(manifest: dict[str, Any], start: str) -> set[str]:
         nodes = manifest.get("nodes")
         child_map = manifest.get("child_map")
         if not isinstance(nodes, dict) or not isinstance(child_map, dict):
@@ -226,7 +227,28 @@ class IncidentVerifier:
                 raise _clean(LabVerificationError("manifest child_map 引用无效"))
             adjacency[node_id] = tuple(children)
         start_node = nodes.get(start)
-        if not isinstance(start_node, dict) or start_node.get("resource_type") != "model":
+        if not isinstance(start_node, dict) or not isinstance(
+            start_node.get("resource_type"), str
+        ):
+            raise _clean(LabVerificationError("manifest 直接失败节点无效"))
+        if start_node["resource_type"] == "test":
+            parent_map = manifest.get("parent_map")
+            if not isinstance(parent_map, dict) or set(parent_map) != set(nodes):
+                raise _clean(LabVerificationError("manifest parent_map 节点集合不完整"))
+            parents = parent_map.get(start)
+            if not isinstance(parents, list) or any(
+                not isinstance(parent, str) or parent not in nodes for parent in parents
+            ):
+                raise _clean(LabVerificationError("manifest parent_map 引用无效"))
+            affected = {
+                parent
+                for parent in parents
+                if nodes[parent].get("resource_type") == "model"
+            }
+            if not affected:
+                raise _clean(LabVerificationError("failed test has no tested model"))
+            return affected
+        if start_node["resource_type"] != "model":
             raise _clean(LabVerificationError("manifest 缺少直接失败模型"))
         found: set[str] = set()
         pending = [start]
@@ -349,7 +371,7 @@ class IncidentVerifier:
             if unique_id in seen or unique_id not in nodes:
                 raise _clean(LabVerificationError("run_results 节点引用无效"))
             seen.add(unique_id)
-            if status == "error":
+            if status in {"error", "fail"}:
                 failed.append(unique_id)
             elif status == "skipped":
                 skipped.append(unique_id)
@@ -408,6 +430,8 @@ class IncidentVerifier:
                         max((item.ordinal_position for item in columns), default=0) + 1,
                     )
                 )
+            elif isinstance(mutation, SetFieldNullMutation):
+                pass
             elif not isinstance(mutation, NoMutation):
                 raise _clean(LabVerificationError("未知 mutation"))
             expected_relations[mutation.relation] = RelationSummary(
@@ -417,6 +441,53 @@ class IncidentVerifier:
             )
             if actual != expected_relations[mutation.relation]:
                 raise _clean(LabVerificationError("fault schema 与声明 mutation 不匹配"))
+
+    def _validate_null_mutations(self, scenario: ScenarioSpec) -> None:
+        mutations = tuple(
+            mutation
+            for mutation in scenario.reset_and_injection_contract.mutations
+            if isinstance(mutation, SetFieldNullMutation)
+        )
+        for mutation in mutations:
+            target_query = sql.SQL("SELECT {} FROM {}.{} WHERE {} = %s").format(
+                sql.Identifier(mutation.column),
+                sql.Identifier(self.settings.postgres_schema),
+                sql.Identifier(mutation.relation),
+                sql.Identifier(mutation.selector_column),
+            )
+            count_query = sql.SQL("SELECT count(*) FROM {}.{} WHERE {} IS NULL").format(
+                sql.Identifier(self.settings.postgres_schema),
+                sql.Identifier(mutation.relation),
+                sql.Identifier(mutation.column),
+            )
+            try:
+                with (
+                    self.db_connect(**self._connection_kwargs()) as connection,
+                    connection.cursor() as cursor,
+                ):
+                    cursor.execute(target_query, (mutation.selector_value,))
+                    rows = cursor.fetchall()
+                    cursor.execute(count_query)
+                    count_row = cursor.fetchone()
+            except LabVerificationError:
+                raise
+            except Exception as exc:
+                raise _clean(
+                    LabVerificationError(
+                        f"无法验证 NULL mutation：{mutation.relation}.{mutation.column}: {exc}"
+                    )
+                ) from None
+            if (
+                len(rows) != 1
+                or rows[0][0] is not None
+                or count_row is None
+                or int(count_row[0]) != 1
+            ):
+                raise _clean(
+                    LabVerificationError(
+                        f"NULL mutation 数据状态不匹配：{mutation.relation}.{mutation.column}"
+                    )
+                )
 
     def _write_private_verification(
         self,
@@ -461,12 +532,33 @@ class IncidentVerifier:
             raise _clean(LabVerificationError(str(exc))) from None
         current_names = tuple(item.relation_name for item in profile.current)
         history_names = tuple(item.relation_name for item in profile.history)
-        if set(observable["profile"]) - set(current_names):
-            raise _clean(LabVerificationError("公开 profile 关系集合不完整"))
-        if set(observable["history"]) - set(history_names):
-            raise _clean(LabVerificationError("公开 history 关系集合不完整"))
+        expected_current_names = set(observable["profile"]) | set(observable["history"])
+        if set(current_names) != expected_current_names:
+            raise _clean(LabVerificationError("公开 profile 关系集合不匹配"))
+        if set(history_names) != set(observable["history"]):
+            raise _clean(LabVerificationError("公开 history 关系集合不匹配"))
         if profile.profile_spec_sha256 != runtime["profile_spec_sha256"]:
             raise _clean(LabVerificationError("profile snapshot hash 不一致"))
+
+        current_profiles = {item.relation_name: item for item in profile.current}
+        for mutation in scenario.reset_and_injection_contract.mutations:
+            if not isinstance(mutation, SetFieldNullMutation):
+                continue
+            snapshot = current_profiles.get(mutation.relation)
+            if mutation.relation not in observable["profile"]:
+                if snapshot is not None:
+                    raise _clean(
+                        LabVerificationError("未公开 profile 的 NULL mutation 不得出现在快照中")
+                    )
+                continue
+            if snapshot is None:
+                raise _clean(LabVerificationError("NULL mutation profile 缺少目标关系"))
+            column = next(
+                (item for item in snapshot.columns if item.column_name == mutation.column),
+                None,
+            )
+            if column is None or column.null_count != 1:
+                raise _clean(LabVerificationError("NULL mutation profile 计数不匹配"))
 
         dbt_exit_code = runtime["dbt_exit_code"]
         relations = {relation.name: relation for relation in schema_relations}
@@ -535,7 +627,7 @@ class IncidentVerifier:
                 raise _clean(LabVerificationError("故障场景 dbt 意外成功"))
             if scenario.direct_failure is None or failed_nodes != (scenario.direct_failure,):
                 raise _clean(LabVerificationError("直接失败节点不匹配"))
-            affected = self._model_descendants(manifest, scenario.direct_failure)
+            affected = self._affected_models(manifest, scenario.direct_failure)
             if affected != set(scenario.affected_assets):
                 raise _clean(LabVerificationError("影响模型集合不匹配"))
             try:
@@ -549,6 +641,7 @@ class IncidentVerifier:
                 relations,
                 {item.name: item for item in baseline_relation_items},
             )
+            self._validate_null_mutations(scenario)
             status = ScenarioVerificationStatus.EXPECTED_FAILURE
 
         verification = ScenarioVerification(

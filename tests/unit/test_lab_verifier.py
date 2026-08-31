@@ -71,3 +71,45 @@ def test_scenario_verification_requires_sorted_unique_observations() -> None:
             schema_fingerprint="a" * 64,
             profile_spec_sha256="b" * 64,
         )
+
+
+def test_run_results_treat_a_failed_test_as_a_failed_node(tmp_path: Path) -> None:
+    test_id = "test.jaffle_shop.not_null_orders_customer_id.c5f02694af"
+    path = tmp_path / "run_results.json"
+    path.write_text(
+        '{"results":[{"unique_id":"'
+        + test_id
+        + '","status":"fail"}]}',
+        encoding="utf-8",
+    )
+    manifest = {"nodes": {test_id: {"resource_type": "test"}}}
+
+    failed, skipped = IncidentVerifier._read_run_results(path, manifest)
+
+    assert failed == (test_id,)
+    assert skipped == ()
+
+
+def test_failed_test_maps_only_to_its_distance_one_model() -> None:
+    test_id = "test.jaffle_shop.not_null_orders_customer_id.c5f02694af"
+    model_id = "model.jaffle_shop.orders"
+    seed_id = "source.jaffle_shop.raw_orders"
+    manifest = {
+        "nodes": {
+            test_id: {"resource_type": "test"},
+            model_id: {"resource_type": "model"},
+            seed_id: {"resource_type": "seed"},
+        },
+        "parent_map": {
+            test_id: [model_id],
+            model_id: [seed_id],
+            seed_id: [],
+        },
+        "child_map": {
+            test_id: [],
+            model_id: [test_id],
+            seed_id: [model_id],
+        },
+    }
+
+    assert IncidentVerifier._affected_models(manifest, test_id) == {model_id}

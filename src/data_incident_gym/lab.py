@@ -30,6 +30,7 @@ from data_incident_gym.lab_verifier import (
 from data_incident_gym.profiles import (
     AggregateSnapshotReader,
     ProfileError,
+    ProfileSnapshot,
     load_profile_spec,
     settings_connection_kwargs,
     write_profile_snapshot,
@@ -46,6 +47,7 @@ from data_incident_gym.scenarios import (
     NoMutation,
     ScenarioError,
     ScenarioSpec,
+    SetFieldNullMutation,
     load_scenario_spec,
 )
 
@@ -257,9 +259,100 @@ class IncidentLab:
     def _column_map(relation: RelationSummary) -> dict[str, ColumnSummary]:
         return {column.name: column for column in relation.columns}
 
+    def _read_null_target(self, mutation: SetFieldNullMutation) -> object:
+        statement = sql.SQL("SELECT {} FROM {}.{} WHERE {} = %s").format(
+            sql.Identifier(mutation.column),
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+            sql.Identifier(mutation.selector_column),
+        )
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement, (mutation.selector_value,))
+                rows = cursor.fetchall()
+        except LabError:
+            raise
+        except Exception as exc:
+            raise self._clean(
+                IncidentExecutionError(f"读取 NULL mutation 目标失败：{self._redact(str(exc))}")
+            ) from None
+        if len(rows) != 1:
+            raise self._clean(InvalidIncidentState("NULL mutation selector 必须匹配恰好一行"))
+        return rows[0][0]
+
+    def _null_count(self, mutation: SetFieldNullMutation) -> int:
+        statement = sql.SQL("SELECT count(*) FROM {}.{} WHERE {} IS NULL").format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+            sql.Identifier(mutation.column),
+        )
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(statement)
+                row = cursor.fetchone()
+        except LabError:
+            raise
+        except Exception as exc:
+            raise self._clean(
+                IncidentExecutionError(f"读取 NULL mutation 计数失败：{self._redact(str(exc))}")
+            ) from None
+        if row is None:
+            raise self._clean(InvalidIncidentState("NULL mutation 计数不可用"))
+        return int(row[0])
+
+    def _write_null_target(
+        self,
+        mutation: SetFieldNullMutation,
+        *,
+        expected_current: object,
+        replacement: object,
+    ) -> None:
+        statement = sql.SQL(
+            "UPDATE {}.{} SET {} = %s "
+            "WHERE {} = %s AND {} IS NOT DISTINCT FROM %s"
+        ).format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+            sql.Identifier(mutation.column),
+            sql.Identifier(mutation.selector_column),
+            sql.Identifier(mutation.column),
+        )
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.transaction(),
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(
+                    statement,
+                    (replacement, mutation.selector_value, expected_current),
+                )
+                updated = cursor.rowcount
+        except LabError:
+            raise
+        except Exception as exc:
+            raise self._clean(
+                IncidentExecutionError(f"写入 NULL mutation 目标失败：{self._redact(str(exc))}")
+            ) from None
+        if updated != 1:
+            raise self._clean(InvalidIncidentState("NULL mutation 必须更新恰好一行"))
+
     def _ensure_healthy_for_prepare(self, spec: ScenarioSpec) -> None:
         for mutation in spec.reset_and_injection_contract.mutations:
             if isinstance(mutation, NoMutation):
+                continue
+            if isinstance(mutation, SetFieldNullMutation):
+                if (
+                    self._read_null_target(mutation) != mutation.expected_value
+                    or self._null_count(mutation) != 0
+                ):
+                    raise InvalidIncidentState("prepare 要求初始 NULL mutation 状态为健康")
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -396,12 +489,30 @@ class IncidentLab:
                 self._change_column_type(mutation)
             elif isinstance(mutation, AddNullableColumnMutation):
                 self._add_nullable_column(mutation)
+            elif isinstance(mutation, SetFieldNullMutation):
+                self._write_null_target(
+                    mutation,
+                    expected_current=mutation.expected_value,
+                    replacement=None,
+                )
             elif not isinstance(mutation, NoMutation):
                 raise InvalidIncidentState("存在未授权 mutation")
 
     def _restore_mutations(self, spec: ScenarioSpec) -> None:
         for mutation in reversed(spec.reset_and_injection_contract.mutations):
             if isinstance(mutation, NoMutation):
+                continue
+            if isinstance(mutation, SetFieldNullMutation):
+                current = self._read_null_target(mutation)
+                if current == mutation.expected_value:
+                    continue
+                if current is not None:
+                    raise InvalidIncidentState("restore 拒绝未知 NULL mutation 状态")
+                self._write_null_target(
+                    mutation,
+                    expected_current=None,
+                    replacement=mutation.expected_value,
+                )
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -440,6 +551,13 @@ class IncidentLab:
     def _verify_restored(self, spec: ScenarioSpec) -> None:
         for mutation in spec.reset_and_injection_contract.mutations:
             if isinstance(mutation, NoMutation):
+                continue
+            if isinstance(mutation, SetFieldNullMutation):
+                if (
+                    self._read_null_target(mutation) != mutation.expected_value
+                    or self._null_count(mutation) != 0
+                ):
+                    raise InvalidIncidentState("restore 后 NULL mutation 仍然存在")
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -521,6 +639,15 @@ class IncidentLab:
                 connection_kwargs=self._connection_kwargs(),
             )
             snapshot = reader.read_snapshot(relation_names)
+            snapshot = ProfileSnapshot.create(
+                spec=profile_spec,
+                current=snapshot.current,
+                history=tuple(
+                    item
+                    for item in snapshot.history
+                    if item.relation_name in spec.observable_evidence_contract.history_relations
+                ),
+            )
             write_profile_snapshot(run_root / "profile_snapshot.json", snapshot)
             return profile_spec.digest()
         except ProfileError as exc:
@@ -652,6 +779,13 @@ class IncidentLab:
 
     def _validate_prepared_state(self, spec: ScenarioSpec) -> None:
         for mutation in spec.reset_and_injection_contract.mutations:
+            if isinstance(mutation, SetFieldNullMutation):
+                if (
+                    self._read_null_target(mutation) is not None
+                    or self._null_count(mutation) != 1
+                ):
+                    raise InvalidIncidentState("build 要求已完成 NULL mutation")
+                continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
             if isinstance(mutation, ColumnRenameMutation):

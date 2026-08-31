@@ -15,6 +15,7 @@ from data_incident_gym.lab import (
 )
 from data_incident_gym.lab_verifier import ScenarioVerificationStatus
 from data_incident_gym.scenarios import (
+    SetFieldNullMutation,
     load_scenario_spec,
 )
 
@@ -28,6 +29,53 @@ def _lab(tmp_path: Path) -> IncidentLab:
         verifier=SimpleNamespace(),
         run_id_factory=lambda: "a" * 32,
     )
+
+
+class _FakeCursor:
+    def __init__(
+        self,
+        calls: list[tuple[str, tuple[object, ...]]],
+        *,
+        rows: list[tuple[object, ...]] | None = None,
+        one: tuple[object, ...] | None = None,
+        rowcount: int = 1,
+    ) -> None:
+        self.calls = calls
+        self.rows = rows or []
+        self.one = one
+        self.rowcount = rowcount
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, statement: object, params: tuple[object, ...] = ()) -> None:
+        self.calls.append((str(statement), params))
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self.rows
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self.one
+
+
+class _FakeConnection:
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self.cursor_instance = cursor
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> _FakeCursor:
+        return self.cursor_instance
+
+    def transaction(self) -> _FakeConnection:
+        return self
 
 
 def test_lab_loads_only_the_committed_scenario_catalog(tmp_path: Path) -> None:
@@ -210,3 +258,95 @@ def test_build_rejects_unprepared_or_unknown_schema_drift(tmp_path: Path, monkey
 
     with pytest.raises(InvalidIncidentState, match="type mutation"):
         lab._validate_prepared_state(scenario)
+
+
+def test_null_mutation_helpers_use_bound_values_and_exact_row_count(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = load_scenario_spec(
+        "required_null_payment_id"
+    ).reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, SetFieldNullMutation)
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rows=[(1,)], one=(0,))
+    lab.db_connect = lambda **_: _FakeConnection(cursor)
+
+    assert lab._read_null_target(mutation) == 1
+    assert lab._null_count(mutation) == 0
+    lab._write_null_target(
+        mutation,
+        expected_current=mutation.expected_value,
+        replacement=None,
+    )
+
+    assert calls[0][1] == (1,)
+    assert calls[1][1] == ()
+    assert calls[2][1] == (None, 1, 1)
+    assert "IS NOT DISTINCT FROM" in calls[2][0]
+
+
+def test_null_mutation_helpers_reject_non_unique_selector_or_update(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = load_scenario_spec(
+        "required_null_payment_id"
+    ).reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, SetFieldNullMutation)
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rows=[(1,), (1,)], one=None, rowcount=0)
+    lab.db_connect = lambda **_: _FakeConnection(cursor)
+
+    with pytest.raises(InvalidIncidentState, match="恰好一行"):
+        lab._read_null_target(mutation)
+
+    cursor.rows = [(1,)]
+    with pytest.raises(InvalidIncidentState, match="恰好一行"):
+        lab._write_null_target(
+            mutation,
+            expected_current=mutation.expected_value,
+            replacement=None,
+        )
+
+
+def test_null_mutation_prepare_apply_validate_and_restore_states(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("required_null_payment_id")
+    mutation = scenario.reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, SetFieldNullMutation)
+    current = [mutation.expected_value]
+    null_count = [0]
+    writes: list[tuple[object, object]] = []
+    monkeypatch.setattr(lab, "_read_null_target", lambda _mutation: current[0])
+    monkeypatch.setattr(lab, "_null_count", lambda _mutation: null_count[0])
+
+    lab._ensure_healthy_for_prepare(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_write_null_target",
+        lambda _mutation, *, expected_current, replacement: (
+            writes.append((expected_current, replacement)),
+            current.__setitem__(0, replacement),
+            null_count.__setitem__(0, 1),
+        )[-1],
+    )
+    lab._apply_mutations(scenario)
+    lab._validate_prepared_state(scenario)
+    assert writes == [(mutation.expected_value, None)]
+
+    monkeypatch.setattr(
+        lab,
+        "_write_null_target",
+        lambda _mutation, *, expected_current, replacement: (
+            writes.append((expected_current, replacement)),
+            current.__setitem__(0, replacement),
+            null_count.__setitem__(0, 0),
+        )[-1],
+    )
+    lab._restore_mutations(scenario)
+    assert current == [mutation.expected_value]
+    assert null_count == [0]
+
+    current[0] = "unexpected"
+    with pytest.raises(InvalidIncidentState, match="未知"):
+        lab._restore_mutations(scenario)
