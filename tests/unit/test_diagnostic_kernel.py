@@ -26,8 +26,8 @@ from data_incident_gym.evidence import (
     EvidenceRecord,
     EvidenceSource,
     EvidenceType,
-    RelationSchemaColumn,
     RelationDataProfileFact,
+    RelationSchemaColumn,
     RelationSchemaFact,
 )
 from data_incident_gym.profiles import (

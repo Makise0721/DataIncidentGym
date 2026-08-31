@@ -4,11 +4,11 @@ from pathlib import Path
 import pytest
 
 from data_incident_gym.scenarios import (
-    Answerability,
-    DuplicatePaymentRowsMutation,
     P1_M7_SCENARIO_IDS,
     P1_M8_SCENARIO_IDS,
     P1_M9_SCENARIO_IDS,
+    Answerability,
+    DuplicatePaymentRowsMutation,
     ScenarioError,
     VariantRole,
     duplicate_payment_rows,

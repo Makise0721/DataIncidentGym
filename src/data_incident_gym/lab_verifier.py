@@ -27,7 +27,6 @@ from data_incident_gym.scenarios import (
     NoMutation,
     ScenarioSpec,
     SetFieldNullMutation,
-    duplicate_payment_rows,
     load_scenario_spec,
     parse_scenario_spec,
 )
@@ -570,7 +569,9 @@ class IncidentVerifier:
             (item for item in profile.current if item.relation_name == mutation.relation),
             None,
         )
-        profile_is_public = mutation.relation in scenario.observable_evidence_contract.profile_relations
+        profile_is_public = (
+            mutation.relation in scenario.observable_evidence_contract.profile_relations
+        )
         if profile_is_public != (public_snapshot is not None):
             raise _clean(LabVerificationError("duplicate-payment profile 公开边界不匹配"))
         if public_snapshot is None:

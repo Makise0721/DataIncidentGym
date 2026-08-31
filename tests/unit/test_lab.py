@@ -420,12 +420,14 @@ def test_duplicate_payment_state_distinguishes_frozen_batches(
             for item in scenario.reset_and_injection_contract.mutations
             if isinstance(item, DuplicatePaymentRowsMutation)
         )
+        source_ids = mutation.source_payment_ids
+        mutation_mode = mutation.mode
         monkeypatch.setattr(lab, "_payment_row_total", lambda total=healthy_total: total)
         monkeypatch.setattr(
             lab,
             "_payment_row_count",
-            lambda row, source_count=source_count, inserted_count=inserted_count: (
-                source_count if row[0] in mutation.source_payment_ids else inserted_count
+            lambda row, ids=source_ids, src=source_count, ins=inserted_count: (
+                src if row[0] in ids else ins
             ),
         )
         assert lab._duplicate_payment_state(mutation) == "HEALTHY"
@@ -434,9 +436,7 @@ def test_duplicate_payment_state_distinguishes_frozen_batches(
         monkeypatch.setattr(
             lab,
             "_payment_row_count",
-            lambda row, source_count=source_count: (
-                2 if mutation.mode == "EXACT_RECORD" else 1
-            ),
+            lambda _, mode=mutation_mode: 2 if mode == "EXACT_RECORD" else 1,
         )
         assert lab._duplicate_payment_state(mutation) == "INJECTED"
 
