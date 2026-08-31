@@ -40,6 +40,8 @@ from data_incident_gym.evidence import (
 from data_incident_gym.lab_verifier import ScenarioVerification, ScenarioVerificationStatus
 from data_incident_gym.profiles import (
     ColumnProfileFact,
+    DuplicateProfileFact,
+    GroupProfileFact,
     HistoryPoint,
     HistorySeries,
     ProfileSnapshot,
@@ -108,6 +110,430 @@ def _verification(case_id: str) -> ScenarioVerification:
         schema_fingerprint="a" * 64,
         profile_spec_sha256="b" * 64,
     )
+
+
+def _m9_verification(
+    case_id: str,
+    *,
+    failed_nodes: tuple[str, ...] | None = None,
+    skipped_nodes: tuple[str, ...] = (),
+) -> ScenarioVerification:
+    scenario = load_scenario_spec(case_id)
+    expected_failure = scenario.direct_failure is not None
+    return ScenarioVerification(
+        status=(
+            ScenarioVerificationStatus.EXPECTED_FAILURE
+            if expected_failure
+            else ScenarioVerificationStatus.EXPECTED_ANOMALY
+        ),
+        incident_case_id=case_id,
+        run_id=RUN_ID,
+        dbt_exit_code=1 if expected_failure else 0,
+        failed_nodes=(scenario.direct_failure,) if expected_failure else (failed_nodes or ()),
+        skipped_nodes=skipped_nodes,
+        affected_assets=tuple(sorted(scenario.affected_assets)),
+        schema_fingerprint="a" * 64,
+        profile_spec_sha256="b" * 64,
+    )
+
+
+def _m9_profile(
+    *,
+    row_count: int,
+    id_duplicates: int,
+    fingerprint_duplicates: int,
+    coupon_count: int,
+) -> RelationProfileSnapshot:
+    return RelationProfileSnapshot(
+        relation_name="raw_payments",
+        row_count=row_count,
+        columns=(),
+        business_key_duplicates=(
+            DuplicateProfileFact(name="id", duplicate_count=id_duplicates),
+        ),
+        business_fingerprint_duplicates=(
+            DuplicateProfileFact(
+                name="order_payment_amount",
+                duplicate_count=fingerprint_duplicates,
+            ),
+        ),
+        groups=(
+            GroupProfileFact(
+                name="payment_method",
+                columns=("payment_method",),
+                values=(("coupon",), ("credit_card",)),
+                counts=(coupon_count, 56),
+            ),
+        ),
+    )
+
+
+def _m9_confirmed_run(
+    case_id: str,
+    *,
+    id_duplicates: int = 0,
+    fingerprint_duplicates: int = 3,
+    coupon_count: int = 16,
+) -> DiagnosisRunResult:
+    scenario = load_scenario_spec(case_id)
+    exact = scenario.direct_failure is not None
+    run = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.DBT_RUN_RESULTS,
+        source=EvidenceSource.DBT_RUN_RESULTS,
+        subject=RUN_ID,
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
+            run_id=RUN_ID,
+            run_status="FAILED" if exact else "SUCCEEDED",
+            dbt_exit_code=1 if exact else 0,
+            failed_nodes=(scenario.direct_failure,) if exact else (),
+            skipped_nodes=(),
+        ),
+    )
+    records = [run]
+    if exact:
+        records.append(
+            EvidenceRecord.create(
+                run_id=RUN_ID,
+                evidence_type=EvidenceType.DBT_NODE_ERROR,
+                source=EvidenceSource.DBT_RUN_RESULTS,
+                subject=scenario.direct_failure,
+                observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+                content=DbtNodeErrorFact(
+                    kind="DBT_NODE_ERROR",
+                    run_id=RUN_ID,
+                    node_id=scenario.direct_failure,
+                    resource_type="test",
+                    status="fail",
+                    message="payment id is not unique",
+                ),
+            )
+        )
+    lineage = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.DBT_LINEAGE,
+        source=EvidenceSource.DBT_MANIFEST,
+        subject="seed.jaffle_shop.raw_payments",
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="seed.jaffle_shop.raw_payments",
+            direction="downstream",
+            related_nodes=tuple(
+                DbtLineageNode(
+                    node_id=asset,
+                    resource_type="model",
+                    name=asset.rsplit(".", 1)[-1],
+                    distance=1,
+                )
+                for asset in scenario.affected_assets
+            ),
+        ),
+    )
+    records.append(lineage)
+    schema = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.RELATION_SCHEMA,
+        source=EvidenceSource.POSTGRES_CATALOG,
+        subject="raw_payments",
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=RelationSchemaFact(
+            kind="RELATION_SCHEMA",
+            run_id=RUN_ID,
+            schema_name="analytics",
+            relation_name="raw_payments",
+            columns=(),
+        ),
+    )
+    profile = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.RELATION_DATA_PROFILE,
+        source=EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        subject="raw_payments",
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=RelationDataProfileFact(
+            kind="RELATION_DATA_PROFILE",
+            run_id=RUN_ID,
+            relation_name="raw_payments",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=_m9_profile(
+                row_count=114 if exact else 116,
+                id_duplicates=id_duplicates,
+                fingerprint_duplicates=fingerprint_duplicates,
+                coupon_count=coupon_count,
+            ),
+        ),
+    )
+    records.extend((schema, profile))
+    records_tuple = tuple(records)
+    evidence_ids = tuple(record.evidence_id for record in records_tuple)
+    root_evidence = (run.evidence_id, profile.evidence_id)
+    if exact:
+        root_evidence = (run.evidence_id, records_tuple[1].evidence_id, profile.evidence_id)
+    claims = (
+        RootCauseClaim(
+            kind="ROOT_CAUSE",
+            root_cause_code=(
+                "SOURCE_EXACT_PAYMENT_DUPLICATE"
+                if exact
+                else "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+            ),
+            evidence_ids=root_evidence,
+        ),
+        *tuple(
+            AffectedAssetClaim(
+                kind="AFFECTED_ASSET",
+                asset=asset,
+                evidence_ids=(lineage.evidence_id,),
+            )
+            for asset in scenario.affected_assets
+        ),
+    )
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.CONFIRMED,
+        run_id=RUN_ID,
+        root_cause_code=claims[0].root_cause_code,
+        summary="The payment aggregate contains duplicate business identities.",
+        affected_assets=tuple(scenario.affected_assets),
+        evidence_ids=evidence_ids,
+        claims=claims,
+        confidence=0.9,
+    )
+    trace_specs = [("get_dbt_run_results", {"run_id": RUN_ID})]
+    trace_records = [run]
+    if exact:
+        trace_specs.append(
+            ("get_dbt_node_error", {"run_id": RUN_ID, "node_id": scenario.direct_failure})
+        )
+        trace_records.append(records_tuple[1])
+    trace_specs.extend(
+        (
+            (
+                "get_dbt_lineage",
+                {"node_id": "seed.jaffle_shop.raw_payments", "direction": "downstream"},
+            ),
+            ("get_relation_schema", {"relation_name": "raw_payments"}),
+            ("get_relation_data_profile", {"relation_name": "raw_payments"}),
+        )
+    )
+    trace_records.extend((lineage, schema, profile))
+    trace = tuple(
+        ToolTraceEvent(
+            event_type="TOOL_CALL",
+            tool_name=tool_name,
+            arguments=arguments,
+            fingerprint=f"{index + 1:064x}",
+            evidence_ids=(record.evidence_id,),
+            elapsed_ms=1,
+        )
+        for index, ((tool_name, arguments), record) in enumerate(
+            zip(trace_specs, trace_records, strict=True)
+        )
+    )
+    terminal = DiagnosisTerminalTraceEvent(
+        event_type="DIAGNOSIS_TERMINAL",
+        strategy=DiagnosticStrategy.STATIC_SKILL,
+        status=DiagnosisStatus.CONFIRMED,
+        evidence_inventory=evidence_ids,
+    )
+    return _model_error().model_copy(
+        update={
+            "diagnosis": diagnosis,
+            "evidence_records": records_tuple,
+            "trace": (*trace, terminal),
+            "metrics": DiagnosisMetrics(
+                provider="synthetic",
+                model="synthetic-model",
+                model_requests=1,
+                input_tokens=0,
+                output_tokens=0,
+                tool_call_attempts=len(trace),
+                successful_tool_calls=len(trace),
+                elapsed_ms=1,
+            ),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_id", "run_status", "id_duplicates", "fingerprint_duplicates", "expected"),
+    (
+        ("duplicate_payment_record", "FAILED", 1, 1, EvaluationStatus.PASSED),
+        ("duplicate_payment_coupon_a", "SUCCEEDED", 0, 3, EvaluationStatus.PASSED),
+        ("duplicate_payment_coupon_a", "SUCCEEDED", 1, 3, EvaluationStatus.FAILED),
+        ("duplicate_payment_coupon_a", "SUCCEEDED", 0, 0, EvaluationStatus.FAILED),
+    ),
+)
+def test_evaluator_scores_m9_duplicate_profiles(
+    case_id: str,
+    run_status: str,
+    id_duplicates: int,
+    fingerprint_duplicates: int,
+    expected: EvaluationStatus,
+) -> None:
+    scenario = load_scenario_spec(case_id)
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _m9_verification(case_id),
+        _m9_confirmed_run(
+            case_id,
+            id_duplicates=id_duplicates,
+            fingerprint_duplicates=fingerprint_duplicates,
+        ),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is expected
+    if expected is EvaluationStatus.FAILED:
+        assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
+    else:
+        assert not result.failed_check_codes
+
+
+def test_evaluator_rejects_m9_environment_with_failed_or_skipped_nodes() -> None:
+    scenario = load_scenario_spec("duplicate_payment_coupon_a")
+    run = _m9_confirmed_run("duplicate_payment_coupon_a")
+    for failed_nodes, skipped_nodes in (
+        (("model.jaffle_shop.orders",), ()),
+        ((), ("model.jaffle_shop.orders",)),
+    ):
+        result = DeterministicEvaluator.evaluate(
+            scenario,
+            _m9_verification(
+                scenario.incident_case_id,
+                failed_nodes=failed_nodes,
+                skipped_nodes=skipped_nodes,
+            ),
+            run,
+            recovery_succeeded=True,
+        )
+        assert EvaluationCheckCode.ENVIRONMENT_VERIFIED in result.failed_check_codes
+
+
+def test_evaluator_requires_the_exact_m9_insufficient_gap_pair() -> None:
+    scenario = load_scenario_spec("duplicate_payment_coupon_b")
+    run_record = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.DBT_RUN_RESULTS,
+        source=EvidenceSource.DBT_RUN_RESULTS,
+        subject=RUN_ID,
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
+            run_id=RUN_ID,
+            run_status="SUCCEEDED",
+            dbt_exit_code=0,
+            failed_nodes=(),
+            skipped_nodes=(),
+        ),
+    )
+    lineage = _m9_confirmed_run("duplicate_payment_coupon_a").evidence_records[1]
+    schema = _m9_confirmed_run("duplicate_payment_coupon_a").evidence_records[2]
+    records = (run_record, lineage, schema)
+    evidence_ids = tuple(record.evidence_id for record in records)
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="Payment event identity is unavailable.",
+        evidence_ids=evidence_ids,
+        unresolved_evidence=(
+            {
+                "evidence_kind": "RELATION_DATA_PROFILE",
+                "subject": "raw_payments",
+                "reason_code": "RELATION_NOT_ALLOWED",
+            },
+            {
+                "evidence_kind": "PAYMENT_EVENT_IDENTITY",
+                "subject": "raw_payments",
+                "reason_code": "NOT_OBSERVABLE",
+            },
+        ),
+        confidence=0.2,
+    )
+    trace = (
+        ToolTraceEvent(
+            event_type="TOOL_CALL",
+            tool_name="get_dbt_run_results",
+            arguments={"run_id": RUN_ID},
+            fingerprint="1" * 64,
+            evidence_ids=(run_record.evidence_id,),
+            elapsed_ms=1,
+        ),
+        ToolTraceEvent(
+            event_type="TOOL_CALL",
+            tool_name="get_dbt_lineage",
+            arguments={"node_id": "seed.jaffle_shop.raw_payments", "direction": "downstream"},
+            fingerprint="2" * 64,
+            evidence_ids=(lineage.evidence_id,),
+            elapsed_ms=1,
+        ),
+        ToolTraceEvent(
+            event_type="TOOL_CALL",
+            tool_name="get_relation_schema",
+            arguments={"relation_name": "raw_payments"},
+            fingerprint="3" * 64,
+            evidence_ids=(schema.evidence_id,),
+            elapsed_ms=1,
+        ),
+        ToolTraceEvent(
+            event_type="TOOL_CALL",
+            tool_name="get_relation_data_profile",
+            arguments={"relation_name": "raw_payments"},
+            fingerprint="4" * 64,
+            evidence_ids=(),
+            error_code="RELATION_NOT_ALLOWED",
+            elapsed_ms=1,
+        ),
+    )
+    terminal = DiagnosisTerminalTraceEvent(
+        event_type="DIAGNOSIS_TERMINAL",
+        strategy=DiagnosticStrategy.STATIC_SKILL,
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        evidence_inventory=evidence_ids,
+    )
+    diagnosis_run = _model_error().model_copy(
+        update={
+            "diagnosis": diagnosis,
+            "evidence_records": records,
+            "trace": (*trace, terminal),
+            "metrics": DiagnosisMetrics(
+                provider="synthetic",
+                model="synthetic-model",
+                model_requests=1,
+                input_tokens=0,
+                output_tokens=0,
+                tool_call_attempts=4,
+                successful_tool_calls=3,
+                elapsed_ms=1,
+            ),
+        }
+    )
+
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _m9_verification(scenario.incident_case_id),
+        diagnosis_run,
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.PASSED
+
+
+def test_evaluator_rejects_m9_profile_with_wrong_coupon_count() -> None:
+    scenario = load_scenario_spec("duplicate_payment_coupon_a")
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _m9_verification(scenario.incident_case_id),
+        _m9_confirmed_run(scenario.incident_case_id, coupon_count=15),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.FAILED
+    assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
 
 
 def _health_run(bucket: str) -> DiagnosisRunResult:

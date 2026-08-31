@@ -27,6 +27,7 @@ from data_incident_gym.scenarios import (
     Answerability,
     ColumnRenameMutation,
     ColumnTypeMutation,
+    DuplicatePaymentRowsMutation,
     ScenarioSpec,
     SetFieldNullMutation,
 )
@@ -293,6 +294,88 @@ def _root_cause_evidence_compatible(
     root_cause_code: str,
     root_records: list[EvidenceRecord],
 ) -> bool:
+    duplicate = next(
+        (
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, DuplicatePaymentRowsMutation)
+        ),
+        None,
+    )
+    if duplicate is not None:
+        run = next(
+            (
+                record.content
+                for record in root_records
+                if isinstance(record.content, DbtRunResultsFact)
+            ),
+            None,
+        )
+        profile = next(
+            (
+                record.content
+                for record in root_records
+                if isinstance(record.content, RelationDataProfileFact)
+                and record.content.relation_name == duplicate.relation
+            ),
+            None,
+        )
+        if run is None or profile is None:
+            return False
+        key = next(
+            (
+                item
+                for item in profile.snapshot.business_key_duplicates
+                if item.name == "id"
+            ),
+            None,
+        )
+        fingerprint = next(
+            (
+                item
+                for item in profile.snapshot.business_fingerprint_duplicates
+                if item.name == "order_payment_amount"
+            ),
+            None,
+        )
+        payment_method_group = next(
+            (
+                item
+                for item in profile.snapshot.groups
+                if item.name == "payment_method"
+            ),
+            None,
+        )
+        if key is None or fingerprint is None or payment_method_group is None:
+            return False
+        grouped_counts = dict(
+            zip(
+                (values[0] for values in payment_method_group.values),
+                payment_method_group.counts,
+                strict=True,
+            )
+        )
+        if duplicate.mode == "EXACT_RECORD":
+            return (
+                root_cause_code == "SOURCE_EXACT_PAYMENT_DUPLICATE"
+                and key.duplicate_count == 1
+                and fingerprint.duplicate_count == 1
+                and grouped_counts.get("credit_card") == 56
+                and any(
+                    isinstance(record.content, DbtNodeErrorFact)
+                    and record.content.node_id == scenario.direct_failure
+                    for record in root_records
+                )
+            )
+        return (
+            root_cause_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+            and run.run_status == "SUCCEEDED"
+            and not run.failed_nodes
+            and key.duplicate_count == 0
+            and fingerprint.duplicate_count == len(duplicate.inserted_payment_ids)
+            and grouped_counts.get("coupon") == 16
+        )
+
     if not any(
         isinstance(record.content, DbtNodeErrorFact)
         and record.content.node_id == scenario.direct_failure
@@ -461,7 +544,21 @@ def _environment_verified(
     if verification.run_id != run_id or verification.incident_case_id != scenario.incident_case_id:
         return False
     if scenario.answerability is Answerability.NO_INCIDENT:
-        return verification.status == "HEALTHY_CONTROL" and verification.dbt_exit_code == 0
+        return (
+            verification.status == "HEALTHY_CONTROL"
+            and verification.dbt_exit_code == 0
+            and not verification.failed_nodes
+            and not verification.skipped_nodes
+        )
+    if scenario.direct_failure is None:
+        return (
+            verification.status == "EXPECTED_ANOMALY"
+            and verification.dbt_exit_code == 0
+            and not verification.failed_nodes
+            and not verification.skipped_nodes
+            and tuple(sorted(verification.affected_assets))
+            == tuple(sorted(scenario.affected_assets))
+        )
     return (
         verification.status == "EXPECTED_FAILURE"
         and verification.dbt_exit_code != 0
