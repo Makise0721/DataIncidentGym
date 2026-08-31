@@ -34,16 +34,38 @@ from data_incident_gym.run_context import resolve_run_context
 from data_incident_gym.scenarios import (
     P1_M7_SCENARIO_IDS,
     P1_M8_SCENARIO_IDS,
+    P1_M9_SCENARIO_IDS,
     load_scenario_spec,
 )
 
-MATRIX_CASES = P1_M7_SCENARIO_IDS + P1_M8_SCENARIO_IDS
+MATRIX_CASES = P1_M7_SCENARIO_IDS + P1_M8_SCENARIO_IDS + P1_M9_SCENARIO_IDS
 MATRIX_STRATEGIES = (
     DiagnosticStrategy.STATIC_SKILL,
     DiagnosticStrategy.DIAGNOSTIC_KERNEL,
 )
-assert len(MATRIX_CASES) == 7
-assert len(MATRIX_CASES) * len(MATRIX_STRATEGIES) == 14
+assert len(MATRIX_CASES) == 10
+assert len(MATRIX_CASES) * len(MATRIX_STRATEGIES) == 20
+M9_EXPECTED = {
+    "duplicate_payment_record": (
+        "CONFIRMED",
+        "SOURCE_EXACT_PAYMENT_DUPLICATE",
+        ["model.jaffle_shop.stg_payments"],
+    ),
+    "duplicate_payment_coupon_a": (
+        "CONFIRMED",
+        "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+        [
+            "model.jaffle_shop.customers",
+            "model.jaffle_shop.orders",
+            "model.jaffle_shop.stg_payments",
+        ],
+    ),
+    "duplicate_payment_coupon_b": (
+        "INSUFFICIENT_EVIDENCE",
+        None,
+        [],
+    ),
+}
 
 
 def _returned_records(
@@ -122,6 +144,8 @@ def _model_response(
     *,
     run_id: str,
     strategy: DiagnosticStrategy,
+    signal_code: str,
+    incident_subjects: tuple[str, ...],
     schema_relations: tuple[str, ...],
     profile_relations: tuple[str, ...],
 ) -> ModelResponse:
@@ -138,6 +162,15 @@ def _model_response(
 
     run_fact = run_records[-1].content
     if isinstance(run_fact, DbtRunResultsFact) and run_fact.run_status == "SUCCEEDED":
+        if signal_code == "PAYMENT_DUPLICATE_ALERT":
+            return _duplicate_payment_response(
+                messages,
+                agent_info,
+                run_id=run_id,
+                strategy=strategy,
+                incident_subjects=incident_subjects,
+                profile_relations=profile_relations,
+            )
         if not profiles:
             tool = _tool_call(
                 "get_relation_data_profile",
@@ -213,6 +246,17 @@ def _model_response(
         return _with_intent(tool, strategy, _intent("g_explain", "EXPLAIN_FAILURE"))
 
     failure_node = node_errors[-1].content.node_id
+    if failure_node.endswith("unique_stg_payments_payment_id.3744510712"):
+        return _exact_duplicate_response(
+            messages,
+            agent_info,
+            run_id=run_id,
+            strategy=strategy,
+            failure_node=failure_node,
+            incident_subjects=incident_subjects,
+            schema_relations=schema_relations,
+            profile_relations=profile_relations,
+        )
     upstream = tuple(
         record
         for record in lineages
@@ -680,6 +724,393 @@ def _model_response(
     return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
 
 
+def _duplicate_hypotheses(*, exact: bool) -> list[dict[str, str]]:
+    return [
+        {
+            "hypothesis_id": "h_exact_duplicate" if exact else "h_semantic_duplicate",
+            "root_cause_code": (
+                "SOURCE_EXACT_PAYMENT_DUPLICATE"
+                if exact
+                else "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+            ),
+        },
+        {
+            "hypothesis_id": "h_semantic_duplicate" if exact else "h_legitimate_split",
+            "root_cause_code": (
+                "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+                if exact
+                else "LEGITIMATE_SPLIT_PAYMENT"
+            ),
+        },
+    ]
+
+
+def _duplicate_hypothesis_ids(*, exact: bool) -> list[str]:
+    return [item["hypothesis_id"] for item in _duplicate_hypotheses(exact=exact)]
+
+
+def _duplicate_confirmed_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+    exact: bool,
+) -> ModelResponse:
+    run_records = _returned_records(messages, "get_dbt_run_results")
+    node_errors = _returned_records(messages, "get_dbt_node_error")
+    lineages = tuple(
+        record
+        for record in _returned_records(messages, "get_dbt_lineage")
+        if getattr(record.content, "direction", None) == ("upstream" if exact else "downstream")
+    )
+    schemas = _returned_records(messages, "get_relation_schema")
+    profiles = _returned_records(messages, "get_relation_data_profile")
+    records = (*run_records, *node_errors, *lineages, *schemas, *profiles)
+    evidence_ids = [record.evidence_id for record in records]
+    lineage = lineages[-1]
+    assets = tuple(
+        sorted(
+            node.node_id
+            for node in lineage.content.related_nodes
+            if node.resource_type == "model"
+            and (not exact or node.distance == 1)
+        )
+    )
+    profile_id = profiles[-1].evidence_id
+    root_evidence_ids = [run_records[-1].evidence_id, profile_id]
+    if exact:
+        root_evidence_ids.insert(1, node_errors[-1].evidence_id)
+    root_code = (
+        "SOURCE_EXACT_PAYMENT_DUPLICATE"
+        if exact
+        else "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+    )
+    hypothesis_ids = _duplicate_hypothesis_ids(exact=exact)
+    if strategy is DiagnosticStrategy.STATIC_SKILL:
+        payload = {
+            "status": "CONFIRMED",
+            "run_id": run_id,
+            "root_cause_code": root_code,
+            "summary": "The payment aggregate confirms a duplicate business identity.",
+            "affected_assets": list(assets),
+            "evidence_ids": evidence_ids,
+            "claims": [
+                {
+                    "kind": "ROOT_CAUSE",
+                    "root_cause_code": root_code,
+                    "evidence_ids": root_evidence_ids,
+                },
+                *(
+                    {
+                        "kind": "AFFECTED_ASSET",
+                        "asset": asset,
+                        "evidence_ids": [lineage.evidence_id],
+                    }
+                    for asset in assets
+                ),
+            ],
+            "unresolved_evidence": [],
+            "recommended_actions": [
+                "Quarantine the duplicate payment records and repair the source."
+            ],
+            "confidence": 0.9,
+        }
+    else:
+        assessments = [
+            {
+                "hypothesis_id": hypothesis_id,
+                "verdict": "SUPPORTED" if index == 0 else "REFUTED",
+                "evidence_ids": root_evidence_ids,
+            }
+            for index, hypothesis_id in enumerate(hypothesis_ids)
+        ]
+        payload = {
+            "status": "CONFIRMED",
+            "run_id": run_id,
+            "selected_hypothesis_id": hypothesis_ids[0],
+            "assessments": assessments,
+            "claims": [
+                {
+                    "kind": "ROOT_CAUSE",
+                    "value": root_code,
+                    "evidence_ids": root_evidence_ids,
+                },
+                *(
+                    {
+                        "kind": "AFFECTED_ASSET",
+                        "value": asset,
+                        "evidence_ids": [lineage.evidence_id],
+                    }
+                    for asset in assets
+                ),
+            ],
+            "unresolved_evidence": [],
+            "summary": "The payment aggregate confirms a duplicate business identity.",
+            "recommended_actions": [
+                "Quarantine the duplicate payment records and repair the source."
+            ],
+            "confidence": 0.9,
+        }
+    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+
+
+def _duplicate_insufficient_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+) -> ModelResponse:
+    records = (
+        *_returned_records(messages, "get_dbt_run_results"),
+        *_returned_records(messages, "get_dbt_lineage"),
+        *_returned_records(messages, "get_relation_schema"),
+    )
+    evidence_ids = [record.evidence_id for record in records]
+    unresolved = [
+        {
+            "evidence_kind": "RELATION_DATA_PROFILE",
+            "subject": "raw_payments",
+            "reason_code": "RELATION_NOT_ALLOWED",
+        },
+        {
+            "evidence_kind": "PAYMENT_EVENT_IDENTITY",
+            "subject": "raw_payments",
+            "reason_code": "NOT_OBSERVABLE",
+        },
+    ]
+    if strategy is DiagnosticStrategy.STATIC_SKILL:
+        payload = {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "run_id": run_id,
+            "summary": (
+                "Payment event identity is unavailable, so duplicate and split explanations remain."
+            ),
+            "affected_assets": [],
+            "evidence_ids": evidence_ids,
+            "claims": [],
+            "unresolved_evidence": unresolved,
+            "recommended_actions": [
+                "Obtain an aggregate payment profile and event identity evidence."
+            ],
+            "confidence": 0.2,
+        }
+    else:
+        payload = {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "run_id": run_id,
+            "selected_hypothesis_id": None,
+            "assessments": [],
+            "claims": [],
+            "unresolved_evidence": unresolved,
+            "summary": (
+                "Payment event identity is unavailable, so duplicate and split explanations remain."
+            ),
+            "recommended_actions": [
+                "Obtain an aggregate payment profile and event identity evidence."
+            ],
+            "confidence": 0.2,
+        }
+    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+
+
+def _duplicate_payment_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+    incident_subjects: tuple[str, ...],
+    profile_relations: tuple[str, ...],
+) -> ModelResponse:
+    payment_seed = next(
+        (
+            subject
+            for subject in incident_subjects
+            if subject.startswith("seed.") and subject.endswith(".raw_payments")
+        ),
+        None,
+    )
+    if payment_seed is None:
+        raise AssertionError("payment duplicate brief must identify the source seed")
+    payment_relation = payment_seed.rsplit(".", 1)[-1]
+    lineages = tuple(
+        record
+        for record in _returned_records(messages, "get_dbt_lineage")
+        if getattr(record.content, "direction", None) == "downstream"
+    )
+    if not lineages:
+        tool = _tool_call(
+            "get_dbt_lineage",
+            {"node_id": payment_seed, "direction": "downstream"},
+            "payment-lineage",
+        )
+        return _with_intent(
+            tool,
+            strategy,
+            _intent(
+                "g_payment_lineage",
+                "MAP_IMPACT",
+                new_hypotheses=_duplicate_hypotheses(exact=False),
+            ),
+        )
+    schemas = tuple(
+        record
+        for record in _returned_records(messages, "get_relation_schema")
+        if getattr(record.content, "relation_name", None) == payment_relation
+    )
+    if not schemas:
+        tool = _tool_call(
+            "get_relation_schema",
+            {"relation_name": payment_relation},
+            "payment-schema",
+        )
+        return _with_intent(
+            tool,
+            strategy,
+            _intent(
+                "g_payment_schema",
+                "DISCRIMINATE_SCHEMA",
+                hypothesis_ids=_duplicate_hypothesis_ids(exact=False),
+            ),
+        )
+    profiles = tuple(
+        record
+        for record in _returned_records(messages, "get_relation_data_profile")
+        if getattr(record.content, "relation_name", None) == payment_relation
+    )
+    profile_attempts = _tool_attempts(messages, "get_relation_data_profile")
+    if not profiles and profile_attempts == 0:
+        tool = _tool_call(
+            "get_relation_data_profile",
+            {"relation_name": payment_relation},
+            "payment-profile",
+        )
+        return _with_intent(
+            tool,
+            strategy,
+            _intent(
+                "g_payment_profile",
+                "PROFILE_RELATION",
+                hypothesis_ids=_duplicate_hypothesis_ids(exact=False),
+            ),
+        )
+    if not profiles and (
+        profile_attempts > 0 or payment_relation not in profile_relations
+    ):
+        return _duplicate_insufficient_response(
+            messages,
+            agent_info,
+            run_id=run_id,
+            strategy=strategy,
+        )
+    return _duplicate_confirmed_response(
+        messages,
+        agent_info,
+        run_id=run_id,
+        strategy=strategy,
+        exact=False,
+    )
+
+
+def _exact_duplicate_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+    failure_node: str,
+    incident_subjects: tuple[str, ...],
+    schema_relations: tuple[str, ...],
+    profile_relations: tuple[str, ...],
+) -> ModelResponse:
+    lineages = tuple(
+        record
+        for record in _returned_records(messages, "get_dbt_lineage")
+        if getattr(record.content, "direction", None) == "upstream"
+    )
+    hypotheses = _duplicate_hypotheses(exact=True)
+    hypothesis_ids = _duplicate_hypothesis_ids(exact=True)
+    if not lineages:
+        tool = _tool_call(
+            "get_dbt_lineage",
+            {"node_id": failure_node, "direction": "upstream"},
+            "payment-upstream",
+        )
+        return _with_intent(
+            tool,
+            strategy,
+            _intent(
+                "g_payment_source",
+                "DISCOVER_SOURCE_RELATION",
+                new_hypotheses=hypotheses,
+            ),
+        )
+    source_relations = _source_relations(lineages)
+    source_relation = next(
+        (relation for relation in source_relations if relation in profile_relations),
+        next(
+            (relation for relation in source_relations if relation in schema_relations),
+            next(
+                (
+                    subject.rsplit(".", 1)[-1]
+                    for subject in incident_subjects
+                    if subject.startswith("seed.") and subject.endswith(".raw_payments")
+                ),
+                source_relations[0],
+            ),
+        ),
+    )
+    schemas = tuple(
+        record
+        for record in _returned_records(messages, "get_relation_schema")
+        if getattr(record.content, "relation_name", None) == source_relation
+    )
+    if not schemas:
+        tool = _tool_call(
+            "get_relation_schema",
+            {"relation_name": source_relation},
+            "payment-schema",
+        )
+        return _with_intent(
+            tool,
+            strategy,
+            _intent(
+                "g_payment_schema",
+                "DISCRIMINATE_SCHEMA",
+                hypothesis_ids=hypothesis_ids,
+            ),
+        )
+    profiles = tuple(
+        record
+        for record in _returned_records(messages, "get_relation_data_profile")
+        if getattr(record.content, "relation_name", None) == source_relation
+    )
+    if not profiles:
+        tool = _tool_call(
+            "get_relation_data_profile",
+            {"relation_name": source_relation},
+            "payment-profile",
+        )
+        return _with_intent(
+            tool,
+            strategy,
+            _intent(
+                "g_payment_profile",
+                "PROFILE_RELATION",
+                hypothesis_ids=hypothesis_ids,
+            ),
+        )
+    return _duplicate_confirmed_response(
+        messages,
+        agent_info,
+        run_id=run_id,
+        strategy=strategy,
+        exact=True,
+    )
+
+
 def _with_intent(
     response: ModelResponse,
     strategy: DiagnosticStrategy,
@@ -710,6 +1141,8 @@ def _runner(project_root: Path, strategy: DiagnosticStrategy) -> EvaluationRunne
                     _model_response,
                     run_id=run_id,
                     strategy=selected_strategy,
+                    signal_code=public_context.incident_brief.signal_code,
+                    incident_subjects=public_context.incident_brief.subjects,
                     schema_relations=tuple(
                         public_context.runtime["observable_relations"]["schema"]
                     ),
@@ -762,6 +1195,22 @@ async def test_p1_function_model_policy_matrix(
         (result.artifact_dir / "diagnosis.json").read_text(encoding="utf-8")
     )
     assert diagnosis["status"] in {status.value for status in DiagnosisStatus}
+
+    if case_id in P1_M9_SCENARIO_IDS:
+        expected_status, expected_root, expected_assets = M9_EXPECTED[case_id]
+        assert diagnosis["status"] == expected_status
+        assert diagnosis["root_cause_code"] == expected_root
+        assert diagnosis["affected_assets"] == expected_assets
+        if case_id == "duplicate_payment_coupon_b":
+            assert {
+                (item["evidence_kind"], item["subject"], item["reason_code"])
+                for item in diagnosis["unresolved_evidence"]
+            } == {
+                ("RELATION_DATA_PROFILE", "raw_payments", "RELATION_NOT_ALLOWED"),
+                ("PAYMENT_EVENT_IDENTITY", "raw_payments", "NOT_OBSERVABLE"),
+            }
+        else:
+            assert diagnosis["unresolved_evidence"] == []
 
     if case_id in P1_M8_SCENARIO_IDS:
         assert diagnosis["status"] == (

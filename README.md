@@ -4,9 +4,9 @@ DataIncidentGym 是一个可复现的数据事故诊断实验场：它在真实 
 
 ## 当前状态
 
-项目当前包含 M7 的确定性基建与 M8 必填字段空值故障族，形成“健康基线 → 隔离场景 → 证据调查 → 结构化诊断 → 确定性评测 → 六文件报告 → 健康恢复”的闭环。M7 基础设施已完成，模型质量观察为 1/8；M8 的 6 格确定性矩阵已通过，P1 题库累计 7/17。M8 尚未运行真实模型 smoke；正式 94-run benchmark 和策略优劣结论尚未开始。
+项目当前包含 M7 的确定性基建、M8 必填字段空值故障族和 M9 重复支付故障族，形成“健康基线 → 隔离场景 → 证据调查 → 结构化诊断 → 确定性评测 → 六文件报告 → 健康恢复”的闭环。M7 基础设施已完成，模型质量观察为 1/8；M9 的 20 格确定性矩阵已通过，P1 题库累计 10/17。M8 与 M9 尚未运行真实模型 smoke；正式 94-run benchmark 和策略优劣结论尚未开始。
 
-当前固定支持七个 P1 场景和一个 P0 回归场景：
+当前固定支持十个 P1 场景和一个 P0 回归场景：
 
 | case_id | variant_role | 观测场景 | expected_status |
 | --- | --- | --- | --- |
@@ -17,6 +17,9 @@ DataIncidentGym 是一个可复现的数据事故诊断实验场：它在真实 
 | `required_null_payment_id` | `DEV_CONFIRMABLE` | `raw_payments.id` 在选定支付记录上被置为 `NULL` | `CONFIRMED` |
 | `required_null_order_customer_a` | `TEST_CONFIRMABLE` | `raw_orders.user_id` 被置为 `NULL`，另有 `raw_customers.last_name` 干扰项 | `CONFIRMED` |
 | `required_null_order_customer_b` | `TEST_INSUFFICIENT` | 与 A 相同故障，但 `raw_orders` 必填字段 profile 不可见 | `INSUFFICIENT_EVIDENCE` |
+| `duplicate_payment_record` | `DEV_CONFIRMABLE` | `raw_payments` 出现完全重复支付记录，唯一性测试失败 | `CONFIRMED` |
+| `duplicate_payment_coupon_a` | `TEST_CONFIRMABLE` | coupon 渠道出现业务指纹重复，但 dbt 构建成功 | `CONFIRMED` |
+| `duplicate_payment_coupon_b` | `TEST_INSUFFICIENT` | 与 A 相同故障，但支付画像和事件身份证据不可见 | `INSUFFICIENT_EVIDENCE` |
 | `schema_rename_payment_amount` | P0 regression | `raw_payments.amount` 改名为 `total_amount` | `CONFIRMED` |
 
 M7 建立、M8 延续共享的策略中立诊断结果与评测契约。Diagnostic Kernel v3 显式维护候选假设、证据缺口、主张与证据绑定及剩余预算；Static Skill 使用同一套六工具和终态契约，但不创建 Kernel 状态。私有 ScenarioSpec/verification 仅由实验编排和 evaluator 读取，模型只接收公开 IncidentBrief、dbt artifact、profile snapshot 和六个只读工具。
@@ -129,7 +132,7 @@ uv lock --check
 git diff --check
 ```
 
-`integration` 和普通 `e2e` 需要 Docker Desktop 与 PostgreSQL。真实模型测试默认跳过；M7 开发 smoke 的当前模型质量观察为 1/8，M8 本轮未运行真实模型 smoke。任何开发 smoke 都需要单独授权，且不允许重试或替换样本、不计入正式 94-run benchmark。真实模型验收必须显式启用，会产生外部模型请求：
+`integration` 和普通 `e2e` 需要 Docker Desktop 与 PostgreSQL。真实模型测试默认跳过；M7 开发 smoke 的当前模型质量观察为 1/8，M8 与 M9 未运行真实模型 smoke。M9 的 semantic duplicate 变体刻意覆盖 dbt 成功但数据异常的路径；已知 Windows 长循环原生 dbt/Python 崩溃仍记为环境未验证。任何开发 smoke 都需要单独授权，且不允许重试或替换样本、不计入正式 94-run benchmark。真实模型验收必须显式启用，会产生外部模型请求：
 
 ```powershell
 $env:DIG_RUN_REAL_MODEL_TESTS = '1'

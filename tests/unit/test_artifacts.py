@@ -137,6 +137,36 @@ def test_static_run_writes_exactly_six_files_without_kernel_state(tmp_path: Path
     assert "Kernel 调查状态" not in report
 
 
+def test_expected_anomaly_keeps_private_status_out_of_the_six_file_contract(
+    tmp_path: Path,
+) -> None:
+    evaluation = _evaluation().model_copy(
+        update={
+            "incident_case_id": "duplicate_payment_coupon_a",
+            "variant_role": "TEST_CONFIRMABLE",
+        }
+    )
+    run = _artifact_run().model_copy(
+        update={
+            "incident_case_id": "duplicate_payment_coupon_a",
+            "evaluation": evaluation,
+        }
+    )
+
+    output = ArtifactWriter(tmp_path, run_command=_git_command).write(run)
+
+    assert {path.name for path in output.iterdir()} == set(ARTIFACT_FILENAMES)
+    metadata = (output / "metadata.json").read_text(encoding="utf-8")
+    evaluation_json = (output / "evaluation.json").read_text(encoding="utf-8")
+    report = (output / "report.md").read_text(encoding="utf-8")
+    assert '"expected_status": "CONFIRMED"' in metadata
+    assert '"evaluation_status": "PASSED"' in metadata
+    assert "ENVIRONMENT_VERIFIED" in report
+    assert "verification_status" not in metadata
+    assert "verification_status" not in evaluation_json
+    assert "EXPECTED_ANOMALY" not in report
+
+
 def test_writer_refuses_overwrite_and_keeps_the_original_bundle(tmp_path: Path) -> None:
     writer = ArtifactWriter(tmp_path, run_command=_git_command)
     output = writer.write(_artifact_run())
