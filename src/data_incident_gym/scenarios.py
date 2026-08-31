@@ -41,8 +41,18 @@ P1_M8_SCENARIO_IDS = (
     "required_null_order_customer_a",
     "required_null_order_customer_b",
 )
+P1_M9_SCENARIO_IDS = (
+    "duplicate_payment_record",
+    "duplicate_payment_coupon_a",
+    "duplicate_payment_coupon_b",
+)
 REGRESSION_SCENARIO_IDS = ("schema_rename_payment_amount",)
-SUPPORTED_SCENARIO_IDS = REGRESSION_SCENARIO_IDS + P1_M7_SCENARIO_IDS + P1_M8_SCENARIO_IDS
+SUPPORTED_SCENARIO_IDS = (
+    REGRESSION_SCENARIO_IDS
+    + P1_M7_SCENARIO_IDS
+    + P1_M8_SCENARIO_IDS
+    + P1_M9_SCENARIO_IDS
+)
 
 
 class ScenarioError(RuntimeError):
@@ -53,6 +63,7 @@ class FaultFamily(StrEnum):
     SCHEMA_RENAME = "SCHEMA_RENAME"
     SCHEMA_TYPE_CHANGE = "SCHEMA_TYPE_CHANGE"
     REQUIRED_FIELD_NULL = "REQUIRED_FIELD_NULL"
+    PAYMENT_DUPLICATE = "PAYMENT_DUPLICATE"
     ORDER_VOLUME_PATTERN = "ORDER_VOLUME_PATTERN"
 
 
@@ -164,6 +175,53 @@ class SetFieldNullMutation(BaseModel):
         return self
 
 
+PaymentRow = tuple[int, int, str, int]
+
+_M9_SOURCE_PAYMENT_ROWS: dict[int, PaymentRow] = {
+    1: (1, 1, "credit_card", 1000),
+    47: (47, 42, "coupon", 1700),
+    66: (66, 58, "coupon", 1800),
+    86: (86, 76, "coupon", 200),
+}
+_M9_DUPLICATE_BATCHES = {
+    ("EXACT_RECORD", (1,), (1,)),
+    ("SEMANTIC_FINGERPRINT", (47, 66, 86), (114, 115, 116)),
+}
+
+
+class DuplicatePaymentRowsMutation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["DUPLICATE_PAYMENT_ROWS"]
+    purpose: Literal["FAULT"]
+    relation: Literal["raw_payments"]
+    mode: Literal["EXACT_RECORD", "SEMANTIC_FINGERPRINT"]
+    source_payment_ids: tuple[StrictInt, ...]
+    inserted_payment_ids: tuple[StrictInt, ...]
+
+    @model_validator(mode="after")
+    def validate_frozen_batch(self) -> Self:
+        key = (self.mode, self.source_payment_ids, self.inserted_payment_ids)
+        if key not in _M9_DUPLICATE_BATCHES:
+            raise ValueError("unsupported duplicate-payment batch")
+        return self
+
+
+def duplicate_payment_rows(
+    mutation: DuplicatePaymentRowsMutation,
+) -> tuple[tuple[PaymentRow, PaymentRow], ...]:
+    pairs: list[tuple[PaymentRow, PaymentRow]] = []
+    for source_id, inserted_id in zip(
+        mutation.source_payment_ids,
+        mutation.inserted_payment_ids,
+        strict=True,
+    ):
+        source = _M9_SOURCE_PAYMENT_ROWS[source_id]
+        inserted = (inserted_id, source[1], source[2], source[3])
+        pairs.append((source, inserted))
+    return tuple(pairs)
+
+
 class NoMutation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -175,6 +233,7 @@ ScenarioMutation = Annotated[
     | ColumnTypeMutation
     | AddNullableColumnMutation
     | SetFieldNullMutation
+    | DuplicatePaymentRowsMutation
     | NoMutation,
     Field(discriminator="kind"),
 ]
@@ -223,6 +282,7 @@ class ObservableEvidenceGap(BaseModel):
         "RELATION_SCHEMA",
         "RELATION_DATA_PROFILE",
         "TRANSFORMATION_DEFINITION",
+        "PAYMENT_EVENT_IDENTITY",
     ]
     subject: StrictStr
     reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED"]
@@ -234,6 +294,7 @@ class ObservableEvidenceGap(BaseModel):
             "RELATION_SCHEMA": "get_relation_schema",
             "RELATION_DATA_PROFILE": "get_relation_data_profile",
             "TRANSFORMATION_DEFINITION": None,
+            "PAYMENT_EVENT_IDENTITY": None,
         }[self.gap_kind]
         if self.tool_name != expected:
             raise ValueError("observable evidence gap/tool mismatch")
@@ -363,8 +424,13 @@ class ScenarioSpec(BaseModel):
                 raise ValueError("insufficient scenarios require two compatible causes")
             if len(self.observable_evidence_contract.unresolved_gaps) < 2:
                 raise ValueError("insufficient scenarios require decisive evidence gaps")
-            if self.direct_failure is None or not self.affected_assets:
-                raise ValueError("insufficient scenarios retain the observed failure scope")
+            if not self.affected_assets:
+                raise ValueError("insufficient scenarios retain the observed impact scope")
+            if (
+                self.direct_failure is None
+                and self.fault_family is not FaultFamily.PAYMENT_DUPLICATE
+            ):
+                raise ValueError("this insufficient scenario requires a direct dbt failure")
         elif self.answerability is Answerability.CONFIRMABLE:
             if not self.ground_truth_or_acceptable_root_causes:
                 raise ValueError("confirmable scenarios require an accepted root cause")
@@ -385,6 +451,40 @@ class ScenarioSpec(BaseModel):
             isinstance(mutation, ColumnRenameMutation) for mutation in mutations
         ):
             raise ValueError("type-change scenario cannot contain rename mutation")
+        if self.fault_family is FaultFamily.PAYMENT_DUPLICATE:
+            duplicate_mutations = tuple(
+                mutation
+                for mutation in mutations
+                if isinstance(mutation, DuplicatePaymentRowsMutation)
+            )
+            nullable_distractors = tuple(
+                mutation
+                for mutation in mutations
+                if isinstance(mutation, AddNullableColumnMutation)
+            )
+            if len(duplicate_mutations) != 1:
+                raise ValueError("duplicate-payment scenarios require one frozen payment batch")
+            is_test_role = self.variant_role in {
+                VariantRole.TEST_CONFIRMABLE,
+                VariantRole.TEST_INSUFFICIENT,
+            }
+            expected_mode = "SEMANTIC_FINGERPRINT" if is_test_role else "EXACT_RECORD"
+            if duplicate_mutations[0].mode != expected_mode:
+                raise ValueError("duplicate-payment role and mutation mode do not match")
+            if len(nullable_distractors) != (1 if is_test_role else 0):
+                raise ValueError("duplicate-payment test roles require one schema distractor")
+            if is_test_role:
+                if len(self.distractors) != 1 or not isinstance(
+                    self.distractors[0],
+                    NullableColumnSchemaDriftDistractor,
+                ):
+                    raise ValueError("duplicate-payment test roles need the declared distractor")
+                if self.direct_failure is not None or not self.affected_assets:
+                    raise ValueError("semantic duplicate scenarios are dbt-success anomalies")
+            elif self.distractors:
+                raise ValueError("duplicate-payment development role has no distractor")
+        elif any(isinstance(item, DuplicatePaymentRowsMutation) for item in mutations):
+            raise ValueError("DUPLICATE_PAYMENT_ROWS is only valid for payment duplicates")
         if self.fault_family is FaultFamily.REQUIRED_FIELD_NULL:
             faults = tuple(
                 mutation

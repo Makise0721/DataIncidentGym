@@ -54,8 +54,17 @@ def test_private_case_ids_never_reach_diagnosis_sources() -> None:
         "schema_type_change_order_customer_b",
         "order_volume_pattern_a",
         "schema_rename_payment_amount",
+        "duplicate_payment_record",
+        "duplicate_payment_coupon_a",
+        "duplicate_payment_coupon_b",
     ):
         assert case_id not in source
         assert case_id == load_scenario_spec(case_id).incident_case_id
 
     assert tuple(load_scenario_spec(case_id).incident_case_id for case_id in SUPPORTED_SCENARIO_IDS)
+
+
+def test_duplicate_payment_private_rows_never_reach_diagnosis_sources() -> None:
+    source = "\n".join(path.read_text(encoding="utf-8") for path in _diagnosis_source_paths())
+    for private_value in ("47", "66", "86", "114", "115", "116", "coupon_count"):
+        assert private_value not in source

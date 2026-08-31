@@ -5,8 +5,13 @@ import pytest
 
 from data_incident_gym.scenarios import (
     Answerability,
+    DuplicatePaymentRowsMutation,
+    P1_M7_SCENARIO_IDS,
+    P1_M8_SCENARIO_IDS,
+    P1_M9_SCENARIO_IDS,
     ScenarioError,
     VariantRole,
+    duplicate_payment_rows,
     load_scenario_spec,
     parse_scenario_spec,
 )
@@ -121,6 +126,108 @@ def test_m8_public_brief_contains_no_private_row_or_answer_contract(
         "INSUFFICIENT_EVIDENCE",
     ):
         assert forbidden not in public
+
+
+def test_m9_catalog_and_test_twin_are_exact(project_root: Path) -> None:
+    assert P1_M9_SCENARIO_IDS == (
+        "duplicate_payment_record",
+        "duplicate_payment_coupon_a",
+        "duplicate_payment_coupon_b",
+    )
+    assert len(P1_M7_SCENARIO_IDS + P1_M8_SCENARIO_IDS + P1_M9_SCENARIO_IDS) == 10
+
+    dev, confirmable, insufficient = (
+        load_scenario_spec(case_id, project_root) for case_id in P1_M9_SCENARIO_IDS
+    )
+    assert dev.variant_role is VariantRole.DEV_CONFIRMABLE
+    assert confirmable.variant_role is VariantRole.TEST_CONFIRMABLE
+    assert insufficient.variant_role is VariantRole.TEST_INSUFFICIENT
+    for field_name in (
+        "incident_brief",
+        "reset_and_injection_contract",
+        "direct_failure",
+        "affected_assets",
+        "distractors",
+    ):
+        assert getattr(confirmable, field_name) == getattr(insufficient, field_name)
+    assert confirmable.direct_failure is None
+    assert insufficient.direct_failure is None
+    assert confirmable.observable_evidence_contract.profile_relations == ("raw_payments",)
+    assert insufficient.observable_evidence_contract.profile_relations == ()
+    assert tuple(
+        (gap.gap_kind, gap.subject, gap.reason_code, gap.tool_name)
+        for gap in insufficient.observable_evidence_contract.unresolved_gaps
+    ) == (
+        (
+            "RELATION_DATA_PROFILE",
+            "raw_payments",
+            "RELATION_NOT_ALLOWED",
+            "get_relation_data_profile",
+        ),
+        ("PAYMENT_EVENT_IDENTITY", "raw_payments", "NOT_OBSERVABLE", None),
+    )
+
+    exact = next(
+        item
+        for item in dev.reset_and_injection_contract.mutations
+        if isinstance(item, DuplicatePaymentRowsMutation)
+    )
+    semantic = next(
+        item
+        for item in confirmable.reset_and_injection_contract.mutations
+        if isinstance(item, DuplicatePaymentRowsMutation)
+    )
+    assert duplicate_payment_rows(exact) == (
+        ((1, 1, "credit_card", 1000), (1, 1, "credit_card", 1000)),
+    )
+    assert duplicate_payment_rows(semantic) == (
+        ((47, 42, "coupon", 1700), (114, 42, "coupon", 1700)),
+        ((66, 58, "coupon", 1800), (115, 58, "coupon", 1800)),
+        ((86, 76, "coupon", 200), (116, 76, "coupon", 200)),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    (
+        lambda mutation: mutation.update(source_payment_ids=[2]),
+        lambda mutation: mutation.update(inserted_payment_ids=[117]),
+        lambda mutation: mutation.update(mode="EXACT_RECORD"),
+        lambda mutation: mutation.update(relation="raw_orders"),
+        lambda mutation: mutation.update(
+            source_payment_ids=[66, 47, 86], inserted_payment_ids=[115, 114, 116]
+        ),
+        lambda mutation: mutation.update(row=[114, 42, "coupon", 1700]),
+    ),
+    ids=("source", "inserted", "mode", "relation", "order", "payload"),
+)
+def test_m9_rejects_any_non_frozen_duplicate_batch(
+    project_root: Path,
+    mutator,
+) -> None:
+    source = project_root / "config" / "scenarios" / "duplicate_payment_coupon_a.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    mutator(payload["reset_and_injection_contract"]["mutations"][0])
+    with pytest.raises(ScenarioError):
+        parse_scenario_spec(json.dumps(payload), "unsupported M9 duplicate batch")
+
+
+def test_m9_public_brief_contains_no_private_duplicate_contract(project_root: Path) -> None:
+    for case_id in P1_M9_SCENARIO_IDS:
+        public = load_scenario_spec(case_id, project_root).incident_brief.model_dump_json()
+        for forbidden in (
+            "source_payment_ids",
+            "inserted_payment_ids",
+            "SOURCE_EXACT_PAYMENT_DUPLICATE",
+            "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+            "LEGITIMATE_SPLIT_PAYMENT",
+            "TEST_INSUFFICIENT",
+            "INSUFFICIENT_EVIDENCE",
+            "114",
+            "115",
+            "116",
+        ):
+            assert forbidden not in public
 
 
 def test_public_brief_does_not_include_private_scenario_fields(project_root: Path) -> None:
