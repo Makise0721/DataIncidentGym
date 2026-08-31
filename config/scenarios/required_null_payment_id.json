@@ -1,0 +1,74 @@
+{
+  "schema_version": "scenario.v1",
+  "incident_case_id": "required_null_payment_id",
+  "suite": "P1",
+  "fault_family": "REQUIRED_FIELD_NULL",
+  "variant_role": "DEV_CONFIRMABLE",
+  "answerability": "CONFIRMABLE",
+  "seed": {
+    "schema_version": "seed.v1",
+    "fixture_path": "third_party/jaffle_shop",
+    "fixture_commit": "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb",
+    "seed_names": ["raw_customers", "raw_orders", "raw_payments"],
+    "refresh": "FULL_REFRESH"
+  },
+  "incident_brief": {
+    "schema_version": "incident_brief.v1",
+    "signal_code": "DBT_TEST_FAILED",
+    "summary": "A required-field dbt test failed while processing payment data.",
+    "subjects": [
+      "test.jaffle_shop.not_null_stg_payments_payment_id.c19cc50075",
+      "raw_payments"
+    ],
+    "logical_observed_at": "2018-04-09T12:00:00Z",
+    "observations": [
+      {
+        "kind": "DBT_TEST_FAILURE",
+        "subject": "test.jaffle_shop.not_null_stg_payments_payment_id.c19cc50075",
+        "value": "fail"
+      }
+    ]
+  },
+  "reset_and_injection_contract": {
+    "schema_version": "reset_injection.v1",
+    "mutations": [
+      {
+        "kind": "SET_FIELD_NULL",
+        "purpose": "FAULT",
+        "relation": "raw_payments",
+        "column": "id",
+        "selector_column": "order_id",
+        "selector_value": 1,
+        "expected_value": 1
+      }
+    ],
+    "restore_strategy": "FULL_REFRESH_BASELINE"
+  },
+  "ground_truth_or_acceptable_root_causes": ["SOURCE_REQUIRED_FIELD_NULL"],
+  "direct_failure": "test.jaffle_shop.not_null_stg_payments_payment_id.c19cc50075",
+  "affected_assets": ["model.jaffle_shop.stg_payments"],
+  "observable_evidence_contract": {
+    "schema_version": "observable_evidence.v1",
+    "schema_relations": ["raw_payments"],
+    "profile_relations": ["raw_payments"],
+    "history_relations": [],
+    "unresolved_gaps": []
+  },
+  "required_evidence_types": [
+    "DBT_RUN_RESULTS",
+    "DBT_NODE_ERROR",
+    "DBT_LINEAGE",
+    "RELATION_SCHEMA",
+    "RELATION_DATA_PROFILE"
+  ],
+  "forbidden_leakage": [
+    "SCENARIO_SPEC",
+    "GROUND_TRUTH",
+    "VARIANT_ROLE",
+    "ANSWERABILITY",
+    "EXPECTED_STATUS",
+    "PRIVATE_PATH"
+  ],
+  "distractors": [],
+  "expected_status": "CONFIRMED"
+}

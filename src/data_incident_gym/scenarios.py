@@ -11,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictInt,
     StrictStr,
     ValidationError,
     field_validator,
@@ -35,8 +36,13 @@ P1_M7_SCENARIO_IDS = (
     "schema_type_change_order_customer_b",
     "order_volume_pattern_a",
 )
+P1_M8_SCENARIO_IDS = (
+    "required_null_payment_id",
+    "required_null_order_customer_a",
+    "required_null_order_customer_b",
+)
 REGRESSION_SCENARIO_IDS = ("schema_rename_payment_amount",)
-SUPPORTED_SCENARIO_IDS = REGRESSION_SCENARIO_IDS + P1_M7_SCENARIO_IDS
+SUPPORTED_SCENARIO_IDS = REGRESSION_SCENARIO_IDS + P1_M7_SCENARIO_IDS + P1_M8_SCENARIO_IDS
 
 
 class ScenarioError(RuntimeError):
@@ -46,6 +52,7 @@ class ScenarioError(RuntimeError):
 class FaultFamily(StrEnum):
     SCHEMA_RENAME = "SCHEMA_RENAME"
     SCHEMA_TYPE_CHANGE = "SCHEMA_TYPE_CHANGE"
+    REQUIRED_FIELD_NULL = "REQUIRED_FIELD_NULL"
     ORDER_VOLUME_PATTERN = "ORDER_VOLUME_PATTERN"
 
 
@@ -125,6 +132,38 @@ class AddNullableColumnMutation(BaseModel):
     nullable: Literal[True]
 
 
+_M8_NULL_TARGETS: dict[tuple[str, str, str, str, int], int | str] = {
+    ("FAULT", "raw_payments", "id", "order_id", 1): 1,
+    ("FAULT", "raw_orders", "user_id", "id", 42): 92,
+    ("DISTRACTOR", "raw_customers", "last_name", "id", 7): "M.",
+}
+
+
+class SetFieldNullMutation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["SET_FIELD_NULL"]
+    purpose: Literal["FAULT", "DISTRACTOR"]
+    relation: Literal["raw_payments", "raw_orders", "raw_customers"]
+    column: Literal["id", "user_id", "last_name"]
+    selector_column: Literal["id", "order_id"]
+    selector_value: StrictInt
+    expected_value: StrictInt | StrictStr
+
+    @model_validator(mode="after")
+    def validate_frozen_target(self) -> Self:
+        key = (
+            self.purpose,
+            self.relation,
+            self.column,
+            self.selector_column,
+            self.selector_value,
+        )
+        if _M8_NULL_TARGETS.get(key) != self.expected_value:
+            raise ValueError("unsupported required-field NULL mutation")
+        return self
+
+
 class NoMutation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -132,7 +171,11 @@ class NoMutation(BaseModel):
 
 
 ScenarioMutation = Annotated[
-    ColumnRenameMutation | ColumnTypeMutation | AddNullableColumnMutation | NoMutation,
+    ColumnRenameMutation
+    | ColumnTypeMutation
+    | AddNullableColumnMutation
+    | SetFieldNullMutation
+    | NoMutation,
     Field(discriminator="kind"),
 ]
 
@@ -176,10 +219,25 @@ class ResetAndInjectionContract(BaseModel):
 class ObservableEvidenceGap(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    gap_kind: Literal["RELATION_SCHEMA", "TRANSFORMATION_DEFINITION"]
+    gap_kind: Literal[
+        "RELATION_SCHEMA",
+        "RELATION_DATA_PROFILE",
+        "TRANSFORMATION_DEFINITION",
+    ]
     subject: StrictStr
     reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED"]
-    tool_name: Literal["get_relation_schema"] | None
+    tool_name: Literal["get_relation_schema", "get_relation_data_profile"] | None
+
+    @model_validator(mode="after")
+    def validate_tool_binding(self) -> Self:
+        expected = {
+            "RELATION_SCHEMA": "get_relation_schema",
+            "RELATION_DATA_PROFILE": "get_relation_data_profile",
+            "TRANSFORMATION_DEFINITION": None,
+        }[self.gap_kind]
+        if self.tool_name != expected:
+            raise ValueError("observable evidence gap/tool mismatch")
+        return self
 
 
 class ObservableEvidenceContract(BaseModel):
@@ -201,7 +259,7 @@ class ObservableEvidenceContract(BaseModel):
         return values
 
 
-class DistractorSpec(BaseModel):
+class NullableColumnSchemaDriftDistractor(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["NULLABLE_COLUMN_SCHEMA_DRIFT"]
@@ -209,6 +267,22 @@ class DistractorSpec(BaseModel):
     column: Literal["source_batch_note"]
     data_type: Literal["text"]
     nullable: Literal[True]
+
+
+class NullableFieldNullDistractor(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["NULLABLE_FIELD_NULL"]
+    relation: Literal["raw_customers"]
+    column: Literal["last_name"]
+    selector_column: Literal["id"]
+    selector_value: Literal[7]
+
+
+DistractorSpec = Annotated[
+    NullableColumnSchemaDriftDistractor | NullableFieldNullDistractor,
+    Field(discriminator="kind"),
+]
 
 
 class ScenarioSpec(BaseModel):
@@ -311,6 +385,47 @@ class ScenarioSpec(BaseModel):
             isinstance(mutation, ColumnRenameMutation) for mutation in mutations
         ):
             raise ValueError("type-change scenario cannot contain rename mutation")
+        if self.fault_family is FaultFamily.REQUIRED_FIELD_NULL:
+            faults = tuple(
+                mutation
+                for mutation in mutations
+                if isinstance(mutation, SetFieldNullMutation) and mutation.purpose == "FAULT"
+            )
+            distractor_mutations = tuple(
+                mutation
+                for mutation in mutations
+                if isinstance(mutation, SetFieldNullMutation)
+                and mutation.purpose == "DISTRACTOR"
+            )
+            if len(faults) != 1 or any(
+                not isinstance(mutation, SetFieldNullMutation)
+                for mutation in mutations
+            ):
+                raise ValueError("required-null scenarios must use one NULL fault mutation")
+            is_test_role = self.variant_role in {
+                VariantRole.TEST_CONFIRMABLE,
+                VariantRole.TEST_INSUFFICIENT,
+            }
+            if len(distractor_mutations) != (1 if is_test_role else 0):
+                raise ValueError("required-null test roles must use one NULL distractor")
+            if is_test_role:
+                if len(self.distractors) != 1 or not isinstance(
+                    self.distractors[0], NullableFieldNullDistractor
+                ):
+                    raise ValueError("required-null test roles need a NULL distractor declaration")
+                distractor = distractor_mutations[0]
+                declared = self.distractors[0]
+                if (
+                    distractor.relation != declared.relation
+                    or distractor.column != declared.column
+                    or distractor.selector_column != declared.selector_column
+                    or distractor.selector_value != declared.selector_value
+                ):
+                    raise ValueError("required-null distractor does not match its declaration")
+            elif self.distractors:
+                raise ValueError("required-null development role must not contain distractors")
+        elif any(isinstance(mutation, SetFieldNullMutation) for mutation in mutations):
+            raise ValueError("SET_FIELD_NULL is only valid for required-null scenarios")
         return self
 
     def canonical_json(self) -> str:
