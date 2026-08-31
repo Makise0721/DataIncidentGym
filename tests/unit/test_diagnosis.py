@@ -224,6 +224,41 @@ def test_insufficient_diagnosis_accepts_profile_evidence_gap() -> None:
     assert diagnosis.unresolved_evidence[0].evidence_kind == "RELATION_DATA_PROFILE"
 
 
+def test_insufficient_diagnosis_accepts_payment_event_identity_gap() -> None:
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="Payment event identity is unavailable.",
+        unresolved_evidence=(
+            {
+                "evidence_kind": "PAYMENT_EVENT_IDENTITY",
+                "subject": "raw_payments",
+                "reason_code": "NOT_OBSERVABLE",
+            },
+        ),
+        confidence=0.2,
+    )
+
+    assert diagnosis.unresolved_evidence[0].evidence_kind == "PAYMENT_EVENT_IDENTITY"
+
+
+def test_payment_event_identity_gap_rejects_relation_not_allowed() -> None:
+    with pytest.raises(ValueError, match="PAYMENT_EVENT_IDENTITY"):
+        Diagnosis(
+            status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+            run_id=RUN_ID,
+            summary="Payment event identity is unavailable.",
+            unresolved_evidence=(
+                {
+                    "evidence_kind": "PAYMENT_EVENT_IDENTITY",
+                    "subject": "raw_payments",
+                    "reason_code": "RELATION_NOT_ALLOWED",
+                },
+            ),
+            confidence=0.2,
+        )
+
+
 def test_diagnosis_is_frozen_and_rejects_extra_fields() -> None:
     diagnosis = Diagnosis(
         status=DiagnosisStatus.MODEL_ERROR,

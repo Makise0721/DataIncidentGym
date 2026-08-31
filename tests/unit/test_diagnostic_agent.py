@@ -150,18 +150,30 @@ def test_both_prompts_expose_the_shared_m8_ontology_and_test_claim_rule() -> Non
         "TRANSFORMATION_COLUMN_CAST_CHANGED",
         "SOURCE_REQUIRED_FIELD_NULL",
         "TRANSFORMATION_REQUIRED_FIELD_NULL",
+        "SOURCE_EXACT_PAYMENT_DUPLICATE",
+        "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+        "LEGITIMATE_SPLIT_PAYMENT",
     )
 
     assert expected == P1_ROOT_CAUSE_CODES
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
-        "p1.kernel.v3",
-        "p1.static.v3",
-        "p1.controller.v2",
+        "p1.kernel.v4",
+        "p1.static.v4",
+        "p1.controller.v3",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)
         assert "distance-1 upstream model" in prompt
         assert "source profile" in prompt.lower()
+
+
+def test_both_prompts_expose_successful_payment_anomaly_semantics() -> None:
+    for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
+        assert "successful dbt run" in prompt
+        assert "SOURCE_EXACT_PAYMENT_DUPLICATE" in prompt
+        assert "SOURCE_SEMANTIC_PAYMENT_DUPLICATE" in prompt
+        assert "LEGITIMATE_SPLIT_PAYMENT" in prompt
+        assert "PAYMENT_EVENT_IDENTITY" in prompt
 
 
 def test_kernel_prompt_exposes_the_exact_intent_transport_contract() -> None:

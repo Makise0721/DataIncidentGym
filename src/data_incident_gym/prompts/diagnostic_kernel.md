@@ -19,7 +19,9 @@ Each new_hypotheses item has exactly hypothesis_id and root_cause_code, for exam
 {"hypothesis_id":"h_source_type","root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"}
 The only root_cause_code values are SOURCE_SCHEMA_COLUMN_RENAMED,
 SOURCE_SCHEMA_COLUMN_TYPE_CHANGED, TRANSFORMATION_COLUMN_CAST_CHANGED,
-SOURCE_REQUIRED_FIELD_NULL, and TRANSFORMATION_REQUIRED_FIELD_NULL.
+SOURCE_REQUIRED_FIELD_NULL, TRANSFORMATION_REQUIRED_FIELD_NULL,
+SOURCE_EXACT_PAYMENT_DUPLICATE, SOURCE_SEMANTIC_PAYMENT_DUPLICATE, and
+LEGITIMATE_SPLIT_PAYMENT.
 
 Use one fresh gap_id per business call. Choose the gap kind that matches the business tool,
 reference only registered hypothesis IDs, and register at least two compatible hypotheses
@@ -32,6 +34,20 @@ relation profile reports a positive null_count for the implicated column. A down
 not-null failure without that source profile is also compatible with a transformation that
 introduced the NULL, so return INSUFFICIENT_EVIDENCE when the source profile and transformation
 definition are both unavailable.
+
+A successful dbt run proves only that the executed models and tests completed. It does not prove
+that a public data-quality alert is healthy. For a payment duplicate alert, inspect the declared
+raw_payments aggregate profile and downstream lineage.
+
+Confirm SOURCE_EXACT_PAYMENT_DUPLICATE only when the declared id business-key duplicate count is
+positive. Confirm SOURCE_SEMANTIC_PAYMENT_DUPLICATE only when id duplicates are zero and the
+declared order_payment_amount business-fingerprint duplicate count is positive. Bind affected
+models to downstream lineage.
+
+When the raw_payments profile is unavailable and payment idempotency or channel-event identity is
+not observable, preserve SOURCE_SEMANTIC_PAYMENT_DUPLICATE and LEGITIMATE_SPLIT_PAYMENT as
+alternatives and return INSUFFICIENT_EVIDENCE. PAYMENT_EVENT_IDENTITY is a missing-evidence
+declaration, not a business tool.
 
 When the direct failed node is a dbt test, affected assets are its distance-1 upstream model
 dependencies, not the test node or the upstream seed relations. Bind those model claims to

@@ -17,7 +17,7 @@ from data_incident_gym.diagnostic_agent import (
 from data_incident_gym.run_context import resolve_run_context
 from data_incident_gym.scenarios import load_scenario_spec
 
-RUN_IDS = tuple(f"{digit}" * 32 for digit in "0123456")
+RUN_IDS = tuple(f"{digit}" * 32 for digit in "0123456789")
 CASE_IDS = (
     "schema_type_change_payment_amount",
     "schema_type_change_order_customer_a",
@@ -26,6 +26,9 @@ CASE_IDS = (
     "required_null_payment_id",
     "required_null_order_customer_a",
     "required_null_order_customer_b",
+    "duplicate_payment_record",
+    "duplicate_payment_coupon_a",
+    "duplicate_payment_coupon_b",
 )
 
 

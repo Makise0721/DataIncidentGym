@@ -340,6 +340,64 @@ def _fingerprint(run_id: str, tool_name: str, arguments: dict[str, str]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _duplicate_count(
+    profile: RelationDataProfileFact,
+    collection: str,
+    name: str,
+) -> int | None:
+    facts = getattr(profile.snapshot, collection)
+    fact = next((item for item in facts if item.name == name), None)
+    return None if fact is None else fact.duplicate_count
+
+
+def _duplicate_root_supported(
+    root_cause_code: str,
+    records: list[EvidenceRecord],
+    incident_subjects: set[str],
+) -> bool:
+    runs = [
+        record.content
+        for record in records
+        if isinstance(record.content, DbtRunResultsFact)
+    ]
+    profiles = [
+        record.content
+        for record in records
+        if isinstance(record.content, RelationDataProfileFact)
+        and record.content.relation_name in incident_subjects
+    ]
+    if len(runs) != 1 or len(profiles) != 1:
+        return False
+    profile = profiles[0]
+    key_count = _duplicate_count(profile, "business_key_duplicates", "id")
+    fingerprint_count = _duplicate_count(
+        profile,
+        "business_fingerprint_duplicates",
+        "order_payment_amount",
+    )
+    payment_method_group = next(
+        (item for item in profile.snapshot.groups if item.name == "payment_method"),
+        None,
+    )
+    if root_cause_code == "SOURCE_EXACT_PAYMENT_DUPLICATE":
+        return (
+            key_count is not None
+            and key_count > 0
+            and fingerprint_count is not None
+            and payment_method_group is not None
+        )
+    if root_cause_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE":
+        return (
+            runs[0].run_status == "SUCCEEDED"
+            and not runs[0].failed_nodes
+            and key_count == 0
+            and fingerprint_count is not None
+            and fingerprint_count > 0
+            and payment_method_group is not None
+        )
+    return False
+
+
 class DiagnosticKernel:
     def __init__(
         self,
@@ -537,7 +595,7 @@ class DiagnosticKernel:
         ):
             self._error("NODE_ARGUMENT_NOT_PROVEN", fingerprint)
         if tool_name == "get_dbt_lineage" and arguments["node_id"] not in (
-            self._known_failed_nodes() | self._known_lineage_nodes()
+            self._known_failed_nodes() | self._known_lineage_nodes() | self._incident_subjects
         ):
             self._error("NODE_ARGUMENT_NOT_PROVEN", fingerprint)
         if (
@@ -766,24 +824,55 @@ class DiagnosticKernel:
             isinstance(record.content, (RelationSchemaFact, RelationDataProfileFact))
             for record in root_records
         )
-        if self._incident_subjects and not any(
-            error.node_id in self._incident_subjects for error in node_errors
-        ):
-            self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
-        upstream_relations = {
-            node.name
-            for record in self._records
-            if isinstance(record.content, DbtLineageFact)
-            and record.content.direction == "upstream"
-            and record.content.node_id in {error.node_id for error in node_errors}
-            for node in record.content.related_nodes
+        duplicate_root = root_claim.value in {
+            "SOURCE_EXACT_PAYMENT_DUPLICATE",
+            "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
         }
-        if not has_node_error or not has_relation_fact or not any(
-            getattr(record.content, "relation_name", None) in upstream_relations
-            for record in root_records
-            if isinstance(record.content, (RelationSchemaFact, RelationDataProfileFact))
-        ):
-            self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
+        if duplicate_root:
+            if not _duplicate_root_supported(
+                root_claim.value,
+                root_records,
+                self._incident_subjects,
+            ):
+                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
+            if root_claim.value == "SOURCE_EXACT_PAYMENT_DUPLICATE":
+                if self._incident_subjects and not any(
+                    error.node_id in self._incident_subjects for error in node_errors
+                ):
+                    self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
+                upstream_relations = {
+                    node.name
+                    for record in self._records
+                    if isinstance(record.content, DbtLineageFact)
+                    and record.content.direction == "upstream"
+                    and record.content.node_id in {error.node_id for error in node_errors}
+                    for node in record.content.related_nodes
+                }
+                if not has_node_error or not has_relation_fact or not any(
+                    getattr(record.content, "relation_name", None) in upstream_relations
+                    for record in root_records
+                    if isinstance(record.content, (RelationSchemaFact, RelationDataProfileFact))
+                ):
+                    self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
+        else:
+            if self._incident_subjects and not any(
+                error.node_id in self._incident_subjects for error in node_errors
+            ):
+                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
+            upstream_relations = {
+                node.name
+                for record in self._records
+                if isinstance(record.content, DbtLineageFact)
+                and record.content.direction == "upstream"
+                and record.content.node_id in {error.node_id for error in node_errors}
+                for node in record.content.related_nodes
+            }
+            if not has_node_error or not has_relation_fact or not any(
+                getattr(record.content, "relation_name", None) in upstream_relations
+                for record in root_records
+                if isinstance(record.content, (RelationSchemaFact, RelationDataProfileFact))
+            ):
+                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
         for claim in asset_claims:
             records = [inventory[evidence_id] for evidence_id in claim.evidence_ids]
             if not any(
@@ -999,6 +1088,12 @@ class DiagnosticKernel:
                     self._error("UNRESOLVED_EVIDENCE_UNBOUND")
             elif item.evidence_kind == "RELATION_DATA_PROFILE":
                 if (item.subject, item.reason_code) not in blocked_profiles:
+                    self._error("UNRESOLVED_EVIDENCE_UNBOUND")
+            elif item.evidence_kind == "PAYMENT_EVENT_IDENTITY":
+                if (
+                    item.reason_code != "NOT_OBSERVABLE"
+                    or item.subject not in self._incident_subjects
+                ):
                     self._error("UNRESOLVED_EVIDENCE_UNBOUND")
             elif item.subject not in known_subjects:
                 self._error("UNRESOLVED_EVIDENCE_UNBOUND")

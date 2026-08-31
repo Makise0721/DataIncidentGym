@@ -60,9 +60,9 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v3"
-STATIC_PROMPT_VERSION = "p1.static.v3"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v2"
+KERNEL_PROMPT_VERSION = "p1.kernel.v4"
+STATIC_PROMPT_VERSION = "p1.static.v4"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v3"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -70,6 +70,9 @@ P1_ROOT_CAUSE_CODES = (
     "TRANSFORMATION_COLUMN_CAST_CHANGED",
     "SOURCE_REQUIRED_FIELD_NULL",
     "TRANSFORMATION_REQUIRED_FIELD_NULL",
+    "SOURCE_EXACT_PAYMENT_DUPLICATE",
+    "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+    "LEGITIMATE_SPLIT_PAYMENT",
 )
 
 MODEL_REQUEST_LIMIT = 8

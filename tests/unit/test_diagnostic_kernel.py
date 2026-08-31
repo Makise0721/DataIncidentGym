@@ -16,6 +16,7 @@ from data_incident_gym.diagnostic_kernel import (
     InvestigationIntent,
     KernelDecision,
     KernelError,
+    KernelFinalStatus,
 )
 from data_incident_gym.evidence import (
     DbtLineageFact,
@@ -26,7 +27,13 @@ from data_incident_gym.evidence import (
     EvidenceSource,
     EvidenceType,
     RelationSchemaColumn,
+    RelationDataProfileFact,
     RelationSchemaFact,
+)
+from data_incident_gym.profiles import (
+    DuplicateProfileFact,
+    GroupProfileFact,
+    RelationProfileSnapshot,
 )
 
 RUN_ID = "a" * 32
@@ -337,6 +344,336 @@ def _close(
         arguments=arguments,
     )
     kernel.record_tool_result(prepared, (record,))
+
+
+def _duplicate_kernel() -> DiagnosticKernel:
+    return DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_EXACT_PAYMENT_DUPLICATE",
+            "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+            "LEGITIMATE_SPLIT_PAYMENT",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_schema_relations=("raw_payments",),
+        observable_profile_relations=("raw_payments",),
+        incident_subjects=("seed.jaffle_shop.raw_payments", "raw_payments"),
+    )
+
+
+def _duplicate_records(
+    *,
+    id_duplicates: int = 0,
+    fingerprint_duplicates: int = 3,
+    run_status: str = "SUCCEEDED",
+) -> tuple[EvidenceRecord, EvidenceRecord, EvidenceRecord, EvidenceRecord]:
+    run = _record(
+        EvidenceType.DBT_RUN_RESULTS,
+        EvidenceSource.DBT_RUN_RESULTS,
+        RUN_ID,
+        DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
+            run_id=RUN_ID,
+            run_status=run_status,
+            dbt_exit_code=0 if run_status == "SUCCEEDED" else 1,
+            failed_nodes=(),
+            skipped_nodes=(),
+        ),
+    )
+    lineage = _record(
+        EvidenceType.DBT_LINEAGE,
+        EvidenceSource.DBT_MANIFEST,
+        "seed.jaffle_shop.raw_payments",
+        DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="seed.jaffle_shop.raw_payments",
+            direction="downstream",
+            related_nodes=(
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.stg_payments",
+                    resource_type="model",
+                    name="stg_payments",
+                    distance=1,
+                ),
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.customers",
+                    resource_type="model",
+                    name="customers",
+                    distance=2,
+                ),
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.orders",
+                    resource_type="model",
+                    name="orders",
+                    distance=2,
+                ),
+            ),
+        ),
+    )
+    schema = _record(
+        EvidenceType.RELATION_SCHEMA,
+        EvidenceSource.POSTGRES_CATALOG,
+        "raw_payments",
+        RelationSchemaFact(
+            kind="RELATION_SCHEMA",
+            run_id=RUN_ID,
+            schema_name="analytics",
+            relation_name="raw_payments",
+            columns=(
+                RelationSchemaColumn(
+                    name="id",
+                    data_type="integer",
+                    nullable=True,
+                    ordinal_position=1,
+                ),
+            ),
+        ),
+    )
+    profile = _record(
+        EvidenceType.RELATION_DATA_PROFILE,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_payments",
+        RelationDataProfileFact(
+            kind="RELATION_DATA_PROFILE",
+            run_id=RUN_ID,
+            relation_name="raw_payments",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationProfileSnapshot(
+                relation_name="raw_payments",
+                row_count=116,
+                columns=(),
+                business_key_duplicates=(
+                    DuplicateProfileFact(name="id", duplicate_count=id_duplicates),
+                ),
+                business_fingerprint_duplicates=(
+                    DuplicateProfileFact(
+                        name="order_payment_amount",
+                        duplicate_count=fingerprint_duplicates,
+                    ),
+                ),
+                groups=(
+                    GroupProfileFact(
+                        name="payment_method",
+                        columns=("payment_method",),
+                        values=(("coupon",),),
+                        counts=(16,),
+                    ),
+                ),
+            ),
+        ),
+    )
+    return run, lineage, schema, profile
+
+
+def _close_duplicate_records(
+    kernel: DiagnosticKernel,
+    records: tuple[EvidenceRecord, EvidenceRecord, EvidenceRecord, EvidenceRecord],
+    *,
+    include_run: bool = True,
+) -> tuple[EvidenceRecord, EvidenceRecord, EvidenceRecord, EvidenceRecord]:
+    run, lineage, schema, profile = records
+    if include_run:
+        _close(
+            kernel,
+            gap_id="g_run_duplicate",
+            gap_kind=EvidenceGapKind.LOCATE_FAILURE,
+            tool_name="get_dbt_run_results",
+            arguments={"run_id": RUN_ID},
+            record=run,
+            new_hypotheses=(
+                Hypothesis(
+                    hypothesis_id="h_semantic_duplicate",
+                    root_cause_code="SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+                ),
+                Hypothesis(
+                    hypothesis_id="h_legitimate_split",
+                    root_cause_code="LEGITIMATE_SPLIT_PAYMENT",
+                ),
+            ),
+        )
+    else:
+        _close(
+            kernel,
+            gap_id="g_profile_duplicate",
+            gap_kind=EvidenceGapKind.PROFILE_RELATION,
+            tool_name="get_relation_data_profile",
+            arguments={"relation_name": "raw_payments"},
+            record=profile,
+            new_hypotheses=(
+                Hypothesis(
+                    hypothesis_id="h_semantic_duplicate",
+                    root_cause_code="SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+                ),
+                Hypothesis(
+                    hypothesis_id="h_legitimate_split",
+                    root_cause_code="LEGITIMATE_SPLIT_PAYMENT",
+                ),
+            ),
+        )
+        return run, lineage, schema, profile
+    _close(
+        kernel,
+        gap_id="g_lineage_duplicate",
+        gap_kind=EvidenceGapKind.MAP_IMPACT,
+        tool_name="get_dbt_lineage",
+        arguments={"node_id": "seed.jaffle_shop.raw_payments", "direction": "downstream"},
+        record=lineage,
+    )
+    _close(
+        kernel,
+        gap_id="g_schema_duplicate",
+        gap_kind=EvidenceGapKind.DISCRIMINATE_SCHEMA,
+        tool_name="get_relation_schema",
+        arguments={"relation_name": "raw_payments"},
+        record=schema,
+    )
+    _close(
+        kernel,
+        gap_id="g_profile_duplicate",
+        gap_kind=EvidenceGapKind.PROFILE_RELATION,
+        tool_name="get_relation_data_profile",
+        arguments={"relation_name": "raw_payments"},
+        record=profile,
+    )
+    return records
+
+
+def _semantic_duplicate_decision(
+    records: tuple[EvidenceRecord, EvidenceRecord, EvidenceRecord, EvidenceRecord],
+    *,
+    root_code: str = "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+) -> KernelDecision:
+    run, lineage, _, profile = records
+    return KernelDecision(
+        status="CONFIRMED",
+        run_id=RUN_ID,
+        selected_hypothesis_id=(
+            "h_semantic_duplicate"
+            if root_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+            else "h_legitimate_split"
+        ),
+        assessments=(
+            HypothesisAssessment(
+                hypothesis_id="h_semantic_duplicate",
+                verdict=(
+                    HypothesisVerdict.SUPPORTED
+                    if root_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+                    else HypothesisVerdict.REFUTED
+                ),
+                evidence_ids=(run.evidence_id, profile.evidence_id),
+            ),
+            HypothesisAssessment(
+                hypothesis_id="h_legitimate_split",
+                verdict=(
+                    HypothesisVerdict.REFUTED
+                    if root_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+                    else HypothesisVerdict.SUPPORTED
+                ),
+                evidence_ids=(profile.evidence_id,),
+            ),
+        ),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value=root_code,
+                evidence_ids=(run.evidence_id, profile.evidence_id),
+            ),
+            ClaimEvidence(
+                kind=ClaimKind.AFFECTED_ASSET,
+                value="model.jaffle_shop.stg_payments",
+                evidence_ids=(lineage.evidence_id,),
+            ),
+            ClaimEvidence(
+                kind=ClaimKind.AFFECTED_ASSET,
+                value="model.jaffle_shop.customers",
+                evidence_ids=(lineage.evidence_id,),
+            ),
+            ClaimEvidence(
+                kind=ClaimKind.AFFECTED_ASSET,
+                value="model.jaffle_shop.orders",
+                evidence_ids=(lineage.evidence_id,),
+            ),
+        ),
+        summary="The payment aggregate contains repeated business fingerprints.",
+        recommended_actions=(),
+        confidence=0.9,
+    )
+
+
+def test_kernel_confirms_successful_semantic_duplicate_from_profile_and_lineage() -> None:
+    kernel = _duplicate_kernel()
+    records = _close_duplicate_records(kernel, _duplicate_records())
+
+    outcome = kernel.finalize(_semantic_duplicate_decision(records))
+
+    assert outcome.status is KernelFinalStatus.CONFIRMED
+    assert outcome.root_cause_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+    assert outcome.affected_assets == (
+        "model.jaffle_shop.stg_payments",
+        "model.jaffle_shop.customers",
+        "model.jaffle_shop.orders",
+    )
+
+
+@pytest.mark.parametrize(
+    ("id_duplicates", "fingerprint_duplicates", "run_status"),
+    (
+        (1, 3, "SUCCEEDED"),
+        (0, 0, "SUCCEEDED"),
+        (0, 3, "FAILED"),
+    ),
+)
+def test_kernel_rejects_unsupported_successful_duplicate_claims(
+    id_duplicates: int,
+    fingerprint_duplicates: int,
+    run_status: str,
+) -> None:
+    kernel = _duplicate_kernel()
+    records = _close_duplicate_records(
+        kernel,
+        _duplicate_records(
+            id_duplicates=id_duplicates,
+            fingerprint_duplicates=fingerprint_duplicates,
+            run_status=run_status,
+        ),
+    )
+
+    with pytest.raises(KernelError, match="ROOT_CLAIM_EVIDENCE_INCOMPATIBLE"):
+        kernel.finalize(_semantic_duplicate_decision(records))
+
+
+def test_kernel_rejects_duplicate_claim_without_successful_run_evidence() -> None:
+    kernel = _duplicate_kernel()
+    records = _duplicate_records()
+    _close_duplicate_records(kernel, records, include_run=False)
+    lineage = records[1]
+    _close(
+        kernel,
+        gap_id="g_lineage_without_run",
+        gap_kind=EvidenceGapKind.MAP_IMPACT,
+        tool_name="get_dbt_lineage",
+        arguments={"node_id": "seed.jaffle_shop.raw_payments", "direction": "downstream"},
+        record=lineage,
+    )
+
+    with pytest.raises(KernelError, match="CLAIM_EVIDENCE_UNBOUND"):
+        kernel.finalize(_semantic_duplicate_decision(records))
+
+
+def test_kernel_rejects_profile_relation_not_named_by_public_incident() -> None:
+    kernel = _duplicate_kernel()
+    with pytest.raises(KernelError, match="RELATION_ARGUMENT_NOT_PROVEN"):
+        kernel.prepare_tool(
+            intent=InvestigationIntent(
+                gap_id="g_private_profile",
+                gap_kind=EvidenceGapKind.PROFILE_RELATION,
+            ),
+            tool_name="get_relation_data_profile",
+            arguments={"relation_name": "raw_orders"},
+        )
 
 
 def test_kernel_accepts_distance_one_model_for_failed_test_asset_claim() -> None:
