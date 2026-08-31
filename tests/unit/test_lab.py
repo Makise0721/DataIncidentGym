@@ -61,9 +61,21 @@ class _FakeCursor:
         return self.one
 
 
+class _FakeTransaction:
+    def __init__(self) -> None:
+        self.saw_exception = False
+
+    def __enter__(self) -> _FakeTransaction:
+        return self
+
+    def __exit__(self, exc_type, *_: object) -> None:
+        self.saw_exception = exc_type is not None
+
+
 class _FakeConnection:
     def __init__(self, cursor: _FakeCursor) -> None:
         self.cursor_instance = cursor
+        self.transaction_instance = _FakeTransaction()
 
     def __enter__(self) -> _FakeConnection:
         return self
@@ -74,8 +86,8 @@ class _FakeConnection:
     def cursor(self) -> _FakeCursor:
         return self.cursor_instance
 
-    def transaction(self) -> _FakeConnection:
-        return self
+    def transaction(self) -> _FakeTransaction:
+        return self.transaction_instance
 
 
 def test_lab_loads_only_the_committed_scenario_catalog(tmp_path: Path) -> None:
@@ -298,12 +310,16 @@ def test_null_mutation_helpers_reject_non_unique_selector_or_update(tmp_path: Pa
         lab._read_null_target(mutation)
 
     cursor.rows = [(1,)]
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
     with pytest.raises(InvalidIncidentState, match="恰好一行"):
         lab._write_null_target(
             mutation,
             expected_current=mutation.expected_value,
             replacement=None,
         )
+
+    assert connection.transaction_instance.saw_exception is True
 
 
 def test_null_mutation_prepare_apply_validate_and_restore_states(

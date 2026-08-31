@@ -333,15 +333,14 @@ class IncidentLab:
                     statement,
                     (replacement, mutation.selector_value, expected_current),
                 )
-                updated = cursor.rowcount
+                if cursor.rowcount != 1:
+                    raise InvalidIncidentState("NULL mutation 必须更新恰好一行")
         except LabError:
             raise
         except Exception as exc:
             raise self._clean(
                 IncidentExecutionError(f"写入 NULL mutation 目标失败：{self._redact(str(exc))}")
             ) from None
-        if updated != 1:
-            raise self._clean(InvalidIncidentState("NULL mutation 必须更新恰好一行"))
 
     def _ensure_healthy_for_prepare(self, spec: ScenarioSpec) -> None:
         for mutation in spec.reset_and_injection_contract.mutations:
