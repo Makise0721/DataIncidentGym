@@ -16,9 +16,11 @@ from data_incident_gym.lab import (
 from data_incident_gym.lab_verifier import ScenarioVerificationStatus
 from data_incident_gym.scenarios import (
     DuplicatePaymentRowsMutation,
+    OrphanPaymentRowsMutation,
     SetFieldNullMutation,
     duplicate_payment_rows,
     load_scenario_spec,
+    orphan_payment_rows,
 )
 
 
@@ -485,3 +487,130 @@ def test_duplicate_payment_delete_row_guard_is_transactional(tmp_path: Path) -> 
         (115, 58, "coupon", 1800),
         (116, 76, "coupon", 200),
     ]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "healthy_count", "injected_count"),
+    (
+        ("orphan_payment_record", 113, 114),
+        ("orphan_payment_coupon_a", 113, 116),
+        ("orphan_payment_coupon_b", 113, 116),
+    ),
+)
+def test_orphan_payment_lifecycle_is_exact(
+    case_id: str,
+    healthy_count: int,
+    injected_count: int,
+) -> None:
+    scenario = load_scenario_spec(case_id)
+    mutation = next(
+        item
+        for item in scenario.reset_and_injection_contract.mutations
+        if isinstance(item, OrphanPaymentRowsMutation)
+    )
+    rows = orphan_payment_rows(mutation)
+    assert healthy_count == 113
+    assert injected_count == 113 + len(rows)
+    if mutation.mode == "SINGLE_REFERENCE":
+        assert rows == ((114, 1000, "credit_card", 1000),)
+    else:
+        assert rows == (
+            (114, 1000, "coupon", 1700),
+            (115, 1001, "coupon", 1800),
+            (116, 1002, "coupon", 200),
+        )
+
+
+def test_orphan_payment_state_distinguishes_frozen_batches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    states = {
+        "orphan_payment_record": (113, 114),
+        "orphan_payment_coupon_a": (113, 116),
+    }
+    for case_id, (healthy_total, injected_total) in states.items():
+        mutation = next(
+            item
+            for item in load_scenario_spec(case_id)
+            .reset_and_injection_contract.mutations
+            if isinstance(item, OrphanPaymentRowsMutation)
+        )
+        rows = orphan_payment_rows(mutation)
+        monkeypatch.setattr(lab, "_payment_row_total", lambda total=healthy_total: total)
+        monkeypatch.setattr(lab, "_payment_row_count", lambda _row: 0)
+        assert lab._orphan_payment_state(mutation) == "HEALTHY"
+
+        monkeypatch.setattr(lab, "_payment_row_total", lambda total=injected_total: total)
+        monkeypatch.setattr(
+            lab,
+            "_payment_row_count",
+            lambda row, expected=rows: 1 if row in expected else 0,
+        )
+        assert lab._orphan_payment_state(mutation) == "INJECTED"
+
+        monkeypatch.setattr(
+            lab,
+            "_payment_row_count",
+            lambda row, expected=rows: 2 if row == expected[0] else 1,
+        )
+        assert lab._orphan_payment_state(mutation) == "DRIFTED"
+
+
+def test_orphan_payment_lifecycle_routes_exact_batch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("orphan_payment_record")
+    mutation = scenario.reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, OrphanPaymentRowsMutation)
+    rows = orphan_payment_rows(mutation)
+    calls: list[tuple[str, tuple[tuple[int, int, str, int], ...]]] = []
+
+    monkeypatch.setattr(lab, "_orphan_payment_state", lambda _mutation: "HEALTHY")
+    lab._ensure_healthy_for_prepare(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_insert_orphan_payments",
+        lambda _mutation: calls.append(("insert", rows)),
+    )
+    lab._apply_mutations(scenario)
+
+    monkeypatch.setattr(lab, "_orphan_payment_state", lambda _mutation: "INJECTED")
+    lab._validate_prepared_state(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_delete_orphan_payments",
+        lambda _mutation: calls.append(("delete", rows)),
+    )
+    lab._restore_mutations(scenario)
+    monkeypatch.setattr(lab, "_orphan_payment_state", lambda _mutation: "HEALTHY")
+    lab._verify_restored(scenario)
+
+    assert calls == [("insert", rows), ("delete", rows)]
+
+
+@pytest.mark.parametrize("method_name", ("_insert_orphan_payments", "_delete_orphan_payments"))
+def test_orphan_payment_row_guards_are_transactional(
+    tmp_path: Path,
+    method_name: str,
+) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("orphan_payment_coupon_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, OrphanPaymentRowsMutation)
+    )
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rowcount=0)
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+
+    with pytest.raises(InvalidIncidentState, match="精确行数"):
+        getattr(lab, method_name)(mutation)
+
+    assert connection.transaction_instance.saw_exception is True
+    assert all("raw_payments" in statement for statement, _ in calls)
