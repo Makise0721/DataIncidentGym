@@ -11,6 +11,7 @@ DIAGNOSIS_MODULES = (
     "diagnostic_kernel.py",
     "diagnosis.py",
     "evidence_tools.py",
+    "fixed_rule.py",
 )
 FORBIDDEN_TEXT = (
     "DEV_CONFIRMABLE",

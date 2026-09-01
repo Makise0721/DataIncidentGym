@@ -62,6 +62,27 @@ class DiagnosisStatus(StrEnum):
 class DiagnosticStrategy(StrEnum):
     STATIC_SKILL = "STATIC_SKILL"
     DIAGNOSTIC_KERNEL = "DIAGNOSTIC_KERNEL"
+    NO_TOOL = "NO_TOOL"
+    KERNEL_NO_LINEAGE = "KERNEL_NO_LINEAGE"
+    KERNEL_NO_SCHEMA = "KERNEL_NO_SCHEMA"
+    FIXED_RULE = "FIXED_RULE"
+
+
+MAIN_STRATEGIES = (
+    DiagnosticStrategy.STATIC_SKILL,
+    DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+)
+MODEL_STRATEGIES = (
+    *MAIN_STRATEGIES,
+    DiagnosticStrategy.NO_TOOL,
+    DiagnosticStrategy.KERNEL_NO_LINEAGE,
+    DiagnosticStrategy.KERNEL_NO_SCHEMA,
+)
+KERNEL_STRATEGIES = (
+    DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+    DiagnosticStrategy.KERNEL_NO_LINEAGE,
+    DiagnosticStrategy.KERNEL_NO_SCHEMA,
+)
 
 
 class RootCauseClaim(BaseModel):
@@ -155,6 +176,7 @@ _MODEL_ERROR_CODES = {
     "MODEL_TIMEOUT",
     "MODEL_PROTOCOL_ERROR",
     "MODEL_RUNTIME_ERROR",
+    "RUN_SETUP_ERROR",
 }
 
 
@@ -393,7 +415,7 @@ class DiagnosisRunResult(BaseModel):
         kernel_events = tuple(
             event for event in self.trace if isinstance(event, KernelStateTraceEvent)
         )
-        if self.strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL:
+        if self.strategy in KERNEL_STRATEGIES:
             if self.kernel_state is None or len(kernel_events) != 1:
                 raise ValueError("Kernel result requires one Kernel state event")
             if self.trace[-2] != kernel_events[0]:

@@ -56,8 +56,19 @@ def _runner(tmp_path) -> DoctorRunner:
 def test_profile_checks_prove_snapshot_read_only_match_and_bounds(tmp_path, monkeypatch) -> None:
     current = SimpleNamespace(relation_name="raw_orders")
     history = SimpleNamespace(relation_name="raw_orders")
-    spec = SimpleNamespace(digest=lambda: "a" * 64, max_group_rows=128, max_history_points=90)
-    snapshot = SimpleNamespace(profile_spec_sha256="a" * 64, current=(current,), history=(history,))
+    spec = SimpleNamespace(
+        schema_version="profile_spec.v1",
+        digest=lambda: "a" * 64,
+        max_group_rows=128,
+        max_history_points=90,
+    )
+    snapshot = SimpleNamespace(
+        schema_version="profile_snapshot.v1",
+        profile_spec_version="profile_spec.v1",
+        profile_spec_sha256="a" * 64,
+        current=(current,),
+        history=(history,),
+    )
     readers = []
 
     class Reader:
@@ -66,7 +77,7 @@ def test_profile_checks_prove_snapshot_read_only_match_and_bounds(tmp_path, monk
             readers.append(self)
 
         def read_current(self, relation_name: str):
-            if relation_name == "invalid_relation":
+            if relation_name == "invalid_relation" or ";" in relation_name:
                 raise ProfileError("invalid relation")
             return current
 

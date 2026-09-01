@@ -948,7 +948,7 @@ class IncidentLab:
                 IncidentExecutionError(self._redact(str(exc)))
             ) from None
 
-    def build(self, case_id: str) -> ScenarioRun:
+    def build(self, case_id: str, *, run_id: str | None = None) -> ScenarioRun:
         spec = self._load_case(case_id)
         self._start_postgres()
         self._clear_active_run()
@@ -961,7 +961,7 @@ class IncidentLab:
         else:
             self._validate_prepared_state(spec)
 
-        run_id = self.run_id_factory()
+        run_id = self.run_id_factory() if run_id is None else run_id
         if not isinstance(run_id, str) or RUN_ID_PATTERN.fullmatch(run_id) is None:
             raise self._clean(IncidentExecutionError("run_id 生成器返回非法值"))
         run_root = self.project_root / ".dig" / "lab" / "runs" / run_id

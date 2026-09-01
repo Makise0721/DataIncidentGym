@@ -23,6 +23,7 @@ from data_incident_gym.evaluation import (
     EvaluationCheck,
     EvaluationCheckCode,
     EvaluationStatus,
+    _silent_drop_evidence_compatible,
 )
 from data_incident_gym.evidence import (
     DbtLineageFact,
@@ -50,7 +51,7 @@ from data_incident_gym.profiles import (
     RelationshipViolationFact,
     load_profile_spec,
 )
-from data_incident_gym.scenarios import load_scenario_spec
+from data_incident_gym.scenarios import DeletePaymentRowsMutation, load_scenario_spec
 
 RUN_ID = "a" * 32
 
@@ -1177,6 +1178,178 @@ def _scenario_with_logical_time(scenario, logical_observed_at: datetime):
     return scenario.model_copy(update={"incident_brief": brief})
 
 
+def _m11_silent_records() -> tuple[EvidenceRecord, ...]:
+    observed_at = datetime(2026, 8, 31, tzinfo=UTC)
+    profile_hash = load_profile_spec().digest()
+
+    def record(evidence_type, source, subject, content):
+        return EvidenceRecord.create(
+            run_id=RUN_ID,
+            evidence_type=evidence_type,
+            source=source,
+            subject=subject,
+            observed_at=observed_at,
+            content=content,
+        )
+
+    return (
+        record(
+            EvidenceType.DBT_RUN_RESULTS,
+            EvidenceSource.DBT_RUN_RESULTS,
+            RUN_ID,
+            DbtRunResultsFact(
+                kind="DBT_RUN_RESULTS",
+                run_id=RUN_ID,
+                run_status="SUCCEEDED",
+                dbt_exit_code=0,
+                failed_nodes=(),
+                skipped_nodes=(),
+            ),
+        ),
+        record(
+            EvidenceType.DBT_LINEAGE,
+            EvidenceSource.DBT_MANIFEST,
+            "seed.jaffle_shop.raw_payments",
+            DbtLineageFact(
+                kind="DBT_LINEAGE",
+                run_id=RUN_ID,
+                node_id="seed.jaffle_shop.raw_payments",
+                direction="downstream",
+                related_nodes=(
+                    DbtLineageNode(
+                        node_id="model.jaffle_shop.stg_payments",
+                        resource_type="model",
+                        name="stg_payments",
+                        distance=1,
+                    ),
+                ),
+            ),
+        ),
+        record(
+            EvidenceType.RELATION_DATA_PROFILE,
+            EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+            "raw_payments",
+            RelationDataProfileFact(
+                kind="RELATION_DATA_PROFILE",
+                run_id=RUN_ID,
+                relation_name="raw_payments",
+                profile_spec_version="profile_spec.v1",
+                profile_spec_sha256=profile_hash,
+                snapshot=RelationProfileSnapshot(
+                    relation_name="raw_payments",
+                    row_count=112,
+                    columns=(),
+                    business_key_duplicates=(DuplicateProfileFact(name="id", duplicate_count=0),),
+                    business_fingerprint_duplicates=(
+                        DuplicateProfileFact(name="order_payment_amount", duplicate_count=0),
+                    ),
+                    groups=(
+                        GroupProfileFact(
+                            name="payment_method",
+                            columns=("payment_method",),
+                            values=(
+                                ("bank_transfer",),
+                                ("coupon",),
+                                ("credit_card",),
+                                ("gift_card",),
+                            ),
+                            counts=(32, 13, 55, 12),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        record(
+            EvidenceType.RELATION_DATA_PROFILE,
+            EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+            "raw_orders",
+            RelationDataProfileFact(
+                kind="RELATION_DATA_PROFILE",
+                run_id=RUN_ID,
+                relation_name="raw_orders",
+                profile_spec_version="profile_spec.v1",
+                profile_spec_sha256=profile_hash,
+                snapshot=RelationProfileSnapshot(
+                    relation_name="raw_orders",
+                    row_count=99,
+                    columns=(),
+                    relationship_violations=(
+                        RelationshipViolationFact(
+                            name="id_to_raw_payments_order_id",
+                            violation_count=1,
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        record(
+            EvidenceType.RELATION_HISTORY,
+            EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+            "raw_payments",
+            RelationHistoryFact(
+                kind="RELATION_HISTORY",
+                run_id=RUN_ID,
+                relation_name="raw_payments",
+                profile_spec_version="profile_spec.v1",
+                profile_spec_sha256=profile_hash,
+                snapshot=RelationHistorySnapshot(
+                    relation_name="raw_payments",
+                    histories=(
+                        HistorySeries(
+                            name="payment_count_by_order_date",
+                            metric="count",
+                            points=(
+                                HistoryPoint(
+                                    bucket="2018-04-07",
+                                    periodic_key="2018-04-07",
+                                    value=1,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        record(
+            EvidenceType.RELATION_HISTORY,
+            EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+            "raw_orders",
+            RelationHistoryFact(
+                kind="RELATION_HISTORY",
+                run_id=RUN_ID,
+                relation_name="raw_orders",
+                profile_spec_version="profile_spec.v1",
+                profile_spec_sha256=profile_hash,
+                snapshot=RelationHistorySnapshot(
+                    relation_name="raw_orders",
+                    histories=(
+                        HistorySeries(
+                            name="order_count_by_day",
+                            metric="count",
+                            points=(),
+                            watermark_column="order_date",
+                            watermark_value="2018-04-09",
+                            sla_seconds=86400,
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_evaluator_distinguishes_partition_count_from_relation_count() -> None:
+    scenario = load_scenario_spec("silent_payment_drop_record")
+    mutation = next(
+        item
+        for item in scenario.reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    records = _m11_silent_records()
+
+    assert _silent_drop_evidence_compatible(scenario, mutation, list(records), records)
+
+
 def test_evaluator_accepts_m11_current_partition_with_logical_sla() -> None:
     scenario = load_scenario_spec("order_volume_within_sla")
     result = DeterministicEvaluator.evaluate(
@@ -1252,11 +1425,38 @@ def test_evaluator_keeps_m10_health_on_historical_range_path() -> None:
     result = DeterministicEvaluator.evaluate(
         scenario,
         _health_verification(),
-        _health_run("2018-04-02"),
+        _health_run(
+            "2018-04-02",
+            watermark_column="order_date",
+            watermark_value="2018-04-09",
+        ),
         recovery_succeeded=True,
     )
 
     assert result.status is EvaluationStatus.PASSED
+
+
+@pytest.mark.parametrize(
+    ("watermark_column", "watermark_value"),
+    ((None, "2018-04-09"), ("order_date", None)),
+)
+def test_evaluator_rejects_health_without_watermark_metadata(
+    watermark_column: str | None,
+    watermark_value: str | None,
+) -> None:
+    result = DeterministicEvaluator.evaluate(
+        load_scenario_spec("order_volume_pattern_a"),
+        _health_verification(),
+        _health_run(
+            "2018-04-02",
+            watermark_column=watermark_column,
+            watermark_value=watermark_value,
+        ),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.FAILED
+    assert EvaluationCheckCode.POSITIVE_HEALTH_EVIDENCE in result.failed_check_codes
 
 
 def test_evaluator_rejects_root_evidence_for_an_unrelated_source_relation() -> None:

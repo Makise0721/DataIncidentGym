@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 from data_incident_gym.artifacts import ArtifactRun, ArtifactWriter, RecoveryStatus
 from data_incident_gym.config import PROJECT_ROOT, Settings
-from data_incident_gym.diagnosis import DiagnosisRunResult, DiagnosticStrategy
+from data_incident_gym.diagnosis import RUN_ID_PATTERN, DiagnosisRunResult, DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import DiagnosisRunner
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evaluation import (
@@ -102,7 +103,12 @@ class EvaluationRunner:
         evaluator: Evaluator,
         artifact_writer: ArtifactWriter,
         clock: Callable[[], datetime],
+        benchmark_manifest_sha256: str | None = None,
     ) -> None:
+        if benchmark_manifest_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", benchmark_manifest_sha256
+        ):
+            raise ValueError("benchmark_manifest_sha256 must be a 64-hex digest")
         self._lab = lab
         self._diagnostic_settings = diagnostic_settings
         self._diagnosis_factory = diagnosis_factory
@@ -111,6 +117,7 @@ class EvaluationRunner:
         self._evaluator = evaluator
         self._artifact_writer = artifact_writer
         self._clock = clock
+        self._benchmark_manifest_sha256 = benchmark_manifest_sha256
 
     @classmethod
     def for_project(
@@ -118,6 +125,8 @@ class EvaluationRunner:
         settings: Settings,
         diagnostic_settings: DiagnosticSettings,
         project_root: Path = PROJECT_ROOT,
+        *,
+        benchmark_manifest_sha256: str | None = None,
     ) -> EvaluationRunner:
         lab = IncidentLab(settings, project_root)
         writer = ArtifactWriter(project_root)
@@ -142,14 +151,19 @@ class EvaluationRunner:
             evaluator=DeterministicEvaluator.evaluate,
             artifact_writer=writer,
             clock=lambda: datetime.now(UTC),
+            benchmark_manifest_sha256=benchmark_manifest_sha256,
         )
 
     async def run(
         self,
         incident_case_id: str,
         strategy: DiagnosticStrategy = DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+        *,
+        run_id: str | None = None,
     ) -> EvaluationAttemptResult:
         strategy = DiagnosticStrategy(strategy)
+        if run_id is not None and re.fullmatch(RUN_ID_PATTERN, run_id) is None:
+            raise ValueError("preassigned run_id must be 32 lowercase hexadecimal characters")
         started_at = self._clock()
         mutation_started = False
         recovery_succeeded = False
@@ -164,7 +178,11 @@ class EvaluationRunner:
             stage = "PREPARE"
             self._lab.prepare(incident_case_id)
             stage = "BUILD"
-            scenario_run = self._lab.build(incident_case_id)
+            scenario_run = (
+                self._lab.build(incident_case_id, run_id=run_id)
+                if run_id is not None
+                else self._lab.build(incident_case_id)
+            )
             stage = "DIAGNOSIS_SETUP"
             diagnosis_runner = self._diagnosis_factory(scenario_run.run_id, strategy)
             stage = "DIAGNOSIS"
@@ -239,6 +257,7 @@ class EvaluationRunner:
                     else RecoveryStatus.FAILED
                 ),
                 model_base_url=self._diagnostic_settings.model_base_url,
+                benchmark_manifest_sha256=self._benchmark_manifest_sha256,
                 diagnosis_run=diagnosis_run,
                 evaluation=evaluation,
             )

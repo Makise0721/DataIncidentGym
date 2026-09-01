@@ -75,7 +75,6 @@
   "required_evidence_types": [
     "DBT_RUN_RESULTS",
     "DBT_LINEAGE",
-    "RELATION_SCHEMA",
     "RELATION_DATA_PROFILE",
     "RELATION_HISTORY"
   ],

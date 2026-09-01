@@ -1324,6 +1324,8 @@ def _silent_decision_with_assets_from_records(
 def _health_kernel(
     *,
     logical_observed_at: datetime,
+    watermark_column: str | None = "order_date",
+    watermark_value: str | None = "2018-04-09",
     sla_seconds: int | None = 86400,
 ) -> tuple[DiagnosticKernel, tuple[EvidenceRecord, ...]]:
     kernel = DiagnosticKernel.start(
@@ -1390,8 +1392,8 @@ def _health_kernel(
                                 value=1,
                             ),
                         ),
-                        watermark_column="order_date",
-                        watermark_value="2018-04-09",
+                        watermark_column=watermark_column,
+                        watermark_value=watermark_value,
                         sla_seconds=sla_seconds,
                     ),
                 ),
@@ -1471,6 +1473,24 @@ def test_kernel_uses_logical_time_for_current_partition_sla(
     else:
         with pytest.raises(KernelError, match=error_code):
             kernel.finalize(_health_decision(records))
+
+
+@pytest.mark.parametrize(
+    ("watermark_column", "watermark_value"),
+    ((None, "2018-04-09"), ("order_date", None)),
+)
+def test_kernel_rejects_health_without_watermark_metadata(
+    watermark_column: str | None,
+    watermark_value: str | None,
+) -> None:
+    kernel, records = _health_kernel(
+        logical_observed_at=datetime(2018, 4, 9, 12, tzinfo=UTC),
+        watermark_column=watermark_column,
+        watermark_value=watermark_value,
+    )
+
+    with pytest.raises(KernelError, match="HEALTH_WATERMARK_NOT_PROVEN"):
+        kernel.finalize(_health_decision(records))
 
 
 def test_kernel_binds_blocked_history_and_watermark_unresolved_evidence() -> None:

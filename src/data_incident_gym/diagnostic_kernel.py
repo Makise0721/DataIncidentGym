@@ -1247,36 +1247,38 @@ class DiagnosticKernel:
                 or history.snapshot.relation_name != claim.relation_name
             ):
                 self._error("HEALTH_RELATION_MISMATCH")
+            if (
+                history_series.watermark_column != "order_date"
+                or history_series.watermark_value is None
+            ):
+                self._error("HEALTH_WATERMARK_NOT_PROVEN")
             is_current_partition = current.bucket == history_series.watermark_value
-            if history_series.watermark_column is not None:
-                if history_series.watermark_value is None:
-                    self._error("HEALTH_WATERMARK_NOT_PROVEN")
+            try:
+                watermark = parse_watermark_value(history_series.watermark_value)
+            except (TypeError, ValueError):
+                self._error("HEALTH_WATERMARK_INVALID")
+            if is_current_partition:
+                if history_series.sla_seconds is None:
+                    self._error("HEALTH_SLA_NOT_DECLARED")
+                if (
+                    self._incident_logical_observed_at is None
+                    or self._incident_logical_observed_at.tzinfo is None
+                    or self._incident_logical_observed_at.utcoffset() is None
+                ):
+                    self._error("HEALTH_WATERMARK_INVALID")
+                lag = (
+                    self._incident_logical_observed_at.astimezone(UTC)
+                    - watermark
+                ).total_seconds()
+                if lag < 0 or lag > history_series.sla_seconds:
+                    self._error("HEALTH_SLA_NOT_SATISFIED")
+            else:
                 try:
-                    watermark = parse_watermark_value(history_series.watermark_value)
+                    current_bucket = parse_watermark_value(current.bucket)
                 except (TypeError, ValueError):
                     self._error("HEALTH_WATERMARK_INVALID")
-                if is_current_partition:
-                    if history_series.sla_seconds is None:
-                        self._error("HEALTH_SLA_NOT_DECLARED")
-                    if (
-                        self._incident_logical_observed_at is None
-                        or self._incident_logical_observed_at.tzinfo is None
-                        or self._incident_logical_observed_at.utcoffset() is None
-                    ):
-                        self._error("HEALTH_WATERMARK_INVALID")
-                    lag = (
-                        self._incident_logical_observed_at.astimezone(UTC)
-                        - watermark
-                    ).total_seconds()
-                    if lag < 0 or lag > history_series.sla_seconds:
-                        self._error("HEALTH_SLA_NOT_SATISFIED")
-                else:
-                    try:
-                        current_bucket = parse_watermark_value(current.bucket)
-                    except (TypeError, ValueError):
-                        self._error("HEALTH_WATERMARK_INVALID")
-                    if current_bucket > watermark:
-                        self._error("HEALTH_POINT_AFTER_WATERMARK")
+                if current_bucket > watermark:
+                    self._error("HEALTH_POINT_AFTER_WATERMARK")
             if not is_current_partition:
                 prior = [
                     point.value

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from pydantic_ai.models.function import FunctionModel
 
-from data_incident_gym.diagnosis import DiagnosticStrategy
+from data_incident_gym.diagnosis import MAIN_STRATEGIES
 from data_incident_gym.diagnostic_agent import (
     TOOL_NAMES,
     DiagnosisBudget,
@@ -98,7 +98,7 @@ def test_each_p1_case_exposes_identical_policy_surface(tmp_path: Path) -> None:
             tools=SimpleNamespace(),
             model_identity=ModelIdentity("synthetic", "synthetic-model"),
         )
-        for strategy in DiagnosticStrategy
+        for strategy in MAIN_STRATEGIES
     )
 
     assert static.model_identity == kernel.model_identity

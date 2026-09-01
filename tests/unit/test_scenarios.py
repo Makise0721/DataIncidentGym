@@ -402,6 +402,10 @@ def test_m11_catalog_and_test_twin_are_exact(project_root: Path) -> None:
         (92, 80, "gift_card", 300),
     )
     assert health.observable_evidence_contract.history_relations == ("raw_orders",)
+    assert all(
+        "RELATION_SCHEMA" not in scenario.required_evidence_types
+        for scenario in (dev, confirmable, insufficient)
+    )
 
 
 @pytest.mark.parametrize("case_id", P1_M11_SCENARIO_IDS[:3])

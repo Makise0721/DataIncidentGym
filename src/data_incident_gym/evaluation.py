@@ -7,7 +7,12 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, model_validator
 
-from data_incident_gym.diagnosis import DiagnosisRunResult, DiagnosisStatus, ToolTraceEvent
+from data_incident_gym.diagnosis import (
+    KERNEL_STRATEGIES,
+    DiagnosisRunResult,
+    DiagnosisStatus,
+    ToolTraceEvent,
+)
 from data_incident_gym.diagnostic_kernel import (
     EvidenceGapStatus,
     HypothesisVerdict,
@@ -35,6 +40,8 @@ from data_incident_gym.scenarios import (
     SetFieldNullMutation,
     deleted_payment_rows,
 )
+
+EVALUATOR_VERSION = "p1.evaluator.v1"
 
 
 class EvaluationStatus(StrEnum):
@@ -271,32 +278,34 @@ def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunRe
         )
         if current is None or current.value != claim.current_value:
             return False
+        if (
+            history_series.watermark_column != "order_date"
+            or history_series.watermark_value is None
+        ):
+            return False
         is_current_partition = current.bucket == history_series.watermark_value
-        if history_series.watermark_column is not None:
-            if history_series.watermark_value is None:
+        try:
+            watermark = parse_watermark_value(history_series.watermark_value)
+        except (TypeError, ValueError):
+            return False
+        if is_current_partition:
+            if history_series.sla_seconds is None:
                 return False
+            logical_observed_at = scenario.incident_brief.logical_observed_at
+            if logical_observed_at.tzinfo is None or logical_observed_at.utcoffset() is None:
+                return False
+            lag = (
+                logical_observed_at.astimezone(watermark.tzinfo) - watermark
+            ).total_seconds()
+            if lag < 0 or lag > history_series.sla_seconds:
+                return False
+        else:
             try:
-                watermark = parse_watermark_value(history_series.watermark_value)
+                current_bucket = parse_watermark_value(current.bucket)
             except (TypeError, ValueError):
                 return False
-            if is_current_partition:
-                if history_series.sla_seconds is None:
-                    return False
-                logical_observed_at = scenario.incident_brief.logical_observed_at
-                if logical_observed_at.tzinfo is None or logical_observed_at.utcoffset() is None:
-                    return False
-                lag = (
-                    logical_observed_at.astimezone(watermark.tzinfo) - watermark
-                ).total_seconds()
-                if lag < 0 or lag > history_series.sla_seconds:
-                    return False
-            else:
-                try:
-                    current_bucket = parse_watermark_value(current.bucket)
-                except (TypeError, ValueError):
-                    return False
-                if current_bucket > watermark:
-                    return False
+            if current_bucket > watermark:
+                return False
         if not is_current_partition:
             for series in history.snapshot.histories:
                 if series.name != claim.history_name:
@@ -357,7 +366,7 @@ def _silent_drop_evidence_compatible(
         settled_at = parse_watermark_value(settled_value)
     except (TypeError, ValueError):
         return False
-    if expected_count <= current_count or current_relation_count != current_count:
+    if expected_count <= current_count:
         return False
     deleted_rows = deleted_payment_rows(mutation)
     expected_channels = {
@@ -415,6 +424,7 @@ def _silent_drop_evidence_compatible(
         or run.failed_nodes
         or run.skipped_nodes
         or payment_profile.snapshot.row_count != 113 - len(deleted_rows)
+        or payment_profile.snapshot.row_count != current_relation_count
         or order_profile.snapshot.row_count != 99
     ):
         return False
@@ -918,7 +928,7 @@ def _environment_verified(
 
 
 def _controller_checks(diagnosis_run: DiagnosisRunResult) -> tuple[ControllerCheck, ...]:
-    if diagnosis_run.strategy.value != "DIAGNOSTIC_KERNEL":
+    if diagnosis_run.strategy not in KERNEL_STRATEGIES:
         return ()
     state = diagnosis_run.kernel_state
     if state is None:

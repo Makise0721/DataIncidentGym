@@ -7,6 +7,7 @@ import re
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from time import monotonic
 from typing import Annotated, Any, Literal, Protocol
@@ -23,11 +24,14 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models import Model, ModelRequestParameters
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import (
+    KERNEL_STRATEGIES,
+    MODEL_STRATEGIES,
     AffectedAssetClaim,
     Diagnosis,
     DiagnosisMetrics,
@@ -62,6 +66,7 @@ from data_incident_gym.run_context import ObservableRunContext, resolve_run_cont
 BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v5"
 STATIC_PROMPT_VERSION = "p1.static.v5"
+NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
 CONTROLLER_PROTOCOL_VERSION = "p1.controller.v4"
 
 P1_ROOT_CAUSE_CODES = (
@@ -109,12 +114,30 @@ def _read_prompt(name: str) -> str:
 BASE_PROMPT = _read_prompt("base_safety.md")
 KERNEL_PROMPT = _read_prompt("diagnostic_kernel.md")
 STATIC_PROMPT = _read_prompt("static_skill.md")
+NO_TOOL_PROMPT = _read_prompt("no_tool.md")
 
 
 def load_strategy_prompt(strategy: DiagnosticStrategy) -> str:
-    if DiagnosticStrategy(strategy) is DiagnosticStrategy.DIAGNOSTIC_KERNEL:
+    strategy = DiagnosticStrategy(strategy)
+    if strategy in KERNEL_STRATEGIES:
         return KERNEL_PROMPT
+    if strategy is DiagnosticStrategy.NO_TOOL:
+        return NO_TOOL_PROMPT
     return STATIC_PROMPT
+
+
+def _enabled_tool_names(strategy: DiagnosticStrategy) -> tuple[str, ...]:
+    if strategy is DiagnosticStrategy.NO_TOOL:
+        return ()
+    if strategy is DiagnosticStrategy.KERNEL_NO_LINEAGE:
+        return tuple(name for name in TOOL_NAMES if name != "get_dbt_lineage")
+    if strategy is DiagnosticStrategy.KERNEL_NO_SCHEMA:
+        return tuple(name for name in TOOL_NAMES if name != "get_relation_schema")
+    return TOOL_NAMES
+
+
+def _is_kernel_strategy(strategy: DiagnosticStrategy) -> bool:
+    return strategy in KERNEL_STRATEGIES
 
 
 def load_base_prompt() -> str:
@@ -205,6 +228,16 @@ class DiagnosisBudget:
     tool_call_limit: int = TOOL_CALL_LIMIT
     output_retry_limit: int = OUTPUT_RETRY_LIMIT
     timeout_seconds: int = TIMEOUT_SECONDS
+
+
+@dataclass(frozen=True)
+class PolicySurface:
+    tool_schema_payload: list[dict[str, object]]
+    strategy_prompt_version: str
+    strategy_prompt_sha256: str
+    controller_protocol_sha256: str
+    final_diagnosis_schema_sha256: str
+    policy_identity: PolicyIdentity
 
 
 def _canonical_json(value: object) -> str:
@@ -340,7 +373,7 @@ class _RunState:
         )
         self.pending_intent = None
         self.pending_intent_error = None
-        if self.strategy is not DiagnosticStrategy.DIAGNOSTIC_KERNEL or not business_calls:
+        if not _is_kernel_strategy(self.strategy) or not business_calls:
             return
         text_parts = tuple(part for part in response.parts if isinstance(part, TextPart))
         if len(business_calls) != 1 or len(text_parts) != 1:
@@ -654,8 +687,17 @@ def _tool_schema_payload(agent: Agent[Any, Any]) -> list[dict[str, object]]:
     ]
 
 
-def _register_evidence_tools(agent: Agent[_RunState, Any]) -> None:
-    @agent.tool
+def _register_evidence_tools(
+    agent: Agent[_RunState, Any],
+    *,
+    excluded_tool_names: frozenset[str] = frozenset(),
+) -> None:
+    enabled_tool_names = set(TOOL_NAMES) - excluded_tool_names
+
+    def register(tool_name: str):
+        return agent.tool if tool_name in enabled_tool_names else lambda function: function
+
+    @register("get_dbt_run_results")
     def get_dbt_run_results(
         ctx: RunContext[_RunState],
         run_id: Annotated[StrictStr, Field(description="The exact verified run identifier.")],
@@ -667,7 +709,7 @@ def _register_evidence_tools(agent: Agent[_RunState, Any]) -> None:
             lambda: ctx.deps.tools.get_dbt_run_results(run_id),
         )
 
-    @agent.tool
+    @register("get_dbt_node_error")
     def get_dbt_node_error(
         ctx: RunContext[_RunState],
         run_id: Annotated[StrictStr, Field(description="The exact verified run identifier.")],
@@ -683,7 +725,7 @@ def _register_evidence_tools(agent: Agent[_RunState, Any]) -> None:
             lambda: ctx.deps.tools.get_dbt_node_error(run_id, node_id),
         )
 
-    @agent.tool
+    @register("get_relation_schema")
     def get_relation_schema(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
@@ -698,7 +740,7 @@ def _register_evidence_tools(agent: Agent[_RunState, Any]) -> None:
             lambda: ctx.deps.tools.get_relation_schema(relation_name),
         )
 
-    @agent.tool
+    @register("get_dbt_lineage")
     def get_dbt_lineage(
         ctx: RunContext[_RunState],
         node_id: Annotated[StrictStr, Field(description="A node identifier returned by evidence.")],
@@ -711,7 +753,7 @@ def _register_evidence_tools(agent: Agent[_RunState, Any]) -> None:
             lambda: ctx.deps.tools.get_dbt_lineage(node_id, direction),
         )
 
-    @agent.tool
+    @register("get_relation_data_profile")
     def get_relation_data_profile(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
@@ -726,7 +768,7 @@ def _register_evidence_tools(agent: Agent[_RunState, Any]) -> None:
             lambda: ctx.deps.tools.get_relation_data_profile(relation_name),
         )
 
-    @agent.tool
+    @register("get_relation_history")
     def get_relation_history(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
@@ -740,6 +782,104 @@ def _register_evidence_tools(agent: Agent[_RunState, Any]) -> None:
             {"relation_name": relation_name},
             lambda: ctx.deps.tools.get_relation_history(relation_name),
         )
+
+
+def _build_policy_surface(
+    strategy: DiagnosticStrategy,
+    *,
+    model: Model | None = None,
+) -> PolicySurface:
+    strategy = DiagnosticStrategy(strategy)
+    if strategy not in MODEL_STRATEGIES:
+        raise ValueError("strategy is not model-backed")
+    output_type: type[BaseModel] = (
+        KernelDecision if _is_kernel_strategy(strategy) else _StaticDecision
+    )
+    schema_agent = Agent(
+        model or FunctionModel(lambda _messages, _info: None),
+        deps_type=_RunState,
+        output_type=output_type,
+    )
+    enabled = _enabled_tool_names(strategy)
+    _register_evidence_tools(
+        schema_agent,
+        excluded_tool_names=frozenset(set(TOOL_NAMES) - set(enabled)),
+    )
+    tool_schema_payload = _tool_schema_payload(schema_agent)
+    if tuple(item["name"] for item in tool_schema_payload) != enabled:
+        raise RuntimeError("evidence tool registration order is invalid")
+    strategy_prompt = load_strategy_prompt(strategy)
+    strategy_prompt_version = (
+        KERNEL_PROMPT_VERSION
+        if strategy in KERNEL_STRATEGIES
+        else NO_TOOL_PROMPT_VERSION
+        if strategy is DiagnosticStrategy.NO_TOOL
+        else STATIC_PROMPT_VERSION
+    )
+    final_diagnosis_schema_sha256 = _sha256_json(Diagnosis.model_json_schema())
+    controller_protocol_sha256 = _sha256_json(
+        {
+            "strategy": strategy.value,
+            "protocol_version": CONTROLLER_PROTOCOL_VERSION,
+            "tool_schemas": tool_schema_payload,
+            "budget": {
+                "model_request_limit": MODEL_REQUEST_LIMIT,
+                "tool_call_limit": TOOL_CALL_LIMIT,
+                "output_retry_limit": OUTPUT_RETRY_LIMIT,
+                "timeout_seconds": TIMEOUT_SECONDS,
+            },
+            "decision_schema": output_type.model_json_schema(),
+            "state_schema": (
+                InvestigationState.model_json_schema()
+                if _is_kernel_strategy(strategy)
+                else None
+            ),
+        }
+    )
+    policy_identity = PolicyIdentity(
+        strategy=strategy,
+        base_prompt_version=BASE_PROMPT_VERSION,
+        base_prompt_sha256=hashlib.sha256(BASE_PROMPT.encode("utf-8")).hexdigest(),
+        strategy_prompt_version=strategy_prompt_version,
+        strategy_prompt_sha256=hashlib.sha256(strategy_prompt.encode("utf-8")).hexdigest(),
+        controller_protocol_version=CONTROLLER_PROTOCOL_VERSION,
+        controller_protocol_sha256=controller_protocol_sha256,
+        tool_schema_sha256=_sha256_json(tool_schema_payload),
+    )
+    return PolicySurface(
+        tool_schema_payload=tool_schema_payload,
+        strategy_prompt_version=strategy_prompt_version,
+        strategy_prompt_sha256=policy_identity.strategy_prompt_sha256,
+        controller_protocol_sha256=controller_protocol_sha256,
+        final_diagnosis_schema_sha256=final_diagnosis_schema_sha256,
+        policy_identity=policy_identity,
+    )
+
+
+@lru_cache(maxsize=len(MODEL_STRATEGIES))
+def _cached_policy_surface(strategy: DiagnosticStrategy) -> PolicySurface:
+    return _build_policy_surface(strategy)
+
+
+def policy_surface_for_strategy(
+    strategy: DiagnosticStrategy,
+    *,
+    model: Model | None = None,
+) -> PolicySurface:
+    strategy = DiagnosticStrategy(strategy)
+    return (
+        _cached_policy_surface(strategy)
+        if model is None
+        else _build_policy_surface(strategy, model=model)
+    )
+
+
+def policy_identity_for_strategy(
+    strategy: DiagnosticStrategy,
+    *,
+    model: Model | None = None,
+) -> PolicyIdentity:
+    return policy_surface_for_strategy(strategy, model=model).policy_identity
 
 
 def _execute_evidence(
@@ -895,27 +1035,13 @@ class DiagnosisRunner:
         self._strategy = strategy
         self._context = context
         self._budget = DiagnosisBudget()
-        self._tool_schema_payload = self._build_tool_schema_payload()
-        self._tool_schema_sha256 = _sha256_json(self._tool_schema_payload)
-        self._final_diagnosis_schema_sha256 = _sha256_json(Diagnosis.model_json_schema())
+        surface = policy_surface_for_strategy(strategy, model=model)
+        self._tool_schema_payload = surface.tool_schema_payload
+        self._tool_schema_sha256 = surface.policy_identity.tool_schema_sha256
+        self._final_diagnosis_schema_sha256 = surface.final_diagnosis_schema_sha256
         self._strategy_prompt = load_strategy_prompt(strategy)
-        self._strategy_prompt_version = (
-            KERNEL_PROMPT_VERSION
-            if strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
-            else STATIC_PROMPT_VERSION
-        )
-        self._policy_identity = PolicyIdentity(
-            strategy=strategy,
-            base_prompt_version=BASE_PROMPT_VERSION,
-            base_prompt_sha256=hashlib.sha256(BASE_PROMPT.encode("utf-8")).hexdigest(),
-            strategy_prompt_version=self._strategy_prompt_version,
-            strategy_prompt_sha256=hashlib.sha256(
-                self._strategy_prompt.encode("utf-8")
-            ).hexdigest(),
-            controller_protocol_version=CONTROLLER_PROTOCOL_VERSION,
-            controller_protocol_sha256=self._controller_protocol_hash(),
-            tool_schema_sha256=self._tool_schema_sha256,
-        )
+        self._strategy_prompt_version = surface.strategy_prompt_version
+        self._policy_identity = surface.policy_identity
 
     @classmethod
     def for_run(
@@ -933,6 +1059,8 @@ class DiagnosisRunner:
             project_root = strategy
             strategy = DiagnosticStrategy.DIAGNOSTIC_KERNEL
         strategy = DiagnosticStrategy(strategy)
+        if strategy not in MODEL_STRATEGIES:
+            raise ValueError("strategy is not model-backed")
         context = resolve_run_context(run_id, project_root=project_root)
         if model is None:
             provider = OpenAIProvider(
@@ -986,45 +1114,6 @@ class DiagnosisRunner:
     def policy_identity(self) -> PolicyIdentity:
         return self._policy_identity
 
-    def _build_tool_schema_payload(self) -> list[dict[str, object]]:
-        output_type: type[BaseModel] = (
-            KernelDecision
-            if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
-            else _StaticDecision
-        )
-        schema_agent = Agent(self._model, deps_type=_RunState, output_type=output_type)
-        _register_evidence_tools(schema_agent)
-        payload = _tool_schema_payload(schema_agent)
-        if tuple(item["name"] for item in payload) != TOOL_NAMES:
-            raise RuntimeError("evidence tool registration order is invalid")
-        return payload
-
-    def _controller_protocol_hash(self) -> str:
-        output_type: type[BaseModel] = (
-            KernelDecision
-            if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
-            else _StaticDecision
-        )
-        return _sha256_json(
-            {
-                "strategy": self._strategy.value,
-                "protocol_version": CONTROLLER_PROTOCOL_VERSION,
-                "tool_schemas": self._tool_schema_payload,
-                "budget": {
-                    "model_request_limit": self._budget.model_request_limit,
-                    "tool_call_limit": self._budget.tool_call_limit,
-                    "output_retry_limit": self._budget.output_retry_limit,
-                    "timeout_seconds": self._budget.timeout_seconds,
-                },
-                "decision_schema": output_type.model_json_schema(),
-                "state_schema": (
-                    InvestigationState.model_json_schema()
-                    if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
-                    else None
-                ),
-            }
-        )
-
     def _kernel(self, context: ObservableRunContext) -> DiagnosticKernel:
         observable = context.runtime["observable_relations"]
         brief_subjects = set(context.incident_brief.subjects)
@@ -1034,13 +1123,20 @@ class DiagnosisRunner:
             model_request_limit=self._budget.model_request_limit,
             tool_call_limit=self._budget.tool_call_limit,
             observable_schema_relations=tuple(
-                relation for relation in observable["schema"] if relation in brief_subjects
+                relation
+                for relation in observable["schema"]
+                if relation in brief_subjects
+                and self._strategy is not DiagnosticStrategy.KERNEL_NO_SCHEMA
             ),
             observable_profile_relations=tuple(
-                relation for relation in observable["profile"] if relation in brief_subjects
+                relation
+                for relation in observable["profile"]
+                if relation in brief_subjects
             ),
             observable_history_relations=tuple(
-                relation for relation in observable["history"] if relation in brief_subjects
+                relation
+                for relation in observable["history"]
+                if relation in brief_subjects
             ),
             incident_subjects=context.incident_brief.subjects,
             health_target_subjects=tuple(
@@ -1058,7 +1154,7 @@ class DiagnosisRunner:
     def _agent(self, state: _RunState) -> Agent[_RunState, Any]:
         output_type: type[BaseModel] = (
             KernelDecision
-            if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
+            if _is_kernel_strategy(self._strategy)
             else _StaticDecision
         )
         agent: Agent[_RunState, Any] = Agent(
@@ -1068,12 +1164,16 @@ class DiagnosisRunner:
             system_prompt=f"{BASE_PROMPT}\n\n{self._strategy_prompt}",
             retries={"tools": 1, "output": self._budget.output_retry_limit},
         )
-        _register_evidence_tools(agent)
+        enabled = _enabled_tool_names(self._strategy)
+        _register_evidence_tools(
+            agent,
+            excluded_tool_names=frozenset(set(TOOL_NAMES) - set(enabled)),
+        )
 
         @agent.output_validator
         def validate_output(ctx: RunContext[_RunState], output: Any) -> Any:
             current = ctx.deps
-            if current.strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL:
+            if _is_kernel_strategy(current.strategy):
                 if not isinstance(output, KernelDecision) or current.kernel is None:
                     raise ModelRetry("MODEL_PROTOCOL_ERROR")
                 try:
@@ -1153,7 +1253,7 @@ class DiagnosisRunner:
         )
 
     def _result(self, state: _RunState) -> DiagnosisRunResult:
-        if state.strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL:
+        if _is_kernel_strategy(state.strategy):
             if state.outcome is None or state.kernel is None:
                 raise RuntimeError("diagnosis outcome is missing")
             diagnosis = _diagnosis_from_kernel(state, state.outcome)
@@ -1202,7 +1302,7 @@ class DiagnosisRunner:
     def _model_error_result(self, state: _RunState, reason: str) -> DiagnosisRunResult:
         if reason not in _MODEL_ERROR_REASONS:
             reason = "MODEL_RUNTIME_ERROR"
-        if state.strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL:
+        if _is_kernel_strategy(state.strategy):
             if state.kernel is None:
                 raise RuntimeError("Kernel is not initialized")
             if state.outcome is None:
@@ -1233,7 +1333,7 @@ class DiagnosisRunner:
     async def diagnose(self) -> DiagnosisRunResult:
         kernel = (
             self._kernel(self._context)
-            if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL
+            if _is_kernel_strategy(self._strategy)
             else None
         )
         state = _RunState(
@@ -1264,9 +1364,9 @@ class DiagnosisRunner:
                             tool_calls_limit=self._budget.tool_call_limit,
                         ),
                     )
-            if self._strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL and state.outcome is None:
+            if _is_kernel_strategy(self._strategy) and state.outcome is None:
                 raise RuntimeError("MODEL_PROTOCOL_ERROR")
-            if self._strategy is DiagnosticStrategy.STATIC_SKILL and state.static_diagnosis is None:
+            if not _is_kernel_strategy(self._strategy) and state.static_diagnosis is None:
                 raise RuntimeError("MODEL_PROTOCOL_ERROR")
             return self._result(state)
         except TimeoutError:
@@ -1306,7 +1406,10 @@ __all__ = [
     "KERNEL_PROMPT",
     "KERNEL_PROMPT_VERSION",
     "ModelIdentity",
+    "NO_TOOL_PROMPT",
+    "NO_TOOL_PROMPT_VERSION",
     "P1_ROOT_CAUSE_CODES",
+    "PolicySurface",
     "STATIC_PROMPT",
     "STATIC_PROMPT_VERSION",
     "SYSTEM_PROMPT",
@@ -1315,4 +1418,6 @@ __all__ = [
     "TOOL_NAMES",
     "load_base_prompt",
     "load_strategy_prompt",
+    "policy_identity_for_strategy",
+    "policy_surface_for_strategy",
 ]

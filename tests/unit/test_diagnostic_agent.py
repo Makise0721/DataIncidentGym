@@ -12,12 +12,19 @@ from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from data_incident_gym.diagnosis import Diagnosis, DiagnosticStrategy
+from data_incident_gym.diagnosis import (
+    KERNEL_STRATEGIES,
+    MODEL_STRATEGIES,
+    Diagnosis,
+    DiagnosticStrategy,
+)
 from data_incident_gym.diagnostic_agent import (
     BASE_PROMPT,
     CONTROLLER_PROTOCOL_VERSION,
     KERNEL_PROMPT,
     KERNEL_PROMPT_VERSION,
+    NO_TOOL_PROMPT,
+    NO_TOOL_PROMPT_VERSION,
     P1_ROOT_CAUSE_CODES,
     STATIC_PROMPT,
     STATIC_PROMPT_VERSION,
@@ -114,6 +121,40 @@ def test_shared_tool_surface_and_budget_are_policy_neutral(tmp_path: Path) -> No
     assert tuple(inspect.signature(static.diagnose).parameters) == ()
 
 
+def test_auxiliary_model_strategies_use_only_their_frozen_surfaces(tmp_path: Path) -> None:
+    _write_public_run(tmp_path)
+    model = FunctionModel(lambda _messages, _info: None)
+    runners = {
+        strategy: DiagnosisRunner.for_run(
+            RUN_ID,
+            _settings(),
+            strategy,
+            tmp_path,
+            model=model,
+            tools=SimpleNamespace(),
+            model_identity=ModelIdentity("synthetic", "synthetic-model"),
+        )
+        for strategy in MODEL_STRATEGIES
+    }
+
+    assert tuple(runners) == MODEL_STRATEGIES
+    assert (
+        tuple(item["name"] for item in runners[DiagnosticStrategy.NO_TOOL]._tool_schema_payload)
+        == ()
+    )
+    assert tuple(
+        item["name"] for item in runners[DiagnosticStrategy.KERNEL_NO_LINEAGE]._tool_schema_payload
+    ) == tuple(name for name in TOOL_NAMES if name != "get_dbt_lineage")
+    assert tuple(
+        item["name"] for item in runners[DiagnosticStrategy.KERNEL_NO_SCHEMA]._tool_schema_payload
+    ) == tuple(name for name in TOOL_NAMES if name != "get_relation_schema")
+    assert all(runners[strategy]._tool_schema_payload for strategy in KERNEL_STRATEGIES)
+    assert load_strategy_prompt(DiagnosticStrategy.NO_TOOL) == NO_TOOL_PROMPT
+    assert runners[DiagnosticStrategy.NO_TOOL].policy_identity.strategy_prompt_version == (
+        NO_TOOL_PROMPT_VERSION
+    )
+
+
 def test_static_prompt_is_generic_and_kernel_intent_is_not_a_business_argument() -> None:
     assert load_strategy_prompt(DiagnosticStrategy.STATIC_SKILL) == STATIC_PROMPT
     assert load_strategy_prompt(DiagnosticStrategy.DIAGNOSTIC_KERNEL) == KERNEL_PROMPT
@@ -138,8 +179,7 @@ def test_static_prompt_exposes_the_shared_m7_claim_contract() -> None:
     assert "direct failed node" in STATIC_PROMPT
     assert "downstream model assets" in STATIC_PROMPT
     assert (
-        "upstream source relations are causal inputs, not affected assets"
-        in STATIC_PROMPT.lower()
+        "upstream source relations are causal inputs, not affected assets" in STATIC_PROMPT.lower()
     )
 
 

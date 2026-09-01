@@ -1,12 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from enum import StrEnum
+from pathlib import Path
 
 import typer
 
 from data_incident_gym.baseline import BaselineBuilder, BaselineError
-from data_incident_gym.config import Settings
+from data_incident_gym.benchmark_manifest import (
+    MANIFEST_ID,
+    MANIFEST_PATH,
+    BenchmarkManifestError,
+    build_manifest,
+    freeze_manifest,
+    load_manifest,
+    verify_manifest,
+)
+from data_incident_gym.benchmark_runner import BenchmarkRunner, BenchmarkRunnerError
+from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.diagnosis import DiagnosisStatus, DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import DiagnosisRunner
 from data_incident_gym.diagnostic_config import DiagnosticSettings
@@ -21,9 +33,11 @@ app = typer.Typer(help="可复现的数据事故诊断实验场。")
 pipeline_app = typer.Typer(help="构建并检查 dbt 数据管道。")
 lab_app = typer.Typer(help="重置、注入并复现固定数据故障。")
 eval_app = typer.Typer(help="运行确定性评测与报告闭环。")
+benchmark_app = typer.Typer(help="冻结、验证或执行正式 P1 benchmark。")
 app.add_typer(pipeline_app, name="pipeline")
 app.add_typer(lab_app, name="lab")
 app.add_typer(eval_app, name="eval")
+app.add_typer(benchmark_app, name="benchmark")
 
 
 class CliStrategy(StrEnum):
@@ -37,6 +51,11 @@ STRATEGY_OPTION = typer.Option(
     "--strategy",
     help="诊断策略：diagnostic-kernel 或 static-skill。",
 )
+BENCHMARK_ID_OPTION = typer.Option(MANIFEST_ID, "--manifest-id")
+IMPLEMENTATION_REVISION_OPTION = typer.Option(..., "--implementation-revision")
+BENCHMARK_OUTPUT_OPTION = typer.Option(MANIFEST_PATH, "--output")
+BENCHMARK_MANIFEST_OPTION = typer.Option(..., "--manifest")
+BENCHMARK_SHA256_OPTION = typer.Option(..., "--confirm-sha256")
 
 
 def _diagnostic_strategy(strategy: CliStrategy) -> DiagnosticStrategy:
@@ -83,6 +102,25 @@ def create_evaluation_runner() -> EvaluationRunner:
 
 def create_doctor_runner() -> DoctorRunner:
     return DoctorRunner.for_project(DiagnosticSettings())
+
+
+def create_benchmark_runner(manifest) -> BenchmarkRunner:
+    return BenchmarkRunner.for_project(manifest)
+
+
+def _canonical_benchmark_manifest_path(path: Path) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    if candidate.is_symlink():
+        raise BenchmarkManifestError("formal manifest path must not be a symlink")
+    resolved = candidate.resolve(strict=False)
+    expected = (PROJECT_ROOT / MANIFEST_PATH).resolve(strict=False)
+    if resolved != expected:
+        raise BenchmarkManifestError(
+            "formal manifest path must be config/benchmark/p1-formal-v1.json"
+        )
+    return resolved
 
 
 def _exit_lab_error(error: LabError | ScenarioError) -> None:
@@ -206,6 +244,69 @@ def doctor() -> None:
             typer.echo(DOCTOR_RECOMMENDATIONS_ZH[check.recommendation_code])
     typer.echo("说明：doctor 通过不代表 P0 评测通过。")
     if result.status == DoctorStatus.FAILED:
+        raise typer.Exit(code=1)
+
+
+@benchmark_app.command("freeze")
+def benchmark_freeze(
+    manifest_id: str = BENCHMARK_ID_OPTION,
+    implementation_revision: str = IMPLEMENTATION_REVISION_OPTION,
+    output: Path = BENCHMARK_OUTPUT_OPTION,
+) -> None:
+    """生成一次性的正式 Manifest；不会发起模型请求。"""
+    try:
+        manifest = build_manifest(
+            implementation_revision,
+            manifest_id=manifest_id,
+        )
+        verify_manifest(manifest)
+        path = freeze_manifest(manifest, output)
+    except (BenchmarkManifestError, ValueError) as exc:
+        typer.echo(f"benchmark manifest 冻结失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"manifest: {path}")
+    typer.echo(f"sha256: {manifest.digest()}")
+    typer.echo("cells: 106; model_backed: 94; fixed_rule: 12")
+
+
+@benchmark_app.command("verify")
+def benchmark_verify(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+) -> None:
+    """验证正式 Manifest 与当前结果输入；不会发起模型请求。"""
+    try:
+        manifest = _canonical_benchmark_manifest_path(manifest)
+        loaded = load_manifest(manifest)
+        verify_manifest(loaded)
+    except (BenchmarkManifestError, ValueError) as exc:
+        typer.echo(f"benchmark manifest 验证失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"manifest: {manifest}")
+    typer.echo(f"sha256: {loaded.digest()}")
+    typer.echo("verified: 17 catalog scenarios; 12 formal scenarios; 106 cells; 94 model-backed")
+
+
+@benchmark_app.command("run")
+def benchmark_run(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+) -> None:
+    """执行已冻结的正式 benchmark；无重试、替换或扩展样本选项。"""
+    try:
+        manifest = _canonical_benchmark_manifest_path(manifest)
+        actual_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        if confirm_sha256 != actual_sha256:
+            raise BenchmarkRunnerError("manifest SHA-256 confirmation does not match file")
+        loaded = load_manifest(manifest)
+        verify_manifest(loaded)
+        result = asyncio.run(create_benchmark_runner(loaded).run())
+    except (BenchmarkManifestError, BenchmarkRunnerError, OSError, ValueError) as exc:
+        typer.echo(f"benchmark 执行失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"status: {result.status}")
+    typer.echo(f"cells: {result.terminal_cells}/{result.total_cells}")
+    typer.echo(f"ledger: {result.ledger_path}")
+    if result.status != "COMPLETED":
         raise typer.Exit(code=1)
 
 

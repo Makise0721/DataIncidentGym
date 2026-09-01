@@ -377,11 +377,26 @@ class DoctorRunner:
         postgres_available: bool,
     ) -> tuple[DoctorCheck, DoctorCheck, DoctorCheck, DoctorCheck]:
         profile_spec = None
+        profile_spec_version = "profile_spec.v1"
+        profile_spec_digest = ""
         try:
             profile_spec = load_profile_spec(self._project_root)
-            spec_check = self._check(DoctorCheckCode.PROFILE_SPEC, True, "LOADED")
+            profile_spec_version = getattr(profile_spec, "schema_version", "profile_spec.v1")
+            profile_spec_digest = profile_spec.digest()
+            spec_check = self._check(
+                DoctorCheckCode.PROFILE_SPEC,
+                profile_spec_version == "profile_spec.v1"
+                and bool(re.fullmatch(r"[0-9a-f]{64}", profile_spec_digest)),
+                f"{profile_spec_version}:{profile_spec_digest}",
+            )
         except Exception:
             spec_check = self._check(DoctorCheckCode.PROFILE_SPEC, False, "UNAVAILABLE")
+
+        relation_names = (
+            tuple(item.relation_name for item in profile_spec.relations)
+            if profile_spec is not None and hasattr(profile_spec, "relations")
+            else ("raw_orders",)
+        )
 
         baseline_snapshot = None
         if profile_spec is not None:
@@ -390,14 +405,18 @@ class DoctorRunner:
                     self._project_root / ".dig" / "baseline" / "profile_snapshot.json"
                 )
                 snapshot_ok = (
-                    baseline_snapshot.profile_spec_sha256 == profile_spec.digest()
-                    and any(
-                        item.relation_name == "raw_orders"
-                        for item in baseline_snapshot.current
+                    getattr(baseline_snapshot, "schema_version", None)
+                    == "profile_snapshot.v1"
+                    and getattr(baseline_snapshot, "profile_spec_version", "profile_spec.v1")
+                    == profile_spec_version
+                    and baseline_snapshot.profile_spec_sha256 == profile_spec_digest
+                    and all(
+                        any(item.relation_name == relation for item in baseline_snapshot.current)
+                        for relation in relation_names
                     )
-                    and any(
-                        item.relation_name == "raw_orders"
-                        for item in baseline_snapshot.history
+                    and all(
+                        any(item.relation_name == relation for item in baseline_snapshot.history)
+                        for relation in relation_names
                     )
                 )
             except Exception:
@@ -422,19 +441,23 @@ class DoctorRunner:
                     },
                     read_only=True,
                 )
-                current = reader.read_current("raw_orders")
-                history = reader.read_history("raw_orders")
-                baseline_current = next(
-                    item
-                    for item in baseline_snapshot.current
-                    if item.relation_name == "raw_orders"
-                )
-                baseline_history = next(
-                    item
-                    for item in baseline_snapshot.history
-                    if item.relation_name == "raw_orders"
-                )
-                read_only_ok = current == baseline_current and history == baseline_history
+                read_only_ok = True
+                for relation_name in relation_names:
+                    current = reader.read_current(relation_name)
+                    history = reader.read_history(relation_name)
+                    baseline_current = next(
+                        item
+                        for item in baseline_snapshot.current
+                        if item.relation_name == relation_name
+                    )
+                    baseline_history = next(
+                        item
+                        for item in baseline_snapshot.history
+                        if item.relation_name == relation_name
+                    )
+                    read_only_ok = read_only_ok and (
+                        current == baseline_current and history == baseline_history
+                    )
             except Exception:
                 read_only_ok = False
         read_only_check = self._check(
@@ -456,10 +479,35 @@ class DoctorRunner:
                         **settings_connection_kwargs(self._diagnostic_settings),
                     },
                 )
+                invalid_relation_rejected = False
+                invalid_identifier_rejected = False
                 try:
                     reader.read_current("invalid_relation")
                 except ProfileError:
-                    bounds_ok = True
+                    invalid_relation_rejected = True
+                try:
+                    reader.read_current("raw_orders;select")
+                except ProfileError:
+                    invalid_identifier_rejected = True
+
+                declared_metrics = {
+                    (relation.relation_name, history.name)
+                    for relation in getattr(profile_spec, "relations", ())
+                    for history in relation.histories
+                }
+                observed_metrics = set()
+                for relation_name in relation_names:
+                    history_snapshot = reader.read_history(relation_name)
+                    observed_metrics.update(
+                        (relation_name, series.name)
+                        for series in getattr(history_snapshot, "histories", ())
+                    )
+                metric_scope_ok = not declared_metrics or observed_metrics == declared_metrics
+                bounds_ok = (
+                    invalid_relation_rejected
+                    and invalid_identifier_rejected
+                    and metric_scope_ok
+                )
             except Exception:
                 bounds_ok = False
         bounds_check = self._check(

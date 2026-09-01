@@ -36,6 +36,7 @@ from data_incident_gym.scenarios import (
     P1_M8_SCENARIO_IDS,
     P1_M9_SCENARIO_IDS,
     P1_M10_SCENARIO_IDS,
+    P1_M11_SCENARIO_IDS,
     load_scenario_spec,
 )
 
@@ -44,13 +45,14 @@ MATRIX_CASES = (
     + P1_M8_SCENARIO_IDS
     + P1_M9_SCENARIO_IDS
     + P1_M10_SCENARIO_IDS
+    + P1_M11_SCENARIO_IDS
 )
 MATRIX_STRATEGIES = (
     DiagnosticStrategy.STATIC_SKILL,
     DiagnosticStrategy.DIAGNOSTIC_KERNEL,
 )
-assert len(MATRIX_CASES) == 13
-assert len(MATRIX_CASES) * len(MATRIX_STRATEGIES) == 26
+assert len(MATRIX_CASES) == 17
+assert len(MATRIX_CASES) * len(MATRIX_STRATEGIES) == 34
 M9_EXPECTED = {
     "duplicate_payment_record": (
         "CONFIRMED",
@@ -92,6 +94,31 @@ M10_EXPECTED = {
         ],
     ),
     "orphan_payment_coupon_b": (
+        "INSUFFICIENT_EVIDENCE",
+        None,
+        [],
+    ),
+}
+M11_EXPECTED = {
+    "silent_payment_drop_record": (
+        "CONFIRMED",
+        "SOURCE_PAYMENT_INGESTION_LOSS",
+        [
+            "model.jaffle_shop.customers",
+            "model.jaffle_shop.orders",
+            "model.jaffle_shop.stg_payments",
+        ],
+    ),
+    "silent_payment_drop_partition_a": (
+        "CONFIRMED",
+        "SOURCE_PAYMENT_INGESTION_LOSS",
+        [
+            "model.jaffle_shop.customers",
+            "model.jaffle_shop.orders",
+            "model.jaffle_shop.stg_payments",
+        ],
+    ),
+    "silent_payment_drop_partition_b": (
         "INSUFFICIENT_EVIDENCE",
         None,
         [],
@@ -160,13 +187,399 @@ def _transform_subject(records: tuple[EvidenceRecord, ...]) -> str:
     return "model.jaffle_shop.stg_orders"
 
 
-def _health_point(record: EvidenceRecord) -> tuple[str, int]:
+def _health_point(record: EvidenceRecord, bucket: str) -> tuple[str, int]:
     assert isinstance(record.content, RelationHistoryFact)
     series = next(
         item for item in record.content.snapshot.histories if item.name == "order_count_by_day"
     )
-    point = next(item for item in series.points if item.bucket == "2018-04-02")
+    point = next(item for item in series.points if item.bucket == bucket)
     return point.bucket, int(point.value)
+
+
+def _silent_hypotheses() -> list[dict[str, str]]:
+    return [
+        {
+            "hypothesis_id": "h_silent_loss",
+            "root_cause_code": "SOURCE_PAYMENT_INGESTION_LOSS",
+        },
+        {
+            "hypothesis_id": "h_payment_decline",
+            "root_cause_code": "NORMAL_BUSINESS_PAYMENT_DECLINE",
+        },
+    ]
+
+
+def _silent_hypothesis_ids() -> list[str]:
+    return [item["hypothesis_id"] for item in _silent_hypotheses()]
+
+
+def _silent_insufficient_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+    payment_relation: str,
+    order_relation: str,
+) -> ModelResponse:
+    records = (
+        *_returned_records(messages, "get_dbt_run_results"),
+        *_returned_records(messages, "get_dbt_lineage"),
+        *_returned_records(messages, "get_relation_schema"),
+        *_returned_records(messages, "get_relation_data_profile"),
+    )
+    evidence_ids = [record.evidence_id for record in records]
+    unresolved = [
+        {
+            "evidence_kind": "RELATION_HISTORY",
+            "subject": payment_relation,
+            "reason_code": "RELATION_NOT_ALLOWED",
+        },
+        {
+            "evidence_kind": "RELATION_HISTORY",
+            "subject": order_relation,
+            "reason_code": "RELATION_NOT_ALLOWED",
+        },
+        {
+            "evidence_kind": "INGESTION_WATERMARK",
+            "subject": order_relation,
+            "reason_code": "NOT_OBSERVABLE",
+        },
+    ]
+    if strategy is DiagnosticStrategy.STATIC_SKILL:
+        payload = {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "run_id": run_id,
+            "summary": "Payment history and the settled ingestion watermark are unavailable.",
+            "affected_assets": [],
+            "evidence_ids": evidence_ids,
+            "claims": [],
+            "unresolved_evidence": unresolved,
+            "recommended_actions": ["Collect both payment and order history boundaries."],
+            "confidence": 0.2,
+        }
+    else:
+        payload = {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "run_id": run_id,
+            "selected_hypothesis_id": None,
+            "assessments": [],
+            "claims": [],
+            "unresolved_evidence": unresolved,
+            "summary": "Payment history and the settled ingestion watermark are unavailable.",
+            "recommended_actions": ["Collect both payment and order history boundaries."],
+            "confidence": 0.2,
+        }
+    return _tool_call(agent_info.output_tools[0].name, payload, "silent-insufficient")
+
+
+def _silent_confirmed_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+    payment_relation: str,
+    order_relation: str,
+) -> ModelResponse:
+    run_records = _returned_records(messages, "get_dbt_run_results")
+    lineages = tuple(
+        record
+        for record in _returned_records(messages, "get_dbt_lineage")
+        if getattr(record.content, "direction", None) == "downstream"
+    )
+    schemas = _returned_records(messages, "get_relation_schema")
+    profiles = _returned_records(messages, "get_relation_data_profile")
+    histories = _returned_records(messages, "get_relation_history")
+    payment_profile = next(
+        record
+        for record in profiles
+        if getattr(record.content, "relation_name", None) == payment_relation
+    )
+    order_profile = next(
+        record
+        for record in profiles
+        if getattr(record.content, "relation_name", None) == order_relation
+    )
+    payment_history = next(
+        record
+        for record in histories
+        if getattr(record.content, "relation_name", None) == payment_relation
+    )
+    order_history = next(
+        record
+        for record in histories
+        if getattr(record.content, "relation_name", None) == order_relation
+    )
+    records = (
+        *run_records,
+        *lineages,
+        *schemas,
+        *profiles,
+        *histories,
+    )
+    evidence_ids = [record.evidence_id for record in records]
+    root_evidence_ids = [
+        run_records[-1].evidence_id,
+        payment_profile.evidence_id,
+        order_profile.evidence_id,
+        payment_history.evidence_id,
+        order_history.evidence_id,
+    ]
+    assets = tuple(
+        sorted(
+            node.node_id
+            for node in lineages[-1].content.related_nodes
+            if node.resource_type == "model"
+        )
+    )
+    if strategy is DiagnosticStrategy.STATIC_SKILL:
+        payload = {
+            "status": "CONFIRMED",
+            "run_id": run_id,
+            "root_cause_code": "SOURCE_PAYMENT_INGESTION_LOSS",
+            "summary": "The settled payment volume is missing source events.",
+            "affected_assets": list(assets),
+            "evidence_ids": evidence_ids,
+            "claims": [
+                {
+                    "kind": "ROOT_CAUSE",
+                    "root_cause_code": "SOURCE_PAYMENT_INGESTION_LOSS",
+                    "evidence_ids": root_evidence_ids,
+                },
+                *(
+                    {
+                        "kind": "AFFECTED_ASSET",
+                        "asset": asset,
+                        "evidence_ids": [lineages[-1].evidence_id],
+                    }
+                    for asset in assets
+                ),
+            ],
+            "unresolved_evidence": [],
+            "recommended_actions": ["Reconcile the missing settled payment events."],
+            "confidence": 0.9,
+        }
+    else:
+        hypothesis_ids = _silent_hypothesis_ids()
+        payload = {
+            "status": "CONFIRMED",
+            "run_id": run_id,
+            "selected_hypothesis_id": hypothesis_ids[0],
+            "assessments": [
+                {
+                    "hypothesis_id": hypothesis_ids[0],
+                    "verdict": "SUPPORTED",
+                    "evidence_ids": root_evidence_ids,
+                },
+                {
+                    "hypothesis_id": hypothesis_ids[1],
+                    "verdict": "REFUTED",
+                    "evidence_ids": [
+                        payment_profile.evidence_id,
+                        order_profile.evidence_id,
+                    ],
+                },
+            ],
+            "claims": [
+                {
+                    "kind": "ROOT_CAUSE",
+                    "value": "SOURCE_PAYMENT_INGESTION_LOSS",
+                    "evidence_ids": root_evidence_ids,
+                },
+                *(
+                    {
+                        "kind": "AFFECTED_ASSET",
+                        "value": asset,
+                        "evidence_ids": [lineages[-1].evidence_id],
+                    }
+                    for asset in assets
+                ),
+            ],
+            "unresolved_evidence": [],
+            "summary": "The settled payment volume is missing source events.",
+            "recommended_actions": ["Reconcile the missing settled payment events."],
+            "confidence": 0.9,
+        }
+    return _tool_call(agent_info.output_tools[0].name, payload, "silent-confirmed")
+
+
+def _silent_payment_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+    incident_subjects: tuple[str, ...],
+    schema_relations: tuple[str, ...],
+    profile_relations: tuple[str, ...],
+    history_relations: tuple[str, ...],
+) -> ModelResponse:
+    payment_seed = next(
+        subject
+        for subject in incident_subjects
+        if subject.startswith("seed.") and subject.endswith(".raw_payments")
+    )
+    payment_relation = payment_seed.rsplit(".", 1)[-1]
+    order_relation = next(
+        relation for relation in profile_relations if relation != payment_relation
+    )
+    lineages = tuple(
+        record
+        for record in _returned_records(messages, "get_dbt_lineage")
+        if getattr(record.content, "direction", None) == "downstream"
+    )
+    if not lineages:
+        return _with_intent(
+            _tool_call(
+                "get_dbt_lineage",
+                {"node_id": payment_seed, "direction": "downstream"},
+                "silent-lineage",
+            ),
+            strategy,
+            _intent(
+                "g_silent_lineage",
+                "MAP_IMPACT",
+                new_hypotheses=_silent_hypotheses(),
+            ),
+        )
+    schemas = tuple(
+        record
+        for record in _returned_records(messages, "get_relation_schema")
+        if getattr(record.content, "relation_name", None) == payment_relation
+    )
+    if not schemas:
+        return _with_intent(
+            _tool_call(
+                "get_relation_schema",
+                {"relation_name": payment_relation},
+                "silent-schema",
+            ),
+            strategy,
+            _intent(
+                "g_silent_schema",
+                "DISCRIMINATE_SCHEMA",
+                hypothesis_ids=_silent_hypothesis_ids(),
+            ),
+        )
+    profiles = _returned_records(messages, "get_relation_data_profile")
+    if not any(
+        getattr(record.content, "relation_name", None) == payment_relation
+        for record in profiles
+    ):
+        return _with_intent(
+            _tool_call(
+                "get_relation_data_profile",
+                {"relation_name": payment_relation},
+                "silent-payment-profile",
+            ),
+            strategy,
+            _intent(
+                "g_silent_payment_profile",
+                "PROFILE_RELATION",
+                hypothesis_ids=_silent_hypothesis_ids(),
+            ),
+        )
+    if not any(
+        getattr(record.content, "relation_name", None) == order_relation
+        for record in profiles
+    ):
+        return _with_intent(
+            _tool_call(
+                "get_relation_data_profile",
+                {"relation_name": order_relation},
+                "silent-order-profile",
+            ),
+            strategy,
+            _intent(
+                "g_silent_order_profile",
+                "PROFILE_RELATION",
+                hypothesis_ids=_silent_hypothesis_ids(),
+            ),
+        )
+    histories = _returned_records(messages, "get_relation_history")
+    payment_history = any(
+        getattr(record.content, "relation_name", None) == payment_relation
+        for record in histories
+    )
+    order_history = any(
+        getattr(record.content, "relation_name", None) == order_relation
+        for record in histories
+    )
+    if not history_relations:
+        attempts = _tool_attempts(messages, "get_relation_history")
+        if attempts == 0:
+            return _with_intent(
+                _tool_call(
+                    "get_relation_history",
+                    {"relation_name": payment_relation},
+                    "silent-payment-history",
+                ),
+                strategy,
+                _intent(
+                    "g_silent_payment_history",
+                    "COMPARE_HISTORY",
+                    hypothesis_ids=_silent_hypothesis_ids(),
+                ),
+            )
+        if attempts == 1:
+            return _with_intent(
+                _tool_call(
+                    "get_relation_history",
+                    {"relation_name": order_relation},
+                    "silent-order-history",
+                ),
+                strategy,
+                _intent(
+                    "g_silent_order_history",
+                    "COMPARE_HISTORY",
+                    hypothesis_ids=_silent_hypothesis_ids(),
+                ),
+            )
+        return _silent_insufficient_response(
+            messages,
+            agent_info,
+            run_id=run_id,
+            strategy=strategy,
+            payment_relation=payment_relation,
+            order_relation=order_relation,
+        )
+    if not payment_history:
+        return _with_intent(
+            _tool_call(
+                "get_relation_history",
+                {"relation_name": payment_relation},
+                "silent-payment-history",
+            ),
+            strategy,
+            _intent(
+                "g_silent_payment_history",
+                "COMPARE_HISTORY",
+                hypothesis_ids=_silent_hypothesis_ids(),
+            ),
+        )
+    if not order_history:
+        return _with_intent(
+            _tool_call(
+                "get_relation_history",
+                {"relation_name": order_relation},
+                "silent-order-history",
+            ),
+            strategy,
+            _intent(
+                "g_silent_order_history",
+                "COMPARE_HISTORY",
+                hypothesis_ids=_silent_hypothesis_ids(),
+            ),
+        )
+    return _silent_confirmed_response(
+        messages,
+        agent_info,
+        run_id=run_id,
+        strategy=strategy,
+        payment_relation=payment_relation,
+        order_relation=order_relation,
+    )
 
 
 def _model_response(
@@ -179,6 +592,8 @@ def _model_response(
     incident_subjects: tuple[str, ...],
     schema_relations: tuple[str, ...],
     profile_relations: tuple[str, ...],
+    history_relations: tuple[str, ...],
+    alert_bucket: str | None,
 ) -> ModelResponse:
     run_records = _returned_records(messages, "get_dbt_run_results")
     node_errors = _returned_records(messages, "get_dbt_node_error")
@@ -212,6 +627,17 @@ def _model_response(
                 incident_subjects=incident_subjects,
                 profile_relations=profile_relations,
             )
+        if signal_code == "PAYMENT_VOLUME_ALERT":
+            return _silent_payment_response(
+                messages,
+                agent_info,
+                run_id=run_id,
+                strategy=strategy,
+                incident_subjects=incident_subjects,
+                schema_relations=schema_relations,
+                profile_relations=profile_relations,
+                history_relations=history_relations,
+            )
         if not profiles:
             tool = _tool_call(
                 "get_relation_data_profile",
@@ -226,7 +652,9 @@ def _model_response(
                 "history",
             )
             return _with_intent(tool, strategy, _intent("g_history", "COMPARE_HISTORY"))
-        bucket, value = _health_point(histories[-1])
+        if alert_bucket is None:
+            raise AssertionError("health control is missing a current-period observation")
+        bucket, value = _health_point(histories[-1], alert_bucket)
         evidence_ids = [
             run_records[-1].evidence_id,
             profiles[-1].evidence_id,
@@ -1479,6 +1907,17 @@ def _runner(project_root: Path, strategy: DiagnosticStrategy) -> EvaluationRunne
                     profile_relations=tuple(
                         public_context.runtime["observable_relations"]["profile"]
                     ),
+                    history_relations=tuple(
+                        public_context.runtime["observable_relations"]["history"]
+                    ),
+                    alert_bucket=next(
+                        (
+                            observation.subject.rsplit("/", 1)[-1]
+                            for observation in public_context.incident_brief.observations
+                            if observation.kind == "CURRENT_PERIOD_COUNT"
+                        ),
+                        None,
+                    ),
                 )
             ),
             model_identity=ModelIdentity(
@@ -1557,6 +1996,28 @@ async def test_p1_function_model_policy_matrix(
             }
         else:
             assert diagnosis["unresolved_evidence"] == []
+
+    if case_id in P1_M11_SCENARIO_IDS:
+        if case_id == "order_volume_within_sla":
+            assert diagnosis["status"] == "NO_INCIDENT"
+            assert diagnosis["root_cause_code"] is None
+            assert diagnosis["affected_assets"] == []
+        else:
+            expected_status, expected_root, expected_assets = M11_EXPECTED[case_id]
+            assert diagnosis["status"] == expected_status
+            assert diagnosis["root_cause_code"] == expected_root
+            assert diagnosis["affected_assets"] == expected_assets
+            if case_id == "silent_payment_drop_partition_b":
+                assert {
+                    (item["evidence_kind"], item["subject"], item["reason_code"])
+                    for item in diagnosis["unresolved_evidence"]
+                } == {
+                    ("RELATION_HISTORY", "raw_payments", "RELATION_NOT_ALLOWED"),
+                    ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED"),
+                    ("INGESTION_WATERMARK", "raw_orders", "NOT_OBSERVABLE"),
+                }
+            else:
+                assert diagnosis["unresolved_evidence"] == []
 
     if case_id in P1_M8_SCENARIO_IDS:
         assert diagnosis["status"] == (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -135,6 +136,16 @@ def test_static_run_writes_exactly_six_files_without_kernel_state(tmp_path: Path
     report = (output / "report.md").read_text(encoding="utf-8")
     assert "STATIC_SKILL" in report
     assert "Kernel 调查状态" not in report
+
+
+def test_manifest_digest_is_propagated_to_metadata(tmp_path: Path) -> None:
+    digest = "f" * 64
+    run = _artifact_run().model_copy(update={"benchmark_manifest_sha256": digest})
+
+    output = ArtifactWriter(tmp_path, run_command=_git_command).write(run)
+
+    metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["benchmark_manifest_sha256"] == digest
 
 
 def test_expected_anomaly_keeps_private_status_out_of_the_six_file_contract(

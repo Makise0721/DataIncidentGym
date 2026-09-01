@@ -26,6 +26,7 @@ from pydantic import (
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import (
+    KERNEL_STRATEGIES,
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
@@ -170,6 +171,7 @@ class ArtifactRun(BaseModel):
     finished_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]
     recovery_status: RecoveryStatus
     model_base_url: StrictStr
+    benchmark_manifest_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
     diagnosis_run: DiagnosisRunResult
     evaluation: EvaluationResult
 
@@ -328,7 +330,7 @@ class ArtifactWriter:
             controller_protocol_version=identity.controller_protocol_version,
             controller_protocol_sha256=identity.controller_protocol_sha256,
             tool_schema_sha256=identity.tool_schema_sha256,
-            benchmark_manifest_sha256=None,
+            benchmark_manifest_sha256=run.benchmark_manifest_sha256,
             variant_role=run.evaluation.variant_role,
             answerability=run.evaluation.answerability,
             expected_status=run.evaluation.expected_status,
@@ -473,7 +475,7 @@ class ArtifactWriter:
         kernel_events = tuple(
             item.event for item in trace_envelopes if isinstance(item.event, KernelStateTraceEvent)
         )
-        if run.diagnosis_run.strategy is DiagnosticStrategy.DIAGNOSTIC_KERNEL:
+        if run.diagnosis_run.strategy in KERNEL_STRATEGIES:
             if (
                 len(trace_envelopes) < 2
                 or len(kernel_events) != 1
