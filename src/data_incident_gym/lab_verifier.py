@@ -25,9 +25,11 @@ from data_incident_gym.scenarios import (
     ColumnTypeMutation,
     DuplicatePaymentRowsMutation,
     NoMutation,
+    OrphanPaymentRowsMutation,
     ScenarioSpec,
     SetFieldNullMutation,
     load_scenario_spec,
+    orphan_payment_rows,
     parse_scenario_spec,
 )
 
@@ -47,6 +49,7 @@ _EXPECTED_PAYMENT_DUPLICATES = {
     "duplicate_payment_coupon_a": (116, 0, 3, "coupon", 16),
     "duplicate_payment_coupon_b": (116, 0, 3, "coupon", 16),
 }
+_EXPECTED_ORPHAN_CHANNEL_COUNTS = {"credit_card": 56, "coupon": 16}
 
 DatabaseConnect = Callable[..., Any]
 
@@ -438,7 +441,7 @@ class IncidentVerifier:
                         max((item.ordinal_position for item in columns), default=0) + 1,
                     )
                 )
-            elif isinstance(mutation, DuplicatePaymentRowsMutation):
+            elif isinstance(mutation, (DuplicatePaymentRowsMutation, OrphanPaymentRowsMutation)):
                 expected_row_count += len(mutation.inserted_payment_ids)
             elif isinstance(mutation, SetFieldNullMutation):
                 pass
@@ -609,6 +612,183 @@ class IncidentVerifier:
         ):
             raise _clean(LabVerificationError("duplicate-payment public profile 事实不匹配"))
 
+    def _validate_orphan_payments(
+        self,
+        scenario: ScenarioSpec,
+        profile: ProfileSnapshot,
+    ) -> None:
+        mutation = next(
+            (
+                item
+                for item in scenario.reset_and_injection_contract.mutations
+                if isinstance(item, OrphanPaymentRowsMutation)
+            ),
+            None,
+        )
+        if mutation is None:
+            raise _clean(LabVerificationError("orphan-payment mutation 不在冻结私有集合中"))
+        rows = orphan_payment_rows(mutation)
+        channel = rows[0][2]
+        expected_channel_count = _EXPECTED_ORPHAN_CHANNEL_COUNTS.get(channel)
+        if expected_channel_count is None:
+            raise _clean(LabVerificationError("orphan-payment 渠道不在冻结私有集合中"))
+        table = sql.SQL("{}.{}").format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+        )
+        orders_table = sql.SQL("{}.{}").format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier("raw_orders"),
+        )
+        rows_query = sql.SQL(
+            "SELECT id, order_id, payment_method, amount FROM {} "
+            "WHERE id = ANY(%s) ORDER BY id"
+        ).format(table)
+        row_count_query = sql.SQL("SELECT count(*) FROM {}").format(table)
+        key_query = sql.SQL(
+            "SELECT COALESCE(sum(group_count - 1) FILTER (WHERE group_count > 1), 0) "
+            "FROM (SELECT id, count(*) AS group_count FROM {} GROUP BY id) grouped"
+        ).format(table)
+        fingerprint_query = sql.SQL(
+            "SELECT COALESCE(sum(group_count - 1) FILTER (WHERE group_count > 1), 0) "
+            "FROM (SELECT order_id, payment_method, amount, count(*) AS group_count "
+            "FROM {} GROUP BY order_id, payment_method, amount) grouped"
+        ).format(table)
+        relationship_query = sql.SQL(
+            "SELECT count(*) FROM {} payments "
+            "LEFT JOIN {} orders ON payments.order_id = orders.id "
+            "WHERE orders.id IS NULL"
+        ).format(table, orders_table)
+        channel_query = sql.SQL(
+            "SELECT count(*) FROM {} WHERE payment_method IS NOT DISTINCT FROM %s"
+        ).format(table)
+        order_count_query = sql.SQL("SELECT count(*) FROM {}").format(orders_table)
+        missing_orders_query = sql.SQL(
+            "SELECT count(*) FROM {} WHERE id = ANY(%s)"
+        ).format(orders_table)
+
+        def scalar(cursor: Any, query: sql.Composed, params: tuple[Any, ...] = ()) -> int:
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            if row is None:
+                raise LabVerificationError("orphan-payment 聚合查询没有返回结果")
+            return int(row[0])
+
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(rows_query, (list(mutation.inserted_payment_ids),))
+                observed_rows = tuple(tuple(row) for row in cursor.fetchall())
+                observed = (
+                    scalar(cursor, row_count_query),
+                    scalar(cursor, key_query),
+                    scalar(cursor, fingerprint_query),
+                    scalar(cursor, relationship_query),
+                    scalar(cursor, channel_query, (channel,)),
+                    scalar(cursor, order_count_query),
+                    scalar(cursor, missing_orders_query, (list(mutation.missing_order_ids),)),
+                )
+        except LabVerificationError:
+            raise
+        except Exception as exc:
+            raise _clean(LabVerificationError(f"无法验证 orphan-payment 聚合：{exc}")) from None
+
+        expected_rows = tuple(sorted(rows))
+        expected = (
+            113 + len(rows),
+            0,
+            0,
+            len(rows),
+            expected_channel_count,
+            99,
+            0,
+        )
+        if observed_rows != expected_rows or observed != expected:
+            raise _clean(LabVerificationError("orphan-payment 私有聚合事实不匹配"))
+
+        public_snapshot = next(
+            (item for item in profile.current if item.relation_name == mutation.relation),
+            None,
+        )
+        if (
+            public_snapshot is None
+            or mutation.relation not in scenario.observable_evidence_contract.profile_relations
+        ):
+            raise _clean(LabVerificationError("orphan-payment profile 公开边界不匹配"))
+        relationship_fact = next(
+            (
+                item
+                for item in public_snapshot.relationship_violations
+                if item.name == "order_id_to_raw_orders_id"
+            ),
+            None,
+        )
+        key_fact = next(
+            (item for item in public_snapshot.business_key_duplicates if item.name == "id"),
+            None,
+        )
+        fingerprint_fact = next(
+            (
+                item
+                for item in public_snapshot.business_fingerprint_duplicates
+                if item.name == "order_payment_amount"
+            ),
+            None,
+        )
+        group_fact = next(
+            (item for item in public_snapshot.groups if item.name == "payment_method"),
+            None,
+        )
+        channel_count = None
+        if group_fact is not None:
+            channel_count = next(
+                (
+                    count
+                    for values, count in zip(group_fact.values, group_fact.counts, strict=True)
+                    if values == (channel,)
+                ),
+                None,
+            )
+        if (
+            relationship_fact is None
+            or key_fact is None
+            or fingerprint_fact is None
+            or relationship_fact.violation_count != len(rows)
+            or key_fact.duplicate_count != 0
+            or fingerprint_fact.duplicate_count != 0
+            or channel_count != expected_channel_count
+        ):
+            raise _clean(LabVerificationError("orphan-payment public profile 事实不匹配"))
+
+        history_is_public = "raw_orders" in scenario.observable_evidence_contract.history_relations
+        history_snapshot = next(
+            (item for item in profile.history if item.relation_name == "raw_orders"),
+            None,
+        )
+        order_snapshot = next(
+            (item for item in profile.current if item.relation_name == "raw_orders"),
+            None,
+        )
+        if not history_is_public:
+            if history_snapshot is not None or order_snapshot is not None:
+                raise _clean(LabVerificationError("orphan-payment history 公开边界不匹配"))
+            return
+        if history_snapshot is None or order_snapshot is None or order_snapshot.row_count != 99:
+            raise _clean(LabVerificationError("orphan-payment history 公开事实缺失"))
+        series = next(
+            (item for item in history_snapshot.histories if item.name == "order_count_by_day"),
+            None,
+        )
+        if (
+            series is None
+            or not series.points
+            or series.watermark_column != "order_date"
+            or series.watermark_value != "2018-04-09"
+        ):
+            raise _clean(LabVerificationError("orphan-payment history watermark 无效"))
+
     def _write_private_verification(
         self,
         run_id: str,
@@ -748,7 +928,10 @@ class IncidentVerifier:
             mutation = next(
                 item
                 for item in scenario.reset_and_injection_contract.mutations
-                if isinstance(item, DuplicatePaymentRowsMutation)
+                if isinstance(
+                    item,
+                    (DuplicatePaymentRowsMutation, OrphanPaymentRowsMutation),
+                )
             )
             seed_nodes = tuple(
                 node_id
@@ -756,7 +939,7 @@ class IncidentVerifier:
                 if node.get("resource_type") == "seed" and node.get("name") == mutation.relation
             )
             if len(seed_nodes) != 1:
-                raise _clean(LabVerificationError("duplicate-payment seed anchor 不唯一"))
+                raise _clean(LabVerificationError("source-data seed anchor 不唯一"))
             affected = self._affected_models(manifest, seed_nodes[0])
             if affected != set(scenario.affected_assets):
                 raise _clean(LabVerificationError("data anomaly 影响模型集合不匹配"))
@@ -771,7 +954,12 @@ class IncidentVerifier:
                 relations,
                 {item.name: item for item in baseline_relation_items},
             )
-            self._validate_payment_duplicates(scenario, profile)
+            if isinstance(mutation, DuplicatePaymentRowsMutation):
+                self._validate_payment_duplicates(scenario, profile)
+            elif isinstance(mutation, OrphanPaymentRowsMutation):
+                self._validate_orphan_payments(scenario, profile)
+            else:
+                raise _clean(LabVerificationError("data anomaly mutation 未授权"))
             status = ScenarioVerificationStatus.EXPECTED_ANOMALY
         else:
             if dbt_exit_code == 0:

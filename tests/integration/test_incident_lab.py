@@ -188,3 +188,86 @@ def test_m9_duplicate_profiles_and_recovery(project_root: Path) -> None:
 
         assert recovered.state == "HEALTHY"
         assert recovered.fingerprint == baseline.fingerprint
+
+
+@pytest.mark.integration
+def test_m10_orphan_profiles_and_recovery(project_root: Path) -> None:
+    lab = IncidentLab(Settings(_env_file=None), project_root)
+    expected = {
+        "orphan_payment_record": (1, "credit_card", 56, True),
+        "orphan_payment_coupon_a": (3, "coupon", 16, True),
+        "orphan_payment_coupon_b": (3, "coupon", 16, False),
+    }
+
+    for case_id, (violations, channel, channel_count, history_visible) in expected.items():
+        baseline = lab.reset(case_id)
+        try:
+            prepared = lab.prepare(case_id)
+            assert prepared.state == "INJECTED"
+            run = lab.build(case_id)
+            verification = lab.verifier.load_verification(run.run_id)
+            assert run.dbt_exit_code == 0
+            assert run.verification_status is ScenarioVerificationStatus.EXPECTED_ANOMALY
+            assert verification.status is ScenarioVerificationStatus.EXPECTED_ANOMALY
+            assert verification.failed_nodes == ()
+            assert verification.skipped_nodes == ()
+
+            profile = load_profile_snapshot(run.artifact_dir / "profile_snapshot.json")
+            payments = next(
+                item for item in profile.current if item.relation_name == "raw_payments"
+            )
+            relationship = next(
+                item
+                for item in payments.relationship_violations
+                if item.name == "order_id_to_raw_orders_id"
+            )
+            key = next(
+                item for item in payments.business_key_duplicates if item.name == "id"
+            )
+            fingerprint = next(
+                item
+                for item in payments.business_fingerprint_duplicates
+                if item.name == "order_payment_amount"
+            )
+            group = next(item for item in payments.groups if item.name == "payment_method")
+            observed_channel_count = next(
+                count
+                for values, count in zip(group.values, group.counts, strict=True)
+                if values == (channel,)
+            )
+            assert (
+                payments.row_count,
+                relationship.violation_count,
+                key.duplicate_count,
+                fingerprint.duplicate_count,
+                observed_channel_count,
+            ) == (113 + violations, violations, 0, 0, channel_count)
+
+            order_profile = next(
+                (item for item in profile.current if item.relation_name == "raw_orders"),
+                None,
+            )
+            order_history = next(
+                (item for item in profile.history if item.relation_name == "raw_orders"),
+                None,
+            )
+            assert (order_profile is not None) is history_visible
+            assert (order_history is not None) is history_visible
+            if history_visible:
+                series = next(
+                    item
+                    for item in order_history.histories
+                    if item.name == "order_count_by_day"
+                )
+                assert series.watermark_column == "order_date"
+                assert series.watermark_value == "2018-04-09"
+        finally:
+            recovered = lab.restore(case_id)
+
+        assert recovered.state == "HEALTHY"
+        assert recovered.fingerprint == baseline.fingerprint
+        assert lab._healthy_relation("raw_payments").row_count == 113
+        assert lab._healthy_relation("raw_orders").row_count == 99
+        assert "source_batch_note" not in {
+            column.name for column in lab._healthy_relation("raw_payments").columns
+        }

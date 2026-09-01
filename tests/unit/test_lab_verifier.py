@@ -12,6 +12,17 @@ from data_incident_gym.lab_verifier import (
     ScenarioVerification,
     ScenarioVerificationStatus,
 )
+from data_incident_gym.profiles import (
+    DuplicateProfileFact,
+    GroupProfileFact,
+    HistoryMetric,
+    HistoryPoint,
+    HistorySeries,
+    ProfileSnapshot,
+    RelationHistorySnapshot,
+    RelationProfileSnapshot,
+    RelationshipViolationFact,
+)
 from data_incident_gym.scenarios import load_scenario_spec
 
 RUN_ID = "a" * 32
@@ -140,3 +151,232 @@ def test_mutation_schema_projects_all_mutations_on_one_relation_before_comparing
         {"raw_payments": actual},
         {"raw_payments": baseline},
     )
+
+
+def test_mutation_schema_projects_orphan_rows_before_comparing() -> None:
+    scenario = load_scenario_spec("orphan_payment_coupon_a")
+    baseline = RelationSummary(
+        "raw_payments",
+        113,
+        (
+            ColumnSummary("id", "integer", True, 1),
+            ColumnSummary("order_id", "integer", True, 2),
+            ColumnSummary("payment_method", "text", True, 3),
+            ColumnSummary("amount", "integer", True, 4),
+        ),
+    )
+    actual = RelationSummary(
+        "raw_payments",
+        116,
+        baseline.columns + (ColumnSummary("source_batch_note", "text", True, 5),),
+    )
+
+    IncidentVerifier._validate_mutation_schema(
+        scenario,
+        {"raw_payments": actual},
+        {"raw_payments": baseline},
+    )
+
+
+class _AggregateCursor:
+    def __init__(
+        self,
+        rows: tuple[tuple[object, ...], ...],
+        scalar_values: tuple[tuple[object, ...], ...],
+    ) -> None:
+        self.rows = rows
+        self.scalar_values = iter(scalar_values)
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def __enter__(self) -> _AggregateCursor:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, statement: object, params: tuple[object, ...] = ()) -> None:
+        self.calls.append((str(statement), params))
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return list(self.rows)
+
+    def fetchone(self) -> tuple[object, ...]:
+        return next(self.scalar_values)
+
+
+class _AggregateConnection:
+    def __init__(self, cursor: _AggregateCursor) -> None:
+        self.cursor_instance = cursor
+
+    def __enter__(self) -> _AggregateConnection:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> _AggregateCursor:
+        return self.cursor_instance
+
+
+def _orphan_profile(
+    *,
+    row_count: int,
+    violation_count: int,
+    channel: str,
+    channel_count: int,
+    history: bool,
+) -> ProfileSnapshot:
+    current = [
+        RelationProfileSnapshot(
+            relation_name="raw_payments",
+            row_count=row_count,
+            columns=(),
+            business_key_duplicates=(DuplicateProfileFact(name="id", duplicate_count=0),),
+            business_fingerprint_duplicates=(
+                DuplicateProfileFact(name="order_payment_amount", duplicate_count=0),
+            ),
+            relationship_violations=(
+                RelationshipViolationFact(
+                    name="order_id_to_raw_orders_id",
+                    violation_count=violation_count,
+                ),
+            ),
+            groups=(
+                GroupProfileFact(
+                    name="payment_method",
+                    columns=("payment_method",),
+                    values=((channel,),),
+                    counts=(channel_count,),
+                ),
+            ),
+        ),
+    ]
+    history_snapshots = ()
+    if history:
+        current.append(
+            RelationProfileSnapshot(relation_name="raw_orders", row_count=99, columns=())
+        )
+        history_snapshots = (
+            RelationHistorySnapshot(
+                relation_name="raw_orders",
+                histories=(
+                    HistorySeries(
+                        name="order_count_by_day",
+                        metric=HistoryMetric.COUNT,
+                        points=(
+                            HistoryPoint(bucket="2018-04-09", periodic_key="1", value=1),
+                        ),
+                        watermark_column="order_date",
+                        watermark_value="2018-04-09",
+                    ),
+                ),
+            ),
+        )
+    return ProfileSnapshot(
+        schema_version="profile_snapshot.v1",
+        profile_spec_version="profile_spec.v1",
+        profile_spec_sha256="b" * 64,
+        current=tuple(sorted(current, key=lambda item: item.relation_name)),
+        history=history_snapshots,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_id", "rows", "scalars"),
+    (
+        (
+            "orphan_payment_record",
+            ((114, 1000, "credit_card", 1000),),
+            ((114,), (0,), (0,), (1,), (56,), (99,), (0,)),
+        ),
+        (
+            "orphan_payment_coupon_a",
+            (
+                (114, 1000, "coupon", 1700),
+                (115, 1001, "coupon", 1800),
+                (116, 1002, "coupon", 200),
+            ),
+            ((116,), (0,), (0,), (3,), (16,), (99,), (0,)),
+        ),
+    ),
+)
+def test_orphan_verifier_accepts_exact_private_facts(
+    tmp_path: Path,
+    case_id: str,
+    rows: tuple[tuple[object, ...], ...],
+    scalars: tuple[tuple[object, ...], ...],
+) -> None:
+    scenario = load_scenario_spec(case_id)
+    cursor = _AggregateCursor(rows, scalars)
+    verifier = IncidentVerifier(
+        tmp_path,
+        settings=Settings(_env_file=None),
+        db_connect=lambda **_: _AggregateConnection(cursor),
+    )
+    profile = _orphan_profile(
+        row_count=scalars[0][0],
+        violation_count=scalars[3][0],
+        channel="credit_card" if case_id == "orphan_payment_record" else "coupon",
+        channel_count=scalars[4][0],
+        history=True,
+    )
+
+    verifier._validate_orphan_payments(scenario, profile)
+
+
+def test_orphan_verifier_rejects_wrong_relationship_fact(tmp_path: Path) -> None:
+    scenario = load_scenario_spec("orphan_payment_coupon_a")
+    cursor = _AggregateCursor(
+        (
+            (114, 1000, "coupon", 1700),
+            (115, 1001, "coupon", 1800),
+            (116, 1002, "coupon", 200),
+        ),
+        ((116,), (0,), (0,), (2,), (16,), (99,), (0,)),
+    )
+    verifier = IncidentVerifier(
+        tmp_path,
+        settings=Settings(_env_file=None),
+        db_connect=lambda **_: _AggregateConnection(cursor),
+    )
+
+    with pytest.raises(LabVerificationError, match="orphan-payment"):
+        verifier._validate_orphan_payments(
+            scenario,
+            _orphan_profile(
+                row_count=116,
+                violation_count=2,
+                channel="coupon",
+                channel_count=16,
+                history=True,
+            ),
+        )
+
+
+def test_orphan_verifier_requires_public_history_for_confirmable_case(tmp_path: Path) -> None:
+    scenario = load_scenario_spec("orphan_payment_coupon_a")
+    cursor = _AggregateCursor(
+        (
+            (114, 1000, "coupon", 1700),
+            (115, 1001, "coupon", 1800),
+            (116, 1002, "coupon", 200),
+        ),
+        ((116,), (0,), (0,), (3,), (16,), (99,), (0,)),
+    )
+    verifier = IncidentVerifier(
+        tmp_path,
+        settings=Settings(_env_file=None),
+        db_connect=lambda **_: _AggregateConnection(cursor),
+    )
+
+    with pytest.raises(LabVerificationError, match="history"):
+        verifier._validate_orphan_payments(
+            scenario,
+            _orphan_profile(
+                row_count=116,
+                violation_count=3,
+                channel="coupon",
+                channel_count=16,
+                history=False,
+            ),
+        )
