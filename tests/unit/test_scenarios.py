@@ -7,12 +7,15 @@ from data_incident_gym.scenarios import (
     P1_M7_SCENARIO_IDS,
     P1_M8_SCENARIO_IDS,
     P1_M9_SCENARIO_IDS,
+    P1_M10_SCENARIO_IDS,
     Answerability,
     DuplicatePaymentRowsMutation,
+    OrphanPaymentRowsMutation,
     ScenarioError,
     VariantRole,
     duplicate_payment_rows,
     load_scenario_spec,
+    orphan_payment_rows,
     parse_scenario_spec,
 )
 
@@ -226,6 +229,113 @@ def test_m9_public_brief_contains_no_private_duplicate_contract(project_root: Pa
             "114",
             "115",
             "116",
+        ):
+            assert forbidden not in public
+
+
+def test_m10_catalog_and_test_twin_are_exact(project_root: Path) -> None:
+    assert P1_M10_SCENARIO_IDS == (
+        "orphan_payment_record",
+        "orphan_payment_coupon_a",
+        "orphan_payment_coupon_b",
+    )
+    assert len(
+        P1_M7_SCENARIO_IDS
+        + P1_M8_SCENARIO_IDS
+        + P1_M9_SCENARIO_IDS
+        + P1_M10_SCENARIO_IDS
+    ) == 13
+
+    dev, confirmable, insufficient = (
+        load_scenario_spec(case_id, project_root) for case_id in P1_M10_SCENARIO_IDS
+    )
+    assert dev.variant_role is VariantRole.DEV_CONFIRMABLE
+    assert confirmable.variant_role is VariantRole.TEST_CONFIRMABLE
+    assert insufficient.variant_role is VariantRole.TEST_INSUFFICIENT
+    for field_name in (
+        "incident_brief",
+        "reset_and_injection_contract",
+        "direct_failure",
+        "affected_assets",
+        "distractors",
+    ):
+        assert getattr(confirmable, field_name) == getattr(insufficient, field_name)
+    assert confirmable.direct_failure is None
+    assert insufficient.direct_failure is None
+    assert confirmable.observable_evidence_contract.profile_relations == ("raw_payments",)
+    assert confirmable.observable_evidence_contract.history_relations == ("raw_orders",)
+    assert insufficient.observable_evidence_contract.profile_relations == ("raw_payments",)
+    assert insufficient.observable_evidence_contract.history_relations == ()
+    assert tuple(
+        (gap.gap_kind, gap.subject, gap.reason_code, gap.tool_name)
+        for gap in insufficient.observable_evidence_contract.unresolved_gaps
+    ) == (
+        (
+            "RELATION_HISTORY",
+            "raw_orders",
+            "RELATION_NOT_ALLOWED",
+            "get_relation_history",
+        ),
+        ("INGESTION_WATERMARK", "raw_orders", "NOT_OBSERVABLE", None),
+    )
+
+    single = next(
+        item
+        for item in dev.reset_and_injection_contract.mutations
+        if isinstance(item, OrphanPaymentRowsMutation)
+    )
+    batch = next(
+        item
+        for item in confirmable.reset_and_injection_contract.mutations
+        if isinstance(item, OrphanPaymentRowsMutation)
+    )
+    assert orphan_payment_rows(single) == ((114, 1000, "credit_card", 1000),)
+    assert orphan_payment_rows(batch) == (
+        (114, 1000, "coupon", 1700),
+        (115, 1001, "coupon", 1800),
+        (116, 1002, "coupon", 200),
+    )
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    (
+        lambda mutation: mutation.update(inserted_payment_ids=[117]),
+        lambda mutation: mutation.update(missing_order_ids=[1003]),
+        lambda mutation: mutation.update(mode="SINGLE_REFERENCE"),
+        lambda mutation: mutation.update(relation="raw_orders"),
+        lambda mutation: mutation.update(
+            inserted_payment_ids=[115, 114, 116], missing_order_ids=[1001, 1000, 1002]
+        ),
+        lambda mutation: mutation.update(row=[114, 1000, "coupon", 1700]),
+    ),
+    ids=("payment", "order", "mode", "relation", "order", "payload"),
+)
+def test_m10_rejects_any_non_frozen_orphan_batch(
+    project_root: Path,
+    mutator,
+) -> None:
+    source = project_root / "config" / "scenarios" / "orphan_payment_coupon_a.json"
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    mutator(payload["reset_and_injection_contract"]["mutations"][0])
+    with pytest.raises(ScenarioError):
+        parse_scenario_spec(json.dumps(payload), "unsupported M10 orphan batch")
+
+
+def test_m10_public_brief_contains_no_private_orphan_contract(project_root: Path) -> None:
+    for case_id in P1_M10_SCENARIO_IDS:
+        public = load_scenario_spec(case_id, project_root).incident_brief.model_dump_json()
+        for forbidden in (
+            "inserted_payment_ids",
+            "missing_order_ids",
+            "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+            "NORMAL_LATE_ARRIVING_ORDER",
+            "TEST_INSUFFICIENT",
+            "INSUFFICIENT_EVIDENCE",
+            "1000",
+            "1001",
+            "1002",
+            case_id,
         ):
             assert forbidden not in public
 

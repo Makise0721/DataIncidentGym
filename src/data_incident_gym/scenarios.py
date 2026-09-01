@@ -46,12 +46,18 @@ P1_M9_SCENARIO_IDS = (
     "duplicate_payment_coupon_a",
     "duplicate_payment_coupon_b",
 )
+P1_M10_SCENARIO_IDS = (
+    "orphan_payment_record",
+    "orphan_payment_coupon_a",
+    "orphan_payment_coupon_b",
+)
 REGRESSION_SCENARIO_IDS = ("schema_rename_payment_amount",)
 SUPPORTED_SCENARIO_IDS = (
     REGRESSION_SCENARIO_IDS
     + P1_M7_SCENARIO_IDS
     + P1_M8_SCENARIO_IDS
     + P1_M9_SCENARIO_IDS
+    + P1_M10_SCENARIO_IDS
 )
 
 
@@ -64,6 +70,7 @@ class FaultFamily(StrEnum):
     SCHEMA_TYPE_CHANGE = "SCHEMA_TYPE_CHANGE"
     REQUIRED_FIELD_NULL = "REQUIRED_FIELD_NULL"
     PAYMENT_DUPLICATE = "PAYMENT_DUPLICATE"
+    PAYMENT_ORPHAN = "PAYMENT_ORPHAN"
     ORDER_VOLUME_PATTERN = "ORDER_VOLUME_PATTERN"
 
 
@@ -222,6 +229,41 @@ def duplicate_payment_rows(
     return tuple(pairs)
 
 
+_M10_ORPHAN_BATCHES: dict[
+    tuple[str, tuple[int, ...], tuple[int, ...]], tuple[PaymentRow, ...]
+] = {
+    ("SINGLE_REFERENCE", (114,), (1000,)): ((114, 1000, "credit_card", 1000),),
+    ("SETTLED_COUPON_WINDOW", (114, 115, 116), (1000, 1001, 1002)): (
+        (114, 1000, "coupon", 1700),
+        (115, 1001, "coupon", 1800),
+        (116, 1002, "coupon", 200),
+    ),
+}
+
+
+class OrphanPaymentRowsMutation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["ORPHAN_PAYMENT_ROWS"]
+    purpose: Literal["FAULT"]
+    relation: Literal["raw_payments"]
+    mode: Literal["SINGLE_REFERENCE", "SETTLED_COUPON_WINDOW"]
+    inserted_payment_ids: tuple[StrictInt, ...]
+    missing_order_ids: tuple[StrictInt, ...]
+
+    @model_validator(mode="after")
+    def validate_frozen_batch(self) -> Self:
+        key = (self.mode, self.inserted_payment_ids, self.missing_order_ids)
+        if key not in _M10_ORPHAN_BATCHES:
+            raise ValueError("unsupported orphan-payment batch")
+        return self
+
+
+def orphan_payment_rows(mutation: OrphanPaymentRowsMutation) -> tuple[PaymentRow, ...]:
+    key = (mutation.mode, mutation.inserted_payment_ids, mutation.missing_order_ids)
+    return _M10_ORPHAN_BATCHES[key]
+
+
 class NoMutation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -234,6 +276,7 @@ ScenarioMutation = Annotated[
     | AddNullableColumnMutation
     | SetFieldNullMutation
     | DuplicatePaymentRowsMutation
+    | OrphanPaymentRowsMutation
     | NoMutation,
     Field(discriminator="kind"),
 ]
@@ -283,10 +326,16 @@ class ObservableEvidenceGap(BaseModel):
         "RELATION_DATA_PROFILE",
         "TRANSFORMATION_DEFINITION",
         "PAYMENT_EVENT_IDENTITY",
+        "RELATION_HISTORY",
+        "INGESTION_WATERMARK",
     ]
     subject: StrictStr
     reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED"]
-    tool_name: Literal["get_relation_schema", "get_relation_data_profile"] | None
+    tool_name: Literal[
+        "get_relation_schema",
+        "get_relation_data_profile",
+        "get_relation_history",
+    ] | None
 
     @model_validator(mode="after")
     def validate_tool_binding(self) -> Self:
@@ -295,6 +344,8 @@ class ObservableEvidenceGap(BaseModel):
             "RELATION_DATA_PROFILE": "get_relation_data_profile",
             "TRANSFORMATION_DEFINITION": None,
             "PAYMENT_EVENT_IDENTITY": None,
+            "RELATION_HISTORY": "get_relation_history",
+            "INGESTION_WATERMARK": None,
         }[self.gap_kind]
         if self.tool_name != expected:
             raise ValueError("observable evidence gap/tool mismatch")
@@ -428,7 +479,8 @@ class ScenarioSpec(BaseModel):
                 raise ValueError("insufficient scenarios retain the observed impact scope")
             if (
                 self.direct_failure is None
-                and self.fault_family is not FaultFamily.PAYMENT_DUPLICATE
+                and self.fault_family
+                not in {FaultFamily.PAYMENT_DUPLICATE, FaultFamily.PAYMENT_ORPHAN}
             ):
                 raise ValueError("this insufficient scenario requires a direct dbt failure")
         elif self.answerability is Answerability.CONFIRMABLE:
@@ -485,6 +537,49 @@ class ScenarioSpec(BaseModel):
                 raise ValueError("duplicate-payment development role has no distractor")
         elif any(isinstance(item, DuplicatePaymentRowsMutation) for item in mutations):
             raise ValueError("DUPLICATE_PAYMENT_ROWS is only valid for payment duplicates")
+        if self.fault_family is FaultFamily.PAYMENT_ORPHAN:
+            orphan_mutations = tuple(
+                mutation
+                for mutation in mutations
+                if isinstance(mutation, OrphanPaymentRowsMutation)
+            )
+            nullable_distractors = tuple(
+                mutation
+                for mutation in mutations
+                if isinstance(mutation, AddNullableColumnMutation)
+            )
+            if len(orphan_mutations) != 1:
+                raise ValueError("orphan-payment scenarios require one frozen payment batch")
+            is_test_role = self.variant_role in {
+                VariantRole.TEST_CONFIRMABLE,
+                VariantRole.TEST_INSUFFICIENT,
+            }
+            expected_mode = "SETTLED_COUPON_WINDOW" if is_test_role else "SINGLE_REFERENCE"
+            if orphan_mutations[0].mode != expected_mode:
+                raise ValueError("orphan-payment role and mutation mode do not match")
+            if len(nullable_distractors) != (1 if is_test_role else 0):
+                raise ValueError("orphan-payment test roles require one schema distractor")
+            if is_test_role:
+                if len(self.distractors) != 1 or not isinstance(
+                    self.distractors[0],
+                    NullableColumnSchemaDriftDistractor,
+                ):
+                    raise ValueError("orphan-payment test roles need the declared distractor")
+                declared = self.distractors[0]
+                distractor = nullable_distractors[0]
+                if (
+                    distractor.relation != declared.relation
+                    or distractor.column != declared.column
+                    or distractor.data_type != declared.data_type
+                    or distractor.nullable != declared.nullable
+                ):
+                    raise ValueError("orphan-payment distractor does not match its declaration")
+                if self.direct_failure is not None or not self.affected_assets:
+                    raise ValueError("orphan-payment scenarios are dbt-success anomalies")
+            elif self.distractors:
+                raise ValueError("orphan-payment development role has no distractor")
+        elif any(isinstance(item, OrphanPaymentRowsMutation) for item in mutations):
+            raise ValueError("ORPHAN_PAYMENT_ROWS is only valid for orphan payments")
         if self.fault_family is FaultFamily.REQUIRED_FIELD_NULL:
             faults = tuple(
                 mutation

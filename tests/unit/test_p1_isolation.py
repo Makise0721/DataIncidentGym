@@ -57,6 +57,9 @@ def test_private_case_ids_never_reach_diagnosis_sources() -> None:
         "duplicate_payment_record",
         "duplicate_payment_coupon_a",
         "duplicate_payment_coupon_b",
+        "orphan_payment_record",
+        "orphan_payment_coupon_a",
+        "orphan_payment_coupon_b",
     ):
         assert case_id not in source
         assert case_id == load_scenario_spec(case_id).incident_case_id
