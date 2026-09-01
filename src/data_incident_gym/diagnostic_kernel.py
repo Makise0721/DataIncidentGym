@@ -667,6 +667,7 @@ class DiagnosticKernel:
             and arguments["relation_name"]
             not in self._observable_relations_by_tool[tool_name]
             and arguments["relation_name"] not in self._known_relation_names()
+            and arguments["relation_name"] not in self._incident_subjects
         ):
             self._error("RELATION_ARGUMENT_NOT_PROVEN", fingerprint)
 

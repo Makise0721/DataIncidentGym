@@ -923,7 +923,6 @@ def test_kernel_binds_blocked_history_and_watermark_unresolved_evidence() -> Non
         ),
         model_request_limit=8,
         tool_call_limit=8,
-        observable_history_relations=("raw_orders",),
         incident_subjects=("raw_orders",),
     )
     prepared = kernel.prepare_tool(
