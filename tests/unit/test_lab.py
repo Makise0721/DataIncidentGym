@@ -683,8 +683,24 @@ def test_silent_payment_drop_routes_exact_batch_and_restores_in_reverse_order(
     assert isinstance(mutation, DeletePaymentRowsMutation)
     rows = deleted_payment_rows(mutation)
     calls: list[tuple[str, tuple[tuple[int, int, str, int], ...]]] = []
+    schema_present = [False]
+
+    def healthy_relation(_: str) -> RelationSummary:
+        columns = (
+            (ColumnSummary("source_batch_note", "text", True, 5),)
+            if schema_present[0]
+            else ()
+        )
+        return RelationSummary("raw_payments", 113, columns)
 
     monkeypatch.setattr(lab, "_silent_payment_drop_state", lambda _mutation: "HEALTHY")
+    monkeypatch.setattr(lab, "_healthy_relation", healthy_relation)
+    monkeypatch.setattr(lab, "_add_nullable_column", lambda _: schema_present.__setitem__(0, True))
+    monkeypatch.setattr(
+        lab,
+        "_drop_nullable_column",
+        lambda _: schema_present.__setitem__(0, False),
+    )
     lab._ensure_healthy_for_prepare(scenario)
     monkeypatch.setattr(
         lab,
