@@ -304,6 +304,10 @@ def deleted_payment_rows(mutation: DeletePaymentRowsMutation) -> tuple[PaymentRo
     return _M11_DELETE_BATCHES[(mutation.mode, mutation.deleted_payment_ids)]
 
 
+def silent_payment_rows() -> tuple[PaymentRow, ...]:
+    return tuple(row for batch in _M11_DELETE_BATCHES.values() for row in batch)
+
+
 class NoMutation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 

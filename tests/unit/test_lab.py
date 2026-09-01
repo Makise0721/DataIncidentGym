@@ -15,9 +15,11 @@ from data_incident_gym.lab import (
 )
 from data_incident_gym.lab_verifier import ScenarioVerificationStatus
 from data_incident_gym.scenarios import (
+    DeletePaymentRowsMutation,
     DuplicatePaymentRowsMutation,
     OrphanPaymentRowsMutation,
     SetFieldNullMutation,
+    deleted_payment_rows,
     duplicate_payment_rows,
     load_scenario_spec,
     orphan_payment_rows,
@@ -614,3 +616,112 @@ def test_orphan_payment_row_guards_are_transactional(
 
     assert connection.transaction_instance.saw_exception is True
     assert all("raw_payments" in statement for statement, _ in calls)
+
+
+@pytest.mark.parametrize(
+    ("case_id", "healthy_total", "injected_total"),
+    (
+        ("silent_payment_drop_record", 113, 112),
+        ("silent_payment_drop_partition_a", 113, 111),
+        ("silent_payment_drop_partition_b", 113, 111),
+    ),
+)
+def test_silent_payment_drop_lifecycle_is_exact(
+    case_id: str,
+    healthy_total: int,
+    injected_total: int,
+) -> None:
+    scenario = load_scenario_spec(case_id)
+    mutation = next(
+        item
+        for item in scenario.reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    rows = deleted_payment_rows(mutation)
+    assert healthy_total == 113
+    assert injected_total == 113 - len(rows)
+    if mutation.mode == "SOURCE_BATCH":
+        assert rows == ((111, 97, "bank_transfer", 1400),)
+    else:
+        assert rows == (
+            (89, 78, "bank_transfer", 2600),
+            (92, 80, "gift_card", 300),
+        )
+
+
+def test_silent_payment_drop_state_rejects_drifted_batches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("silent_payment_drop_partition_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    rows = deleted_payment_rows(mutation)
+    monkeypatch.setattr(lab, "_payment_row_total", lambda: 113)
+    monkeypatch.setattr(lab, "_payment_row_count", lambda row: 1 if row in rows else 0)
+    assert lab._silent_payment_drop_state(mutation) == "HEALTHY"
+
+    monkeypatch.setattr(lab, "_payment_row_total", lambda: 111)
+    monkeypatch.setattr(lab, "_payment_row_count", lambda _row: 0)
+    assert lab._silent_payment_drop_state(mutation) == "INJECTED"
+
+    monkeypatch.setattr(lab, "_payment_row_count", lambda row: 0 if row == rows[0] else 1)
+    assert lab._silent_payment_drop_state(mutation) == "DRIFTED"
+
+
+def test_silent_payment_drop_routes_exact_batch_and_restores_in_reverse_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("silent_payment_drop_partition_a")
+    mutation = scenario.reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, DeletePaymentRowsMutation)
+    rows = deleted_payment_rows(mutation)
+    calls: list[tuple[str, tuple[tuple[int, int, str, int], ...]]] = []
+
+    monkeypatch.setattr(lab, "_silent_payment_drop_state", lambda _mutation: "HEALTHY")
+    lab._ensure_healthy_for_prepare(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_delete_source_payments",
+        lambda _mutation: calls.append(("delete", rows)),
+    )
+    lab._apply_mutations(scenario)
+
+    monkeypatch.setattr(lab, "_silent_payment_drop_state", lambda _mutation: "INJECTED")
+    lab._validate_prepared_state(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_restore_source_payments",
+        lambda _mutation: calls.append(("insert", rows)),
+    )
+    lab._restore_mutations(scenario)
+    monkeypatch.setattr(lab, "_silent_payment_drop_state", lambda _mutation: "HEALTHY")
+    lab._verify_restored(scenario)
+
+    assert calls == [("delete", rows), ("insert", rows)]
+
+
+def test_silent_payment_drop_delete_guard_is_transactional(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("silent_payment_drop_partition_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rowcount=0)
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+
+    with pytest.raises(InvalidIncidentState, match="精确行数"):
+        lab._delete_source_payments(mutation)
+
+    assert connection.transaction_instance.saw_exception is True
+    assert all("ctid" in statement and "raw_payments" in statement for statement, _ in calls)

@@ -126,15 +126,25 @@ class DbtRunner:
         )
         self._ensure_success("执行 dbt build", build)
 
-    def run_scenario(self, target_path: Path, log_path: Path) -> DbtRunResult:
+    def run_scenario(
+        self,
+        target_path: Path,
+        log_path: Path,
+        *,
+        exclude_resource_types: Sequence[str] = ("seed",),
+    ) -> DbtRunResult:
         self._prepare(target_path, log_path)
+        exclusions = tuple(
+            value
+            for resource_type in exclude_resource_types
+            for value in ("--exclude-resource-type", resource_type)
+        )
         return self._invoke(
             "执行场景 dbt build",
             self._command(
                 "build",
                 target_path,
                 log_path,
-                "--exclude-resource-type",
-                "seed",
+                *exclusions,
             ),
         )

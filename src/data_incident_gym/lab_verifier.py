@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import date
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -23,14 +24,17 @@ from data_incident_gym.scenarios import (
     AddNullableColumnMutation,
     ColumnRenameMutation,
     ColumnTypeMutation,
+    DeletePaymentRowsMutation,
     DuplicatePaymentRowsMutation,
     NoMutation,
     OrphanPaymentRowsMutation,
     ScenarioSpec,
     SetFieldNullMutation,
+    deleted_payment_rows,
     load_scenario_spec,
     orphan_payment_rows,
     parse_scenario_spec,
+    silent_payment_rows,
 )
 
 RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -50,6 +54,22 @@ _EXPECTED_PAYMENT_DUPLICATES = {
     "duplicate_payment_coupon_b": (116, 0, 3, "coupon", 16),
 }
 _EXPECTED_ORPHAN_CHANNEL_COUNTS = {"credit_card": 56, "coupon": 16}
+_EXPECTED_SILENT_DROPS = {
+    "SOURCE_BATCH": {
+        "total": 112,
+        "bucket": "2018-04-07",
+        "partition_count": 1,
+        "reverse_violations": 1,
+        "channels": {"bank_transfer": 32, "coupon": 13, "credit_card": 55, "gift_card": 12},
+    },
+    "SETTLED_PARTITION": {
+        "total": 111,
+        "bucket": "2018-03-23",
+        "partition_count": 3,
+        "reverse_violations": 2,
+        "channels": {"bank_transfer": 32, "coupon": 13, "credit_card": 55, "gift_card": 11},
+    },
+}
 
 DatabaseConnect = Callable[..., Any]
 
@@ -443,6 +463,8 @@ class IncidentVerifier:
                 )
             elif isinstance(mutation, (DuplicatePaymentRowsMutation, OrphanPaymentRowsMutation)):
                 expected_row_count += len(mutation.inserted_payment_ids)
+            elif isinstance(mutation, DeletePaymentRowsMutation):
+                expected_row_count -= len(mutation.deleted_payment_ids)
             elif isinstance(mutation, SetFieldNullMutation):
                 pass
             elif not isinstance(mutation, NoMutation):
@@ -789,6 +811,240 @@ class IncidentVerifier:
         ):
             raise _clean(LabVerificationError("orphan-payment history watermark 无效"))
 
+    def _validate_silent_payment_drop(
+        self,
+        scenario: ScenarioSpec,
+        profile: ProfileSnapshot,
+    ) -> None:
+        mutation = next(
+            (
+                item
+                for item in scenario.reset_and_injection_contract.mutations
+                if isinstance(item, DeletePaymentRowsMutation)
+            ),
+            None,
+        )
+        expected = _EXPECTED_SILENT_DROPS.get(mutation.mode) if mutation is not None else None
+        if mutation is None or expected is None:
+            raise _clean(LabVerificationError("silent-payment-drop mutation 不在冻结集合中"))
+        deleted_rows = deleted_payment_rows(mutation)
+        sentinel_rows = tuple(row for row in silent_payment_rows() if row not in deleted_rows)
+        table = sql.SQL("{}.{}").format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier(mutation.relation),
+        )
+        orders_table = sql.SQL("{}.{}").format(
+            sql.Identifier(self.settings.postgres_schema),
+            sql.Identifier("raw_orders"),
+        )
+        rows_query = sql.SQL(
+            "SELECT id, order_id, payment_method, amount FROM {} "
+            "WHERE id = ANY(%s) ORDER BY id"
+        ).format(table)
+        row_count_query = sql.SQL("SELECT count(*) FROM {}").format(table)
+        partition_query = sql.SQL(
+            "SELECT count(*) FROM {} payments "
+            "JOIN {} orders ON payments.order_id = orders.id "
+            "WHERE orders.order_date = %s"
+        ).format(table, orders_table)
+        payment_relationship_query = sql.SQL(
+            "SELECT count(*) FROM {} payments "
+            "LEFT JOIN {} orders ON payments.order_id = orders.id "
+            "WHERE orders.id IS NULL"
+        ).format(table, orders_table)
+        reverse_relationship_query = sql.SQL(
+            "SELECT count(*) FROM {} orders "
+            "LEFT JOIN {} payments ON orders.id = payments.order_id "
+            "WHERE payments.id IS NULL"
+        ).format(orders_table, table)
+        key_query = sql.SQL(
+            "SELECT COALESCE(sum(group_count - 1) FILTER (WHERE group_count > 1), 0) "
+            "FROM (SELECT id, count(*) AS group_count FROM {} GROUP BY id) grouped"
+        ).format(table)
+        fingerprint_query = sql.SQL(
+            "SELECT COALESCE(sum(group_count - 1) FILTER (WHERE group_count > 1), 0) "
+            "FROM (SELECT order_id, payment_method, amount, count(*) AS group_count "
+            "FROM {} GROUP BY order_id, payment_method, amount) grouped"
+        ).format(table)
+        channel_query = sql.SQL(
+            "SELECT count(*) FROM {} WHERE payment_method IS NOT DISTINCT FROM %s"
+        ).format(table)
+
+        def scalar(cursor: Any, query: sql.Composed, params: tuple[Any, ...] = ()) -> int:
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            if row is None:
+                raise LabVerificationError("silent-payment-drop 聚合查询没有返回结果")
+            return int(row[0])
+
+        try:
+            with (
+                self.db_connect(**self._connection_kwargs()) as connection,
+                connection.cursor() as cursor,
+            ):
+                cursor.execute(rows_query, (list(mutation.deleted_payment_ids),))
+                observed_deleted = tuple(tuple(row) for row in cursor.fetchall())
+                cursor.execute(rows_query, (list(row[0] for row in sentinel_rows),))
+                observed_sentinels = tuple(tuple(row) for row in cursor.fetchall())
+                observed = (
+                    scalar(cursor, row_count_query),
+                    scalar(cursor, partition_query, (expected["bucket"],)),
+                    scalar(cursor, payment_relationship_query),
+                    scalar(cursor, reverse_relationship_query),
+                    scalar(cursor, key_query),
+                    scalar(cursor, fingerprint_query),
+                    tuple(
+                        scalar(cursor, channel_query, (channel,))
+                        for channel in ("bank_transfer", "coupon", "credit_card", "gift_card")
+                    ),
+                )
+        except LabVerificationError:
+            raise
+        except Exception as exc:
+            raise _clean(
+                LabVerificationError(f"无法验证 silent-payment-drop 聚合：{exc}")
+            ) from None
+
+        expected_observed = (
+            expected["total"],
+            expected["partition_count"],
+            0,
+            expected["reverse_violations"],
+            0,
+            0,
+            tuple(
+                expected["channels"][channel]
+                for channel in ("bank_transfer", "coupon", "credit_card", "gift_card")
+            ),
+        )
+        if (
+            observed_deleted
+            or observed_sentinels != tuple(sorted(sentinel_rows))
+            or observed != expected_observed
+        ):
+            raise _clean(LabVerificationError("silent-payment-drop 私有事实不匹配"))
+
+        payments = next(
+            (item for item in profile.current if item.relation_name == "raw_payments"),
+            None,
+        )
+        orders = next(
+            (item for item in profile.current if item.relation_name == "raw_orders"),
+            None,
+        )
+        if payments is None or orders is None:
+            raise _clean(LabVerificationError("silent-payment-drop current profile 不完整"))
+        payment_relationship = next(
+            (
+                item
+                for item in payments.relationship_violations
+                if item.name == "order_id_to_raw_orders_id"
+            ),
+            None,
+        )
+        reverse_relationship = next(
+            (
+                item
+                for item in orders.relationship_violations
+                if item.name == "id_to_raw_payments_order_id"
+            ),
+            None,
+        )
+        key_fact = next(
+            (item for item in payments.business_key_duplicates if item.name == "id"),
+            None,
+        )
+        fingerprint_fact = next(
+            (
+                item
+                for item in payments.business_fingerprint_duplicates
+                if item.name == "order_payment_amount"
+            ),
+            None,
+        )
+        group_fact = next(
+            (item for item in payments.groups if item.name == "payment_method"),
+            None,
+        )
+        group_counts = (
+            dict(zip(group_fact.values, group_fact.counts, strict=True))
+            if group_fact is not None
+            else {}
+        )
+        if (
+            payments.row_count != expected["total"]
+            or orders.row_count != 99
+            or payment_relationship is None
+            or payment_relationship.violation_count != 0
+            or reverse_relationship is None
+            or reverse_relationship.violation_count != expected["reverse_violations"]
+            or key_fact is None
+            or key_fact.duplicate_count != 0
+            or fingerprint_fact is None
+            or fingerprint_fact.duplicate_count != 0
+            or group_counts
+            != {
+                (channel,): count for channel, count in expected["channels"].items()
+            }
+        ):
+            raise _clean(LabVerificationError("silent-payment-drop public profile 事实不匹配"))
+
+        history_is_public = set(scenario.observable_evidence_contract.history_relations)
+        history_names = {item.relation_name for item in profile.history}
+        if history_is_public:
+            if (
+                history_is_public != {"raw_orders", "raw_payments"}
+                or history_names != history_is_public
+            ):
+                raise _clean(LabVerificationError("silent-payment-drop history 公开边界不匹配"))
+            payment_history = next(
+                item for item in profile.history if item.relation_name == "raw_payments"
+            )
+            order_history = next(
+                item for item in profile.history if item.relation_name == "raw_orders"
+            )
+            payment_series = next(
+                (
+                    item
+                    for item in payment_history.histories
+                    if item.name == "payment_count_by_order_date"
+                ),
+                None,
+            )
+            order_series = next(
+                (
+                    item
+                    for item in order_history.histories
+                    if item.name == "order_count_by_day"
+                ),
+                None,
+            )
+            payment_point = next(
+                (
+                    point
+                    for point in payment_series.points
+                    if point.bucket == expected["bucket"]
+                ),
+                None,
+            ) if payment_series is not None else None
+            if (
+                payment_series is None
+                or payment_point is None
+                or payment_point.value != expected["partition_count"]
+                or order_series is None
+                or order_series.watermark_column != "order_date"
+                or order_series.watermark_value != "2018-04-09"
+            ):
+                raise _clean(LabVerificationError("silent-payment-drop history 事实不匹配"))
+            try:
+                date.fromisoformat(order_series.watermark_value)
+            except (TypeError, ValueError):
+                raise _clean(
+                    LabVerificationError("silent-payment-drop watermark 不可解析")
+                ) from None
+        elif history_names:
+            raise _clean(LabVerificationError("silent-payment-drop history 不应公开"))
+
     def _write_private_verification(
         self,
         run_id: str,
@@ -930,7 +1186,11 @@ class IncidentVerifier:
                 for item in scenario.reset_and_injection_contract.mutations
                 if isinstance(
                     item,
-                    (DuplicatePaymentRowsMutation, OrphanPaymentRowsMutation),
+                    (
+                        DuplicatePaymentRowsMutation,
+                        OrphanPaymentRowsMutation,
+                        DeletePaymentRowsMutation,
+                    ),
                 )
             )
             seed_nodes = tuple(
@@ -958,6 +1218,8 @@ class IncidentVerifier:
                 self._validate_payment_duplicates(scenario, profile)
             elif isinstance(mutation, OrphanPaymentRowsMutation):
                 self._validate_orphan_payments(scenario, profile)
+            elif isinstance(mutation, DeletePaymentRowsMutation):
+                self._validate_silent_payment_drop(scenario, profile)
             else:
                 raise _clean(LabVerificationError("data anomaly mutation 未授权"))
             status = ScenarioVerificationStatus.EXPECTED_ANOMALY

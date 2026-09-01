@@ -44,6 +44,7 @@ from data_incident_gym.scenarios import (
     AddNullableColumnMutation,
     ColumnRenameMutation,
     ColumnTypeMutation,
+    DeletePaymentRowsMutation,
     DuplicatePaymentRowsMutation,
     NoMutation,
     OrphanPaymentRowsMutation,
@@ -51,6 +52,7 @@ from data_incident_gym.scenarios import (
     ScenarioError,
     ScenarioSpec,
     SetFieldNullMutation,
+    deleted_payment_rows,
     duplicate_payment_rows,
     load_scenario_spec,
     orphan_payment_rows,
@@ -419,6 +421,18 @@ class IncidentLab:
             return "INJECTED"
         return "DRIFTED"
 
+    def _silent_payment_drop_state(self, mutation: DeletePaymentRowsMutation) -> CaseState:
+        rows = deleted_payment_rows(mutation)
+        baseline_count = EXPECTED_RELATION_COUNTS["raw_payments"]
+        total = self._payment_row_total()
+        if total == baseline_count and all(self._payment_row_count(row) == 1 for row in rows):
+            return "HEALTHY"
+        if total == baseline_count - len(rows) and all(
+            self._payment_row_count(row) == 0 for row in rows
+        ):
+            return "INJECTED"
+        return "DRIFTED"
+
     def _insert_payment_rows(self, rows: Sequence[PaymentRow], *, label: str) -> None:
         values = sql.SQL(", ").join(sql.SQL("(%s, %s, %s, %s)") for _ in rows)
         statement = sql.SQL(
@@ -498,6 +512,18 @@ class IncidentLab:
     def _delete_orphan_payments(self, mutation: OrphanPaymentRowsMutation) -> None:
         self._delete_payment_rows(orphan_payment_rows(mutation), label="orphan-payment restore")
 
+    def _delete_source_payments(self, mutation: DeletePaymentRowsMutation) -> None:
+        self._delete_payment_rows(
+            deleted_payment_rows(mutation),
+            label="silent-payment-drop mutation",
+        )
+
+    def _restore_source_payments(self, mutation: DeletePaymentRowsMutation) -> None:
+        self._insert_payment_rows(
+            deleted_payment_rows(mutation),
+            label="silent-payment-drop restore",
+        )
+
     def _ensure_healthy_for_prepare(self, spec: ScenarioSpec) -> None:
         for mutation in spec.reset_and_injection_contract.mutations:
             if isinstance(mutation, NoMutation):
@@ -516,6 +542,10 @@ class IncidentLab:
             if isinstance(mutation, OrphanPaymentRowsMutation):
                 if self._orphan_payment_state(mutation) != "HEALTHY":
                     raise InvalidIncidentState("prepare 要求 orphan-payment 状态为健康")
+                continue
+            if isinstance(mutation, DeletePaymentRowsMutation):
+                if self._silent_payment_drop_state(mutation) != "HEALTHY":
+                    raise InvalidIncidentState("prepare 要求 silent-payment-drop 状态为健康")
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -662,6 +692,8 @@ class IncidentLab:
                 self._insert_payment_duplicates(mutation)
             elif isinstance(mutation, OrphanPaymentRowsMutation):
                 self._insert_orphan_payments(mutation)
+            elif isinstance(mutation, DeletePaymentRowsMutation):
+                self._delete_source_payments(mutation)
             elif not isinstance(mutation, NoMutation):
                 raise InvalidIncidentState("存在未授权 mutation")
 
@@ -696,6 +728,16 @@ class IncidentLab:
                 if state != "INJECTED":
                     raise InvalidIncidentState("restore 拒绝未知 orphan-payment mutation 状态")
                 self._delete_orphan_payments(mutation)
+                continue
+            if isinstance(mutation, DeletePaymentRowsMutation):
+                state = self._silent_payment_drop_state(mutation)
+                if state == "HEALTHY":
+                    continue
+                if state != "INJECTED":
+                    raise InvalidIncidentState(
+                        "restore 拒绝未知 silent-payment-drop mutation 状态"
+                    )
+                self._restore_source_payments(mutation)
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -749,6 +791,10 @@ class IncidentLab:
             if isinstance(mutation, OrphanPaymentRowsMutation):
                 if self._orphan_payment_state(mutation) != "HEALTHY":
                     raise InvalidIncidentState("restore 后 orphan-payment mutation 仍然存在")
+                continue
+            if isinstance(mutation, DeletePaymentRowsMutation):
+                if self._silent_payment_drop_state(mutation) != "HEALTHY":
+                    raise InvalidIncidentState("restore 后 silent-payment-drop mutation 仍然存在")
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)
@@ -932,7 +978,18 @@ class IncidentLab:
         target = run_root / "dbt" / "target"
         logs = run_root / "dbt" / "logs"
         try:
-            dbt_result = self.dbt_runner.run_scenario(target, logs)
+            silent_drop = any(
+                isinstance(mutation, DeletePaymentRowsMutation)
+                for mutation in spec.reset_and_injection_contract.mutations
+            )
+            if silent_drop:
+                dbt_result = self.dbt_runner.run_scenario(
+                    target,
+                    logs,
+                    exclude_resource_types=("seed", "test"),
+                )
+            else:
+                dbt_result = self.dbt_runner.run_scenario(target, logs)
         except DbtExecutionError as exc:
             raise self._clean(IncidentExecutionError(self._redact(str(exc)))) from None
         self._write_text(run_root / "dbt/stdout.log", self._redact(dbt_result.stdout))
@@ -984,6 +1041,10 @@ class IncidentLab:
             if isinstance(mutation, OrphanPaymentRowsMutation):
                 if self._orphan_payment_state(mutation) != "INJECTED":
                     raise InvalidIncidentState("build 要求已完成 orphan-payment mutation")
+                continue
+            if isinstance(mutation, DeletePaymentRowsMutation):
+                if self._silent_payment_drop_state(mutation) != "INJECTED":
+                    raise InvalidIncidentState("build 要求已完成 silent-payment-drop mutation")
                 continue
             relation = self._healthy_relation(mutation.relation)
             columns = self._column_map(relation)

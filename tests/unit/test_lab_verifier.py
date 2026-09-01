@@ -23,7 +23,11 @@ from data_incident_gym.profiles import (
     RelationProfileSnapshot,
     RelationshipViolationFact,
 )
-from data_incident_gym.scenarios import load_scenario_spec
+from data_incident_gym.scenarios import (
+    DeletePaymentRowsMutation,
+    deleted_payment_rows,
+    load_scenario_spec,
+)
 
 RUN_ID = "a" * 32
 
@@ -178,6 +182,31 @@ def test_mutation_schema_projects_orphan_rows_before_comparing() -> None:
     )
 
 
+def test_mutation_schema_projects_deleted_rows_before_comparing() -> None:
+    scenario = load_scenario_spec("silent_payment_drop_partition_a")
+    baseline = RelationSummary(
+        "raw_payments",
+        113,
+        (
+            ColumnSummary("id", "integer", True, 1),
+            ColumnSummary("order_id", "integer", True, 2),
+            ColumnSummary("payment_method", "text", True, 3),
+            ColumnSummary("amount", "integer", True, 4),
+        ),
+    )
+    actual = RelationSummary(
+        "raw_payments",
+        111,
+        baseline.columns + (ColumnSummary("source_batch_note", "text", True, 5),),
+    )
+
+    IncidentVerifier._validate_mutation_schema(
+        scenario,
+        {"raw_payments": actual},
+        {"raw_payments": baseline},
+    )
+
+
 class _AggregateCursor:
     def __init__(
         self,
@@ -216,6 +245,23 @@ class _AggregateConnection:
 
     def cursor(self) -> _AggregateCursor:
         return self.cursor_instance
+
+
+class _SilentAggregateCursor(_AggregateCursor):
+    def __init__(
+        self,
+        target_rows: tuple[tuple[object, ...], ...],
+        sentinel_rows: tuple[tuple[object, ...], ...],
+        scalar_values: tuple[tuple[object, ...], ...],
+    ) -> None:
+        super().__init__((), scalar_values)
+        self._row_batches = (target_rows, sentinel_rows)
+        self._fetchall_count = 0
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        rows = self._row_batches[self._fetchall_count]
+        self._fetchall_count += 1
+        return list(rows)
 
 
 def _orphan_profile(
@@ -279,6 +325,167 @@ def _orphan_profile(
         current=tuple(sorted(current, key=lambda item: item.relation_name)),
         history=history_snapshots,
     )
+
+
+def _silent_profile(
+    *,
+    row_count: int,
+    reverse_violations: int,
+    history: bool,
+    payment_bucket: str,
+    payment_count: int,
+    channels: dict[str, int],
+) -> ProfileSnapshot:
+    payment_profile = RelationProfileSnapshot(
+        relation_name="raw_payments",
+        row_count=row_count,
+        columns=(),
+        business_key_duplicates=(DuplicateProfileFact(name="id", duplicate_count=0),),
+        business_fingerprint_duplicates=(
+            DuplicateProfileFact(name="order_payment_amount", duplicate_count=0),
+        ),
+        relationship_violations=(
+            RelationshipViolationFact(
+                name="order_id_to_raw_orders_id",
+                violation_count=0,
+            ),
+        ),
+        groups=(
+            GroupProfileFact(
+                name="payment_method",
+                columns=("payment_method",),
+                values=tuple((channel,) for channel in channels),
+                counts=tuple(channels.values()),
+            ),
+        ),
+    )
+    order_profile = RelationProfileSnapshot(
+        relation_name="raw_orders",
+        row_count=99,
+        columns=(),
+        relationship_violations=(
+            RelationshipViolationFact(
+                name="id_to_raw_payments_order_id",
+                violation_count=reverse_violations,
+            ),
+        ),
+    )
+    if not history:
+        history_snapshots = ()
+    else:
+        history_snapshots = (
+            RelationHistorySnapshot(
+                relation_name="raw_orders",
+                histories=(
+                    HistorySeries(
+                        name="order_count_by_day",
+                        metric=HistoryMetric.COUNT,
+                        points=(
+                            HistoryPoint(bucket="2018-04-09", periodic_key="1", value=1),
+                        ),
+                        watermark_column="order_date",
+                        watermark_value="2018-04-09",
+                        sla_seconds=86400,
+                    ),
+                ),
+            ),
+            RelationHistorySnapshot(
+                relation_name="raw_payments",
+                histories=(
+                    HistorySeries(
+                        name="payment_count_by_order_date",
+                        metric=HistoryMetric.COUNT,
+                        points=(
+                            HistoryPoint(
+                                bucket=payment_bucket,
+                                periodic_key=payment_bucket,
+                                value=payment_count,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    return ProfileSnapshot(
+        schema_version="profile_snapshot.v1",
+        profile_spec_version="profile_spec.v1",
+        profile_spec_sha256="b" * 64,
+        current=tuple(
+            sorted((order_profile, payment_profile), key=lambda item: item.relation_name)
+        ),
+        history=history_snapshots,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_id", "rows", "scalars", "history"),
+    (
+        (
+            "silent_payment_drop_record",
+            (),
+            ((112,), (1,), (0,), (1,), (0,), (0,), (32,), (13,), (55,), (12,)),
+            True,
+        ),
+        (
+            "silent_payment_drop_partition_a",
+            (),
+            ((111,), (3,), (0,), (2,), (0,), (0,), (32,), (13,), (55,), (11,)),
+            True,
+        ),
+        (
+            "silent_payment_drop_partition_b",
+            (),
+            ((111,), (3,), (0,), (2,), (0,), (0,), (32,), (13,), (55,), (11,)),
+            False,
+        ),
+    ),
+)
+def test_silent_verifier_accepts_exact_private_facts(
+    tmp_path: Path,
+    case_id: str,
+    rows: tuple[tuple[object, ...], ...],
+    scalars: tuple[tuple[object, ...], ...],
+    history: bool,
+) -> None:
+    scenario = load_scenario_spec(case_id)
+    mutation = next(
+        item
+        for item in scenario.reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    deleted = deleted_payment_rows(mutation)
+    sentinel = tuple(
+        row
+        for row in (
+            (89, 78, "bank_transfer", 2600),
+            (92, 80, "gift_card", 300),
+            (111, 97, "bank_transfer", 1400),
+        )
+        if row not in deleted
+    )
+    cursor = _SilentAggregateCursor((), sentinel, scalars)
+    verifier = IncidentVerifier(
+        tmp_path,
+        settings=Settings(_env_file=None),
+        db_connect=lambda **_: _AggregateConnection(cursor),
+    )
+    profile = _silent_profile(
+        row_count=scalars[0][0],
+        reverse_violations=scalars[3][0],
+        history=history,
+        payment_bucket=(
+            "2018-04-07" if case_id.endswith("record") else "2018-03-23"
+        ),
+        payment_count=scalars[1][0],
+        channels={
+            "bank_transfer": scalars[6][0],
+            "coupon": scalars[7][0],
+            "credit_card": scalars[8][0],
+            "gift_card": scalars[9][0],
+        },
+    )
+
+    verifier._validate_silent_payment_drop(scenario, profile)
 
 
 @pytest.mark.parametrize(

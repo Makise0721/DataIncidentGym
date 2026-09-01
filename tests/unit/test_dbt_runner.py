@@ -116,6 +116,28 @@ def test_scenario_run_returns_redacted_nonzero_result(tmp_path: Path) -> None:
     assert "***" in result.stderr
 
 
+def test_scenario_run_can_exclude_only_declared_resource_types(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
+        calls.append(command)
+        return CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    runner = DbtRunner(Settings(_env_file=None), tmp_path, fake_run)
+    runner.run_scenario(
+        tmp_path / "target",
+        tmp_path / "logs",
+        exclude_resource_types=("seed", "test"),
+    )
+
+    assert calls[0][-4:] == [
+        "--exclude-resource-type",
+        "seed",
+        "--exclude-resource-type",
+        "test",
+    ]
+
+
 def test_healthy_run_rejects_nonzero_and_redacts_password(tmp_path: Path) -> None:
     def fake_run(command: list[str], **_: object) -> CompletedProcess[str]:
         return CompletedProcess(command, 17, stdout="database-secret", stderr="failed")

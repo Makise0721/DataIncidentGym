@@ -271,3 +271,87 @@ def test_m10_orphan_profiles_and_recovery(project_root: Path) -> None:
         assert "source_batch_note" not in {
             column.name for column in lab._healthy_relation("raw_payments").columns
         }
+
+
+@pytest.mark.integration
+def test_m11_silent_payment_drop_profiles_and_recovery(project_root: Path) -> None:
+    lab = IncidentLab(Settings(_env_file=None), project_root)
+    expected = {
+        "silent_payment_drop_record": (112, 1, 1, "2018-04-07", True),
+        "silent_payment_drop_partition_a": (111, 2, 3, "2018-03-23", True),
+        "silent_payment_drop_partition_b": (111, 2, 3, "2018-03-23", False),
+    }
+
+    for case_id, (
+        payment_count,
+        reverse_count,
+        history_count,
+        bucket,
+        history_visible,
+    ) in expected.items():
+        baseline = lab.reset(case_id)
+        try:
+            prepared = lab.prepare(case_id)
+            assert prepared.state == "INJECTED"
+            run = lab.build(case_id)
+            assert run.dbt_exit_code == 0
+            assert run.verification_status is ScenarioVerificationStatus.EXPECTED_ANOMALY
+
+            profile = load_profile_snapshot(run.artifact_dir / "profile_snapshot.json")
+            payments = next(
+                item for item in profile.current if item.relation_name == "raw_payments"
+            )
+            orders = next(item for item in profile.current if item.relation_name == "raw_orders")
+            reverse = next(
+                item
+                for item in orders.relationship_violations
+                if item.name == "id_to_raw_payments_order_id"
+            )
+            payment_history = next(
+                (
+                    item
+                    for item in profile.history
+                    if item.relation_name == "raw_payments"
+                ),
+                None,
+            )
+            if history_visible:
+                assert payment_history is not None
+                series = next(
+                    item
+                    for item in payment_history.histories
+                    if item.name == "payment_count_by_order_date"
+                )
+                point = next(point for point in series.points if point.bucket == bucket)
+                assert point.value == history_count
+            else:
+                assert payment_history is None
+            assert (payments.row_count, reverse.violation_count) == (payment_count, reverse_count)
+        finally:
+            recovered = lab.restore(case_id)
+
+        assert recovered.state == "HEALTHY"
+        assert recovered.fingerprint == baseline.fingerprint
+        assert lab._healthy_relation("raw_payments").row_count == 113
+        assert lab._healthy_relation("raw_orders").row_count == 99
+
+
+@pytest.mark.integration
+def test_m11_order_volume_within_sla_is_healthy_control(project_root: Path) -> None:
+    lab = IncidentLab(Settings(_env_file=None), project_root)
+    baseline = lab.reset("order_volume_within_sla")
+    try:
+        prepared = lab.prepare("order_volume_within_sla")
+        assert prepared.state == "HEALTHY"
+        run = lab.build("order_volume_within_sla")
+        assert run.dbt_exit_code == 0
+        assert run.verification_status is ScenarioVerificationStatus.HEALTHY_CONTROL
+        profile = load_profile_snapshot(run.artifact_dir / "profile_snapshot.json")
+        history = next(item for item in profile.history if item.relation_name == "raw_orders")
+        series = next(item for item in history.histories if item.name == "order_count_by_day")
+        assert series.watermark_value == "2018-04-09"
+        assert series.sla_seconds == 86400
+    finally:
+        recovered = lab.restore("order_volume_within_sla")
+
+    assert recovered.fingerprint == baseline.fingerprint
