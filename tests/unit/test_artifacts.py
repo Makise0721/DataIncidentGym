@@ -167,6 +167,61 @@ def test_expected_anomaly_keeps_private_status_out_of_the_six_file_contract(
     assert "EXPECTED_ANOMALY" not in report
 
 
+def test_orphan_unresolved_evidence_serializes_in_the_existing_six_file_contract(
+    tmp_path: Path,
+) -> None:
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="The order ingestion boundary is unavailable.",
+        unresolved_evidence=(
+            {
+                "evidence_kind": "RELATION_HISTORY",
+                "subject": "raw_orders",
+                "reason_code": "RELATION_NOT_ALLOWED",
+            },
+            {
+                "evidence_kind": "INGESTION_WATERMARK",
+                "subject": "raw_orders",
+                "reason_code": "NOT_OBSERVABLE",
+            },
+        ),
+        confidence=0.2,
+    )
+    diagnosis_run = _diagnosis_run().model_copy(
+        update={
+            "diagnosis": diagnosis,
+            "trace": (
+                _diagnosis_run().trace[0],
+                _diagnosis_run().trace[1].model_copy(
+                    update={"status": DiagnosisStatus.INSUFFICIENT_EVIDENCE}
+                ),
+            ),
+        }
+    )
+    evaluation = _evaluation().model_copy(
+        update={
+            "incident_case_id": "orphan_payment_coupon_b",
+            "answerability": "INSUFFICIENT",
+            "expected_status": "INSUFFICIENT_EVIDENCE",
+        }
+    )
+    output = ArtifactWriter(tmp_path, run_command=_git_command).write(
+        _artifact_run().model_copy(
+            update={
+                "incident_case_id": "orphan_payment_coupon_b",
+                "diagnosis_run": diagnosis_run,
+                "evaluation": evaluation,
+            }
+        )
+    )
+
+    assert {path.name for path in output.iterdir()} == set(ARTIFACT_FILENAMES)
+    payload = (output / "diagnosis.json").read_text(encoding="utf-8")
+    assert '"evidence_kind": "RELATION_HISTORY"' in payload
+    assert '"evidence_kind": "INGESTION_WATERMARK"' in payload
+
+
 def test_writer_refuses_overwrite_and_keeps_the_original_bundle(tmp_path: Path) -> None:
     writer = ArtifactWriter(tmp_path, run_command=_git_command)
     output = writer.write(_artifact_run())

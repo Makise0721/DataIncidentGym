@@ -35,16 +35,22 @@ from data_incident_gym.scenarios import (
     P1_M7_SCENARIO_IDS,
     P1_M8_SCENARIO_IDS,
     P1_M9_SCENARIO_IDS,
+    P1_M10_SCENARIO_IDS,
     load_scenario_spec,
 )
 
-MATRIX_CASES = P1_M7_SCENARIO_IDS + P1_M8_SCENARIO_IDS + P1_M9_SCENARIO_IDS
+MATRIX_CASES = (
+    P1_M7_SCENARIO_IDS
+    + P1_M8_SCENARIO_IDS
+    + P1_M9_SCENARIO_IDS
+    + P1_M10_SCENARIO_IDS
+)
 MATRIX_STRATEGIES = (
     DiagnosticStrategy.STATIC_SKILL,
     DiagnosticStrategy.DIAGNOSTIC_KERNEL,
 )
-assert len(MATRIX_CASES) == 10
-assert len(MATRIX_CASES) * len(MATRIX_STRATEGIES) == 20
+assert len(MATRIX_CASES) == 13
+assert len(MATRIX_CASES) * len(MATRIX_STRATEGIES) == 26
 M9_EXPECTED = {
     "duplicate_payment_record": (
         "CONFIRMED",
@@ -61,6 +67,31 @@ M9_EXPECTED = {
         ],
     ),
     "duplicate_payment_coupon_b": (
+        "INSUFFICIENT_EVIDENCE",
+        None,
+        [],
+    ),
+}
+M10_EXPECTED = {
+    "orphan_payment_record": (
+        "CONFIRMED",
+        "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+        [
+            "model.jaffle_shop.customers",
+            "model.jaffle_shop.orders",
+            "model.jaffle_shop.stg_payments",
+        ],
+    ),
+    "orphan_payment_coupon_a": (
+        "CONFIRMED",
+        "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+        [
+            "model.jaffle_shop.customers",
+            "model.jaffle_shop.orders",
+            "model.jaffle_shop.stg_payments",
+        ],
+    ),
+    "orphan_payment_coupon_b": (
         "INSUFFICIENT_EVIDENCE",
         None,
         [],
@@ -162,6 +193,16 @@ def _model_response(
 
     run_fact = run_records[-1].content
     if isinstance(run_fact, DbtRunResultsFact) and run_fact.run_status == "SUCCEEDED":
+        if signal_code == "PAYMENT_ORPHAN_ALERT":
+            return _orphan_payment_response(
+                messages,
+                agent_info,
+                run_id=run_id,
+                strategy=strategy,
+                incident_subjects=incident_subjects,
+                schema_relations=schema_relations,
+                profile_relations=profile_relations,
+            )
         if signal_code == "PAYMENT_DUPLICATE_ALERT":
             return _duplicate_payment_response(
                 messages,
@@ -724,6 +765,295 @@ def _model_response(
     return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
 
 
+def _orphan_hypotheses() -> list[dict[str, str]]:
+    return [
+        {
+            "hypothesis_id": "h_permanent_orphan",
+            "root_cause_code": "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+        },
+        {
+            "hypothesis_id": "h_late_order",
+            "root_cause_code": "NORMAL_LATE_ARRIVING_ORDER",
+        },
+    ]
+
+
+def _orphan_hypothesis_ids() -> list[str]:
+    return [item["hypothesis_id"] for item in _orphan_hypotheses()]
+
+
+def _orphan_insufficient_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+) -> ModelResponse:
+    records = (
+        *_returned_records(messages, "get_dbt_run_results"),
+        *_returned_records(messages, "get_dbt_lineage"),
+        *_returned_records(messages, "get_relation_schema"),
+        *_returned_records(messages, "get_relation_data_profile"),
+    )
+    evidence_ids = [record.evidence_id for record in records]
+    unresolved = [
+        {
+            "evidence_kind": "RELATION_HISTORY",
+            "subject": "raw_orders",
+            "reason_code": "RELATION_NOT_ALLOWED",
+        },
+        {
+            "evidence_kind": "INGESTION_WATERMARK",
+            "subject": "raw_orders",
+            "reason_code": "NOT_OBSERVABLE",
+        },
+    ]
+    if strategy is DiagnosticStrategy.STATIC_SKILL:
+        payload = {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "run_id": run_id,
+            "summary": "The order ingestion boundary is unavailable.",
+            "affected_assets": [],
+            "evidence_ids": evidence_ids,
+            "claims": [],
+            "unresolved_evidence": unresolved,
+            "recommended_actions": ["Collect order history and its ingestion watermark."],
+            "confidence": 0.2,
+        }
+    else:
+        payload = {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "run_id": run_id,
+            "selected_hypothesis_id": None,
+            "assessments": [],
+            "claims": [],
+            "unresolved_evidence": unresolved,
+            "summary": "The order ingestion boundary is unavailable.",
+            "recommended_actions": ["Collect order history and its ingestion watermark."],
+            "confidence": 0.2,
+        }
+    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+
+
+def _orphan_confirmed_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+) -> ModelResponse:
+    run_records = _returned_records(messages, "get_dbt_run_results")
+    lineages = tuple(
+        record
+        for record in _returned_records(messages, "get_dbt_lineage")
+        if getattr(record.content, "direction", None) == "downstream"
+    )
+    schemas = _returned_records(messages, "get_relation_schema")
+    profiles = tuple(
+        record
+        for record in _returned_records(messages, "get_relation_data_profile")
+        if getattr(record.content, "relation_name", None) == "raw_payments"
+    )
+    histories = tuple(
+        record
+        for record in _returned_records(messages, "get_relation_history")
+        if getattr(record.content, "relation_name", None) == "raw_orders"
+    )
+    records = (*run_records, *lineages, *schemas, *profiles, *histories)
+    evidence_ids = [record.evidence_id for record in records]
+    assets = tuple(
+        sorted(
+            node.node_id
+            for node in lineages[-1].content.related_nodes
+            if node.resource_type == "model"
+        )
+    )
+    root_evidence_ids = [
+        run_records[-1].evidence_id,
+        profiles[-1].evidence_id,
+        histories[-1].evidence_id,
+    ]
+    hypothesis_ids = _orphan_hypothesis_ids()
+    if strategy is DiagnosticStrategy.STATIC_SKILL:
+        payload = {
+            "status": "CONFIRMED",
+            "run_id": run_id,
+            "root_cause_code": "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+            "summary": (
+                "A settled payment references an order absent beyond the ingestion boundary."
+            ),
+            "affected_assets": list(assets),
+            "evidence_ids": evidence_ids,
+            "claims": [
+                {
+                    "kind": "ROOT_CAUSE",
+                    "root_cause_code": "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+                    "evidence_ids": root_evidence_ids,
+                },
+                *(
+                    {
+                        "kind": "AFFECTED_ASSET",
+                        "asset": asset,
+                        "evidence_ids": [lineages[-1].evidence_id],
+                    }
+                    for asset in assets
+                ),
+            ],
+            "unresolved_evidence": [],
+            "recommended_actions": ["Reconcile the orphan payment with order ingestion."],
+            "confidence": 0.9,
+        }
+    else:
+        payload = {
+            "status": "CONFIRMED",
+            "run_id": run_id,
+            "selected_hypothesis_id": hypothesis_ids[0],
+            "assessments": [
+                {
+                    "hypothesis_id": hypothesis_ids[0],
+                    "verdict": "SUPPORTED",
+                    "evidence_ids": root_evidence_ids,
+                },
+                {
+                    "hypothesis_id": hypothesis_ids[1],
+                    "verdict": "REFUTED",
+                    "evidence_ids": root_evidence_ids,
+                },
+            ],
+            "claims": [
+                {
+                    "kind": "ROOT_CAUSE",
+                    "value": "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+                    "evidence_ids": root_evidence_ids,
+                },
+                *(
+                    {
+                        "kind": "AFFECTED_ASSET",
+                        "value": asset,
+                        "evidence_ids": [lineages[-1].evidence_id],
+                    }
+                    for asset in assets
+                ),
+            ],
+            "unresolved_evidence": [],
+            "summary": (
+                "A settled payment references an order absent beyond the ingestion boundary."
+            ),
+            "recommended_actions": ["Reconcile the orphan payment with order ingestion."],
+            "confidence": 0.9,
+        }
+    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+
+
+def _orphan_payment_response(
+    messages: list[ModelMessage],
+    agent_info: AgentInfo,
+    *,
+    run_id: str,
+    strategy: DiagnosticStrategy,
+    incident_subjects: tuple[str, ...],
+    schema_relations: tuple[str, ...],
+    profile_relations: tuple[str, ...],
+) -> ModelResponse:
+    payment_seed = next(
+        (
+            subject
+            for subject in incident_subjects
+            if subject.startswith("seed.") and subject.endswith(".raw_payments")
+        ),
+        None,
+    )
+    if payment_seed is None:
+        raise AssertionError("payment orphan brief must identify the source seed")
+    if not _returned_records(messages, "get_dbt_lineage"):
+        tool = _tool_call(
+            "get_dbt_lineage",
+            {"node_id": payment_seed, "direction": "downstream"},
+            "orphan-lineage",
+        )
+        return _with_intent(
+            tool,
+            strategy,
+            _intent(
+                "g_orphan_lineage",
+                "MAP_IMPACT",
+                new_hypotheses=_orphan_hypotheses(),
+            ),
+        )
+    if not any(
+        getattr(record.content, "relation_name", None) == "raw_payments"
+        for record in _returned_records(messages, "get_relation_schema")
+    ):
+        tool = _tool_call(
+            "get_relation_schema",
+            {"relation_name": "raw_payments"},
+            "orphan-schema",
+        )
+        return _with_intent(
+            tool,
+            strategy,
+            _intent(
+                "g_orphan_schema",
+                "DISCRIMINATE_SCHEMA",
+                hypothesis_ids=_orphan_hypothesis_ids(),
+            ),
+        )
+    if not any(
+        getattr(record.content, "relation_name", None) == "raw_payments"
+        for record in _returned_records(messages, "get_relation_data_profile")
+    ):
+        if _tool_attempts(messages, "get_relation_data_profile") == 0:
+            tool = _tool_call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_payments"},
+                "orphan-profile",
+            )
+            return _with_intent(
+                tool,
+                strategy,
+                _intent(
+                    "g_orphan_profile",
+                    "PROFILE_RELATION",
+                    hypothesis_ids=_orphan_hypothesis_ids(),
+                ),
+            )
+        return _orphan_insufficient_response(
+            messages,
+            agent_info,
+            run_id=run_id,
+            strategy=strategy,
+        )
+    histories = _returned_records(messages, "get_relation_history")
+    if not histories:
+        if _tool_attempts(messages, "get_relation_history") == 0:
+            tool = _tool_call(
+                "get_relation_history",
+                {"relation_name": "raw_orders"},
+                "orphan-history",
+            )
+            return _with_intent(
+                tool,
+                strategy,
+                _intent(
+                    "g_orphan_history",
+                    "COMPARE_HISTORY",
+                    hypothesis_ids=_orphan_hypothesis_ids(),
+                ),
+            )
+        return _orphan_insufficient_response(
+            messages,
+            agent_info,
+            run_id=run_id,
+            strategy=strategy,
+        )
+    return _orphan_confirmed_response(
+        messages,
+        agent_info,
+        run_id=run_id,
+        strategy=strategy,
+    )
+
+
 def _duplicate_hypotheses(*, exact: bool) -> list[dict[str, str]]:
     return [
         {
@@ -1208,6 +1538,22 @@ async def test_p1_function_model_policy_matrix(
             } == {
                 ("RELATION_DATA_PROFILE", "raw_payments", "RELATION_NOT_ALLOWED"),
                 ("PAYMENT_EVENT_IDENTITY", "raw_payments", "NOT_OBSERVABLE"),
+            }
+        else:
+            assert diagnosis["unresolved_evidence"] == []
+
+    if case_id in P1_M10_SCENARIO_IDS:
+        expected_status, expected_root, expected_assets = M10_EXPECTED[case_id]
+        assert diagnosis["status"] == expected_status
+        assert diagnosis["root_cause_code"] == expected_root
+        assert diagnosis["affected_assets"] == expected_assets
+        if case_id == "orphan_payment_coupon_b":
+            assert {
+                (item["evidence_kind"], item["subject"], item["reason_code"])
+                for item in diagnosis["unresolved_evidence"]
+            } == {
+                ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED"),
+                ("INGESTION_WATERMARK", "raw_orders", "NOT_OBSERVABLE"),
             }
         else:
             assert diagnosis["unresolved_evidence"] == []
