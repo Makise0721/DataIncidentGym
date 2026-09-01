@@ -27,13 +27,18 @@ from data_incident_gym.evidence import (
     EvidenceSource,
     EvidenceType,
     RelationDataProfileFact,
+    RelationHistoryFact,
     RelationSchemaColumn,
     RelationSchemaFact,
 )
 from data_incident_gym.profiles import (
     DuplicateProfileFact,
     GroupProfileFact,
+    HistoryPoint,
+    HistorySeries,
+    RelationHistorySnapshot,
     RelationProfileSnapshot,
+    RelationshipViolationFact,
 )
 
 RUN_ID = "a" * 32
@@ -643,6 +648,333 @@ def test_kernel_rejects_unsupported_successful_duplicate_claims(
 
     with pytest.raises(KernelError, match="ROOT_CLAIM_EVIDENCE_INCOMPATIBLE"):
         kernel.finalize(_semantic_duplicate_decision(records))
+
+
+def _orphan_kernel() -> DiagnosticKernel:
+    return DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+            "NORMAL_LATE_ARRIVING_ORDER",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_schema_relations=("raw_payments",),
+        observable_profile_relations=("raw_payments",),
+        observable_history_relations=("raw_orders",),
+        incident_subjects=("seed.jaffle_shop.raw_payments", "raw_payments", "raw_orders"),
+    )
+
+
+def _orphan_records(
+    *,
+    relationship_count: int = 1,
+    watermark: str | None = "2018-04-09",
+    points: tuple[HistoryPoint, ...] = (
+        HistoryPoint(bucket="2018-04-03", periodic_key="2018-04-03", value=12),
+    ),
+) -> tuple[EvidenceRecord, EvidenceRecord, EvidenceRecord, EvidenceRecord]:
+    run = _record(
+        EvidenceType.DBT_RUN_RESULTS,
+        EvidenceSource.DBT_RUN_RESULTS,
+        RUN_ID,
+        DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
+            run_id=RUN_ID,
+            run_status="SUCCEEDED",
+            dbt_exit_code=0,
+            failed_nodes=(),
+            skipped_nodes=(),
+        ),
+    )
+    lineage = _record(
+        EvidenceType.DBT_LINEAGE,
+        EvidenceSource.DBT_MANIFEST,
+        "seed.jaffle_shop.raw_payments",
+        DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="seed.jaffle_shop.raw_payments",
+            direction="downstream",
+            related_nodes=(
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.stg_payments",
+                    resource_type="model",
+                    name="stg_payments",
+                    distance=1,
+                ),
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.customers",
+                    resource_type="model",
+                    name="customers",
+                    distance=2,
+                ),
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.orders",
+                    resource_type="model",
+                    name="orders",
+                    distance=2,
+                ),
+            ),
+        ),
+    )
+    profile = _record(
+        EvidenceType.RELATION_DATA_PROFILE,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_payments",
+        RelationDataProfileFact(
+            kind="RELATION_DATA_PROFILE",
+            run_id=RUN_ID,
+            relation_name="raw_payments",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationProfileSnapshot(
+                relation_name="raw_payments",
+                row_count=114,
+                columns=(),
+                relationship_violations=(
+                    RelationshipViolationFact(
+                        name="order_id_to_raw_orders_id",
+                        violation_count=relationship_count,
+                    ),
+                ),
+            ),
+        ),
+    )
+    history = _record(
+        EvidenceType.RELATION_HISTORY,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_orders",
+        RelationHistoryFact(
+            kind="RELATION_HISTORY",
+            run_id=RUN_ID,
+            relation_name="raw_orders",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationHistorySnapshot(
+                relation_name="raw_orders",
+                histories=(
+                    HistorySeries(
+                        name="order_count_by_day",
+                        metric="count",
+                        points=points,
+                        watermark_column="order_date",
+                        watermark_value=watermark,
+                    ),
+                ),
+            ),
+        ),
+    )
+    return run, lineage, profile, history
+
+
+def _close_orphan_records(
+    kernel: DiagnosticKernel,
+    records: tuple[EvidenceRecord, EvidenceRecord, EvidenceRecord, EvidenceRecord],
+) -> None:
+    run, lineage, profile, history = records
+    _close(
+        kernel,
+        gap_id="g_run_orphan",
+        gap_kind=EvidenceGapKind.LOCATE_FAILURE,
+        tool_name="get_dbt_run_results",
+        arguments={"run_id": RUN_ID},
+        record=run,
+        new_hypotheses=(
+            Hypothesis(
+                hypothesis_id="h_permanent_orphan",
+                root_cause_code="SOURCE_PERMANENT_ORPHAN_PAYMENT",
+            ),
+            Hypothesis(
+                hypothesis_id="h_late_order",
+                root_cause_code="NORMAL_LATE_ARRIVING_ORDER",
+            ),
+        ),
+    )
+    _close(
+        kernel,
+        gap_id="g_lineage_orphan",
+        gap_kind=EvidenceGapKind.MAP_IMPACT,
+        tool_name="get_dbt_lineage",
+        arguments={"node_id": "seed.jaffle_shop.raw_payments", "direction": "downstream"},
+        record=lineage,
+    )
+    _close(
+        kernel,
+        gap_id="g_profile_orphan",
+        gap_kind=EvidenceGapKind.PROFILE_RELATION,
+        tool_name="get_relation_data_profile",
+        arguments={"relation_name": "raw_payments"},
+        record=profile,
+    )
+    _close(
+        kernel,
+        gap_id="g_history_orphan",
+        gap_kind=EvidenceGapKind.COMPARE_HISTORY,
+        tool_name="get_relation_history",
+        arguments={"relation_name": "raw_orders"},
+        record=history,
+    )
+
+
+def _orphan_decision(
+    records: tuple[EvidenceRecord, EvidenceRecord, EvidenceRecord, EvidenceRecord],
+) -> KernelDecision:
+    run, lineage, profile, history = records
+    return KernelDecision(
+        status="CONFIRMED",
+        run_id=RUN_ID,
+        selected_hypothesis_id="h_permanent_orphan",
+        assessments=(
+            HypothesisAssessment(
+                hypothesis_id="h_permanent_orphan",
+                verdict=HypothesisVerdict.SUPPORTED,
+                evidence_ids=(run.evidence_id, profile.evidence_id, history.evidence_id),
+            ),
+            HypothesisAssessment(
+                hypothesis_id="h_late_order",
+                verdict=HypothesisVerdict.REFUTED,
+                evidence_ids=(profile.evidence_id, history.evidence_id),
+            ),
+        ),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value="SOURCE_PERMANENT_ORPHAN_PAYMENT",
+                evidence_ids=(run.evidence_id, profile.evidence_id, history.evidence_id),
+            ),
+            ClaimEvidence(
+                kind=ClaimKind.AFFECTED_ASSET,
+                value="model.jaffle_shop.stg_payments",
+                evidence_ids=(lineage.evidence_id,),
+            ),
+            ClaimEvidence(
+                kind=ClaimKind.AFFECTED_ASSET,
+                value="model.jaffle_shop.customers",
+                evidence_ids=(lineage.evidence_id,),
+            ),
+            ClaimEvidence(
+                kind=ClaimKind.AFFECTED_ASSET,
+                value="model.jaffle_shop.orders",
+                evidence_ids=(lineage.evidence_id,),
+            ),
+        ),
+        summary="A settled payment references an order absent beyond the ingestion boundary.",
+        recommended_actions=(),
+        confidence=0.9,
+    )
+
+
+def test_kernel_confirms_permanent_orphan_only_with_history_boundary() -> None:
+    kernel = _orphan_kernel()
+    records = _orphan_records()
+    _close_orphan_records(kernel, records)
+
+    outcome = kernel.finalize(_orphan_decision(records))
+
+    assert outcome.status is KernelFinalStatus.CONFIRMED
+    assert outcome.root_cause_code == "SOURCE_PERMANENT_ORPHAN_PAYMENT"
+
+
+@pytest.mark.parametrize(
+    ("relationship_count", "watermark", "points"),
+    (
+        (
+            0,
+            "2018-04-09",
+            (HistoryPoint(bucket="2018-04-03", periodic_key="2018-04-03", value=12),),
+        ),
+        (
+            1,
+            None,
+            (HistoryPoint(bucket="2018-04-03", periodic_key="2018-04-03", value=12),),
+        ),
+        (
+            1,
+            "not-a-date",
+            (HistoryPoint(bucket="2018-04-03", periodic_key="2018-04-03", value=12),),
+        ),
+        (1, "2018-04-09", ()),
+    ),
+)
+def test_kernel_rejects_permanent_orphan_without_compatible_relationship_history(
+    relationship_count: int,
+    watermark: str | None,
+    points: tuple[HistoryPoint, ...],
+) -> None:
+    kernel = _orphan_kernel()
+    records = _orphan_records(
+        relationship_count=relationship_count,
+        watermark=watermark,
+        points=points,
+    )
+    _close_orphan_records(kernel, records)
+
+    with pytest.raises(KernelError, match="ROOT_CLAIM_EVIDENCE_INCOMPATIBLE"):
+        kernel.finalize(_orphan_decision(records))
+
+
+def test_kernel_binds_blocked_history_and_watermark_unresolved_evidence() -> None:
+    kernel = DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+            "NORMAL_LATE_ARRIVING_ORDER",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_history_relations=("raw_orders",),
+        incident_subjects=("raw_orders",),
+    )
+    prepared = kernel.prepare_tool(
+        intent=InvestigationIntent(
+            gap_id="g_blocked_history",
+            gap_kind=EvidenceGapKind.COMPARE_HISTORY,
+            new_hypotheses=(
+                Hypothesis(
+                    hypothesis_id="h_permanent_orphan",
+                    root_cause_code="SOURCE_PERMANENT_ORPHAN_PAYMENT",
+                ),
+                Hypothesis(
+                    hypothesis_id="h_late_order",
+                    root_cause_code="NORMAL_LATE_ARRIVING_ORDER",
+                ),
+            ),
+        ),
+        tool_name="get_relation_history",
+        arguments={"relation_name": "raw_orders"},
+    )
+    kernel.record_tool_failure(prepared, "RELATION_NOT_ALLOWED")
+
+    outcome = kernel.finalize(
+        KernelDecision(
+            status="INSUFFICIENT_EVIDENCE",
+            run_id=RUN_ID,
+            unresolved_evidence=(
+                {
+                    "evidence_kind": "RELATION_HISTORY",
+                    "subject": "raw_orders",
+                    "reason_code": "RELATION_NOT_ALLOWED",
+                },
+                {
+                    "evidence_kind": "INGESTION_WATERMARK",
+                    "subject": "raw_orders",
+                    "reason_code": "NOT_OBSERVABLE",
+                },
+            ),
+            summary="The order ingestion boundary is unavailable.",
+            recommended_actions=(),
+            confidence=0.2,
+        )
+    )
+
+    assert tuple(
+        (item.evidence_kind, item.subject, item.reason_code)
+        for item in outcome.unresolved_evidence
+    ) == (
+        ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED"),
+        ("INGESTION_WATERMARK", "raw_orders", "NOT_OBSERVABLE"),
+    )
 
 
 def test_kernel_rejects_duplicate_claim_without_successful_run_evidence() -> None:

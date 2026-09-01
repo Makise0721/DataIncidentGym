@@ -242,6 +242,46 @@ def test_insufficient_diagnosis_accepts_payment_event_identity_gap() -> None:
     assert diagnosis.unresolved_evidence[0].evidence_kind == "PAYMENT_EVENT_IDENTITY"
 
 
+@pytest.mark.parametrize("evidence_kind", ("RELATION_HISTORY", "INGESTION_WATERMARK"))
+def test_insufficient_diagnosis_accepts_orphan_history_gap(evidence_kind: str) -> None:
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="The order ingestion boundary is unavailable.",
+        unresolved_evidence=(
+            {
+                "evidence_kind": evidence_kind,
+                "subject": "raw_orders",
+                "reason_code": (
+                    "RELATION_NOT_ALLOWED"
+                    if evidence_kind == "RELATION_HISTORY"
+                    else "NOT_OBSERVABLE"
+                ),
+            },
+        ),
+        confidence=0.2,
+    )
+
+    assert diagnosis.unresolved_evidence[0].evidence_kind == evidence_kind
+
+
+def test_ingestion_watermark_gap_rejects_relation_not_allowed() -> None:
+    with pytest.raises(ValueError, match="NOT_OBSERVABLE"):
+        Diagnosis(
+            status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+            run_id=RUN_ID,
+            summary="The order ingestion boundary is unavailable.",
+            unresolved_evidence=(
+                {
+                    "evidence_kind": "INGESTION_WATERMARK",
+                    "subject": "raw_orders",
+                    "reason_code": "RELATION_NOT_ALLOWED",
+                },
+            ),
+            confidence=0.2,
+        )
+
+
 def test_payment_event_identity_gap_rejects_relation_not_allowed() -> None:
     with pytest.raises(ValueError, match="PAYMENT_EVENT_IDENTITY"):
         Diagnosis(

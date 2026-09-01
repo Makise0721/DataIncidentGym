@@ -153,6 +153,8 @@ def test_both_prompts_expose_the_shared_m8_ontology_and_test_claim_rule() -> Non
         "SOURCE_EXACT_PAYMENT_DUPLICATE",
         "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
         "LEGITIMATE_SPLIT_PAYMENT",
+        "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+        "NORMAL_LATE_ARRIVING_ORDER",
     )
 
     assert expected == P1_ROOT_CAUSE_CODES
@@ -174,6 +176,21 @@ def test_both_prompts_expose_successful_payment_anomaly_semantics() -> None:
         assert "SOURCE_SEMANTIC_PAYMENT_DUPLICATE" in prompt
         assert "LEGITIMATE_SPLIT_PAYMENT" in prompt
         assert "PAYMENT_EVENT_IDENTITY" in prompt
+        assert "SOURCE_PERMANENT_ORPHAN_PAYMENT" in prompt
+        assert "NORMAL_LATE_ARRIVING_ORDER" in prompt
+        assert "orphan_payment_record" not in prompt
+        assert "orphan_payment_coupon_a" not in prompt
+        assert "orphan_payment_coupon_b" not in prompt
+
+
+def test_both_prompts_require_history_boundary_for_permanent_orphans() -> None:
+    required = (
+        "A current payment-to-order relationship violation proves an orphan state",
+        "Confirm a permanent orphan only when order history and its watermark",
+        "normal-late-arrival alternatives",
+    )
+    for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
+        assert all(fragment in prompt for fragment in required)
 
 
 def test_kernel_prompt_exposes_the_exact_intent_transport_contract() -> None:

@@ -9,7 +9,8 @@ Use only this root-cause vocabulary: SOURCE_SCHEMA_COLUMN_RENAMED,
 SOURCE_SCHEMA_COLUMN_TYPE_CHANGED, TRANSFORMATION_COLUMN_CAST_CHANGED,
 SOURCE_REQUIRED_FIELD_NULL, TRANSFORMATION_REQUIRED_FIELD_NULL,
 SOURCE_EXACT_PAYMENT_DUPLICATE, SOURCE_SEMANTIC_PAYMENT_DUPLICATE, and
-LEGITIMATE_SPLIT_PAYMENT. For a confirmed impact
+LEGITIMATE_SPLIT_PAYMENT, SOURCE_PERMANENT_ORPHAN_PAYMENT, and
+NORMAL_LATE_ARRIVING_ORDER. For a confirmed impact
 from a model failure, affected assets are the exact direct failed node from node-error evidence
 plus every downstream model asset returned by downstream lineage from that node. When the
 direct failed node is a dbt test, affected assets are its distance-1 upstream model
@@ -38,6 +39,10 @@ When the raw_payments profile is unavailable and payment idempotency or channel-
 not observable, preserve SOURCE_SEMANTIC_PAYMENT_DUPLICATE and LEGITIMATE_SPLIT_PAYMENT as
 alternatives and return INSUFFICIENT_EVIDENCE. PAYMENT_EVENT_IDENTITY is a missing-evidence
 declaration, not a business tool.
+
+A current payment-to-order relationship violation proves an orphan state, not permanence. Confirm a permanent orphan only when order history and its watermark show ingestion has advanced through
+the public settled window. If that boundary is unavailable, retain permanent-orphan and
+normal-late-arrival alternatives and return insufficient evidence.
 
 Bind every root-cause, affected-asset, or health claim to compatible EvidenceRecord IDs from
 the current run. Return a confirmed result only when the evidence supports a specific cause

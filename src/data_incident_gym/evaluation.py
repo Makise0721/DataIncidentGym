@@ -28,6 +28,7 @@ from data_incident_gym.scenarios import (
     ColumnRenameMutation,
     ColumnTypeMutation,
     DuplicatePaymentRowsMutation,
+    OrphanPaymentRowsMutation,
     ScenarioSpec,
     SetFieldNullMutation,
 )
@@ -375,6 +376,127 @@ def _root_cause_evidence_compatible(
             and fingerprint.duplicate_count == len(duplicate.inserted_payment_ids)
             and grouped_counts.get("coupon") == 16
         )
+
+    orphan = next(
+        (
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, OrphanPaymentRowsMutation)
+        ),
+        None,
+    )
+    if orphan is not None:
+        if root_cause_code != "SOURCE_PERMANENT_ORPHAN_PAYMENT":
+            return False
+        runs = [
+            record.content
+            for record in root_records
+            if isinstance(record.content, DbtRunResultsFact)
+        ]
+        profiles = [
+            record.content
+            for record in root_records
+            if isinstance(record.content, RelationDataProfileFact)
+            and record.content.relation_name == orphan.relation
+        ]
+        histories = [
+            record.content
+            for record in root_records
+            if isinstance(record.content, RelationHistoryFact)
+            and record.content.relation_name == "raw_orders"
+        ]
+        if len(runs) != 1 or len(profiles) != 1 or len(histories) != 1:
+            return False
+        run = runs[0]
+        profile = profiles[0]
+        history = histories[0]
+        if (
+            run.run_status != "SUCCEEDED"
+            or run.dbt_exit_code != 0
+            or run.failed_nodes
+            or run.skipped_nodes
+            or profile.snapshot.relation_name != orphan.relation
+            or history.snapshot.relation_name != "raw_orders"
+            or profile.snapshot.row_count != 113 + len(orphan.inserted_payment_ids)
+        ):
+            return False
+        key = next(
+            (item for item in profile.snapshot.business_key_duplicates if item.name == "id"),
+            None,
+        )
+        fingerprint = next(
+            (
+                item
+                for item in profile.snapshot.business_fingerprint_duplicates
+                if item.name == "order_payment_amount"
+            ),
+            None,
+        )
+        relationship = next(
+            (
+                item
+                for item in profile.snapshot.relationship_violations
+                if item.name == "order_id_to_raw_orders_id"
+            ),
+            None,
+        )
+        group = next(
+            (item for item in profile.snapshot.groups if item.name == "payment_method"),
+            None,
+        )
+        expected_channel, expected_channel_count = {
+            "SINGLE_REFERENCE": ("credit_card", 56),
+            "SETTLED_COUPON_WINDOW": ("coupon", 16),
+        }[orphan.mode]
+        channel_count = next(
+            (
+                count
+                for values, count in zip(group.values, group.counts, strict=True)
+                if values == (expected_channel,)
+            ),
+            None,
+        ) if group is not None else None
+        if (
+            key is None
+            or fingerprint is None
+            or relationship is None
+            or key.duplicate_count != 0
+            or fingerprint.duplicate_count != 0
+            or relationship.violation_count != len(orphan.inserted_payment_ids)
+            or channel_count != expected_channel_count
+        ):
+            return False
+        series = next(
+            (
+                item
+                for item in history.snapshot.histories
+                if item.name == "order_count_by_day"
+            ),
+            None,
+        )
+        settled_window = next(
+            (
+                observation.value
+                for observation in scenario.incident_brief.observations
+                if observation.kind == "SETTLED_ORDER_WINDOW_END"
+                and observation.subject == "raw_orders"
+            ),
+            None,
+        )
+        if (
+            series is None
+            or not series.points
+            or series.watermark_column != "order_date"
+            or series.watermark_value is None
+            or settled_window is None
+        ):
+            return False
+        try:
+            watermark_date = datetime.fromisoformat(series.watermark_value).date()
+            settled_window_date = datetime.fromisoformat(settled_window).date()
+        except (TypeError, ValueError):
+            return False
+        return watermark_date >= settled_window_date
 
     if not any(
         isinstance(record.content, DbtNodeErrorFact)

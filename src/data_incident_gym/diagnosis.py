@@ -131,6 +131,8 @@ class UnresolvedEvidence(BaseModel):
     evidence_kind: Literal[
         "RELATION_SCHEMA",
         "RELATION_DATA_PROFILE",
+        "RELATION_HISTORY",
+        "INGESTION_WATERMARK",
         "TRANSFORMATION_DEFINITION",
         "PAYMENT_EVENT_IDENTITY",
     ]
@@ -139,8 +141,10 @@ class UnresolvedEvidence(BaseModel):
 
     @model_validator(mode="after")
     def validate_reason_code(self) -> UnresolvedEvidence:
-        if self.evidence_kind == "PAYMENT_EVENT_IDENTITY" and self.reason_code != "NOT_OBSERVABLE":
-            raise ValueError("PAYMENT_EVENT_IDENTITY requires NOT_OBSERVABLE")
+        if self.evidence_kind in {"INGESTION_WATERMARK", "PAYMENT_EVENT_IDENTITY"} and (
+            self.reason_code != "NOT_OBSERVABLE"
+        ):
+            raise ValueError(f"{self.evidence_kind} requires NOT_OBSERVABLE")
         return self
 
 

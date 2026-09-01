@@ -398,6 +398,69 @@ def _duplicate_root_supported(
     return False
 
 
+def _orphan_root_supported(
+    records: list[EvidenceRecord],
+    incident_subjects: set[str],
+) -> bool:
+    runs = [
+        record.content
+        for record in records
+        if isinstance(record.content, DbtRunResultsFact)
+    ]
+    if (
+        len(runs) != 1
+        or runs[0].run_status != "SUCCEEDED"
+        or runs[0].dbt_exit_code != 0
+        or runs[0].failed_nodes
+        or runs[0].skipped_nodes
+    ):
+        return False
+
+    profiles = [
+        record.content
+        for record in records
+        if isinstance(record.content, RelationDataProfileFact)
+        and record.content.relation_name in incident_subjects
+        and any(
+            item.name == "order_id_to_raw_orders_id"
+            and item.violation_count > 0
+            for item in record.content.snapshot.relationship_violations
+        )
+    ]
+    if len(profiles) != 1:
+        return False
+
+    histories = [
+        record.content
+        for record in records
+        if isinstance(record.content, RelationHistoryFact)
+        and record.content.relation_name in incident_subjects
+        and record.content.relation_name != profiles[0].relation_name
+    ]
+    if len(histories) != 1:
+        return False
+    series = next(
+        (
+            item
+            for item in histories[0].snapshot.histories
+            if item.name == "order_count_by_day"
+        ),
+        None,
+    )
+    if (
+        series is None
+        or not series.points
+        or series.watermark_column != "order_date"
+        or series.watermark_value is None
+    ):
+        return False
+    try:
+        datetime.fromisoformat(series.watermark_value)
+    except ValueError:
+        return False
+    return True
+
+
 class DiagnosticKernel:
     def __init__(
         self,
@@ -828,7 +891,11 @@ class DiagnosticKernel:
             "SOURCE_EXACT_PAYMENT_DUPLICATE",
             "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
         }
-        if duplicate_root:
+        orphan_root = root_claim.value == "SOURCE_PERMANENT_ORPHAN_PAYMENT"
+        if orphan_root:
+            if not _orphan_root_supported(root_records, self._incident_subjects):
+                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
+        elif duplicate_root:
             if not _duplicate_root_supported(
                 root_claim.value,
                 root_records,
@@ -1064,6 +1131,14 @@ class DiagnosticKernel:
                 and gap.status is EvidenceGapStatus.BLOCKED
             )
         }
+        blocked_histories = {
+            (gap.subject, gap.error_code)
+            for gap in self._gaps
+            if (
+                gap.gap_kind is EvidenceGapKind.COMPARE_HISTORY
+                and gap.status is EvidenceGapStatus.BLOCKED
+            )
+        }
         known_subjects = {
             node_id
             for record in self._records
@@ -1089,7 +1164,10 @@ class DiagnosticKernel:
             elif item.evidence_kind == "RELATION_DATA_PROFILE":
                 if (item.subject, item.reason_code) not in blocked_profiles:
                     self._error("UNRESOLVED_EVIDENCE_UNBOUND")
-            elif item.evidence_kind == "PAYMENT_EVENT_IDENTITY":
+            elif item.evidence_kind == "RELATION_HISTORY":
+                if (item.subject, item.reason_code) not in blocked_histories:
+                    self._error("UNRESOLVED_EVIDENCE_UNBOUND")
+            elif item.evidence_kind in {"INGESTION_WATERMARK", "PAYMENT_EVENT_IDENTITY"}:
                 if (
                     item.reason_code != "NOT_OBSERVABLE"
                     or item.subject not in self._incident_subjects
@@ -1124,7 +1202,11 @@ class DiagnosticKernel:
                 evidence_kind=(
                     "RELATION_DATA_PROFILE"
                     if gap.gap_kind is EvidenceGapKind.PROFILE_RELATION
-                    else "RELATION_SCHEMA"
+                    else (
+                        "RELATION_HISTORY"
+                        if gap.gap_kind is EvidenceGapKind.COMPARE_HISTORY
+                        else "RELATION_SCHEMA"
+                    )
                 ),
                 subject=gap.subject,
                 reason_code="RELATION_NOT_ALLOWED"
@@ -1134,7 +1216,11 @@ class DiagnosticKernel:
             for gap in self._gaps
             if gap.status in {EvidenceGapStatus.OPEN, EvidenceGapStatus.BLOCKED}
             and gap.gap_kind
-            in {EvidenceGapKind.DISCRIMINATE_SCHEMA, EvidenceGapKind.PROFILE_RELATION}
+            in {
+                EvidenceGapKind.DISCRIMINATE_SCHEMA,
+                EvidenceGapKind.PROFILE_RELATION,
+                EvidenceGapKind.COMPARE_HISTORY,
+            }
         )
         unresolved = tuple(dict.fromkeys((*derived_unresolved, *decision.unresolved_evidence)))
         return KernelOutcome(

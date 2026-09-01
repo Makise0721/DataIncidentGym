@@ -47,6 +47,7 @@ from data_incident_gym.profiles import (
     ProfileSnapshot,
     RelationHistorySnapshot,
     RelationProfileSnapshot,
+    RelationshipViolationFact,
     load_profile_spec,
 )
 from data_incident_gym.scenarios import load_scenario_spec
@@ -534,6 +535,385 @@ def test_evaluator_rejects_m9_profile_with_wrong_coupon_count() -> None:
 
     assert result.status is EvaluationStatus.FAILED
     assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
+
+
+def _m10_profile(
+    *,
+    row_count: int = 116,
+    relationship_count: int = 3,
+    id_duplicates: int = 0,
+    fingerprint_duplicates: int = 0,
+    coupon_count: int = 16,
+) -> RelationProfileSnapshot:
+    return RelationProfileSnapshot(
+        relation_name="raw_payments",
+        row_count=row_count,
+        columns=(),
+        business_key_duplicates=(
+            DuplicateProfileFact(name="id", duplicate_count=id_duplicates),
+        ),
+        business_fingerprint_duplicates=(
+            DuplicateProfileFact(
+                name="order_payment_amount",
+                duplicate_count=fingerprint_duplicates,
+            ),
+        ),
+        relationship_violations=(
+            RelationshipViolationFact(
+                name="order_id_to_raw_orders_id",
+                violation_count=relationship_count,
+            ),
+        ),
+        groups=(
+            GroupProfileFact(
+                name="payment_method",
+                columns=("payment_method",),
+                values=(("coupon",), ("credit_card",)),
+                counts=(coupon_count, 56),
+            ),
+        ),
+    )
+
+
+def _m10_confirmed_run(
+    case_id: str,
+    *,
+    row_count: int = 116,
+    relationship_count: int = 3,
+    id_duplicates: int = 0,
+    fingerprint_duplicates: int = 0,
+    coupon_count: int = 16,
+    history_name: str = "order_count_by_day",
+    watermark: str | None = "2018-04-09",
+    include_history: bool = True,
+    include_lineage: bool = True,
+) -> DiagnosisRunResult:
+    scenario = load_scenario_spec(case_id)
+    profile_spec = load_profile_spec()
+    run = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.DBT_RUN_RESULTS,
+        source=EvidenceSource.DBT_RUN_RESULTS,
+        subject=RUN_ID,
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
+            run_id=RUN_ID,
+            run_status="SUCCEEDED",
+            dbt_exit_code=0,
+            failed_nodes=(),
+            skipped_nodes=(),
+        ),
+    )
+    records: list[EvidenceRecord] = [run]
+    lineage = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.DBT_LINEAGE,
+        source=EvidenceSource.DBT_MANIFEST,
+        subject="seed.jaffle_shop.raw_payments",
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="seed.jaffle_shop.raw_payments",
+            direction="downstream",
+            related_nodes=tuple(
+                DbtLineageNode(
+                    node_id=asset,
+                    resource_type="model",
+                    name=asset.rsplit(".", 1)[-1],
+                    distance=1,
+                )
+                for asset in scenario.affected_assets
+            ),
+        ),
+    )
+    if include_lineage:
+        records.append(lineage)
+    schema = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.RELATION_SCHEMA,
+        source=EvidenceSource.POSTGRES_CATALOG,
+        subject="raw_payments",
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=RelationSchemaFact(
+            kind="RELATION_SCHEMA",
+            run_id=RUN_ID,
+            schema_name="analytics",
+            relation_name="raw_payments",
+            columns=(),
+        ),
+    )
+    records.append(schema)
+    profile = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.RELATION_DATA_PROFILE,
+        source=EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        subject="raw_payments",
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=RelationDataProfileFact(
+            kind="RELATION_DATA_PROFILE",
+            run_id=RUN_ID,
+            relation_name="raw_payments",
+            profile_spec_version=profile_spec.schema_version,
+            profile_spec_sha256=profile_spec.digest(),
+            snapshot=_m10_profile(
+                row_count=row_count,
+                relationship_count=relationship_count,
+                id_duplicates=id_duplicates,
+                fingerprint_duplicates=fingerprint_duplicates,
+                coupon_count=coupon_count,
+            ),
+        ),
+    )
+    records.append(profile)
+    history = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.RELATION_HISTORY,
+        source=EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        subject="raw_orders",
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=RelationHistoryFact(
+            kind="RELATION_HISTORY",
+            run_id=RUN_ID,
+            relation_name="raw_orders",
+            profile_spec_version=profile_spec.schema_version,
+            profile_spec_sha256=profile_spec.digest(),
+            snapshot=RelationHistorySnapshot(
+                relation_name="raw_orders",
+                histories=(
+                    HistorySeries(
+                        name=history_name,
+                        metric="count",
+                        points=(
+                            HistoryPoint(
+                                bucket="2018-04-03",
+                                periodic_key="2018-04-03",
+                                value=1,
+                            ),
+                        ),
+                        watermark_column="order_date",
+                        watermark_value=watermark,
+                    ),
+                ),
+            ),
+        ),
+    )
+    if include_history:
+        records.append(history)
+    records_tuple = tuple(records)
+    evidence_ids = tuple(record.evidence_id for record in records_tuple)
+    root_ids = (run.evidence_id, profile.evidence_id)
+    if include_history:
+        root_ids += (history.evidence_id,)
+    claims = (
+        RootCauseClaim(
+            kind="ROOT_CAUSE",
+            root_cause_code="SOURCE_PERMANENT_ORPHAN_PAYMENT",
+            evidence_ids=root_ids,
+        ),
+        *tuple(
+            AffectedAssetClaim(
+                kind="AFFECTED_ASSET",
+                asset=asset,
+                evidence_ids=(lineage.evidence_id,) if include_lineage else (profile.evidence_id,),
+            )
+            for asset in scenario.affected_assets
+        ),
+    )
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.CONFIRMED,
+        run_id=RUN_ID,
+        root_cause_code="SOURCE_PERMANENT_ORPHAN_PAYMENT",
+        summary="A settled payment references an order absent beyond the ingestion boundary.",
+        affected_assets=tuple(scenario.affected_assets),
+        evidence_ids=evidence_ids,
+        claims=claims,
+        confidence=0.9,
+    )
+    trace_specs = [
+        ("get_dbt_run_results", {"run_id": RUN_ID}, run),
+    ]
+    if include_lineage:
+        trace_specs.append(
+            (
+                "get_dbt_lineage",
+                {"node_id": "seed.jaffle_shop.raw_payments", "direction": "downstream"},
+                lineage,
+            )
+        )
+    trace_specs.extend(
+        (
+            ("get_relation_schema", {"relation_name": "raw_payments"}, schema),
+            ("get_relation_data_profile", {"relation_name": "raw_payments"}, profile),
+        )
+    )
+    if include_history:
+        trace_specs.append(("get_relation_history", {"relation_name": "raw_orders"}, history))
+    trace = tuple(
+        ToolTraceEvent(
+            event_type="TOOL_CALL",
+            tool_name=tool_name,
+            arguments=arguments,
+            fingerprint=f"{index + 1:064x}",
+            evidence_ids=(record.evidence_id,),
+            elapsed_ms=1,
+        )
+        for index, (tool_name, arguments, record) in enumerate(trace_specs)
+    )
+    terminal = DiagnosisTerminalTraceEvent(
+        event_type="DIAGNOSIS_TERMINAL",
+        strategy=DiagnosticStrategy.STATIC_SKILL,
+        status=DiagnosisStatus.CONFIRMED,
+        evidence_inventory=evidence_ids,
+    )
+    return _model_error().model_copy(
+        update={
+            "diagnosis": diagnosis,
+            "evidence_records": records_tuple,
+            "trace": (*trace, terminal),
+        }
+    )
+
+
+def _m10_insufficient_run() -> DiagnosisRunResult:
+    confirmed = _m10_confirmed_run("orphan_payment_coupon_a", include_history=False)
+    records = confirmed.evidence_records
+    evidence_ids = tuple(record.evidence_id for record in records)
+    diagnosis = Diagnosis(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="The order ingestion boundary is unavailable.",
+        evidence_ids=evidence_ids,
+        unresolved_evidence=(
+            {
+                "evidence_kind": "RELATION_HISTORY",
+                "subject": "raw_orders",
+                "reason_code": "RELATION_NOT_ALLOWED",
+            },
+            {
+                "evidence_kind": "INGESTION_WATERMARK",
+                "subject": "raw_orders",
+                "reason_code": "NOT_OBSERVABLE",
+            },
+        ),
+        confidence=0.2,
+    )
+    trace = (*confirmed.trace[:-1], ToolTraceEvent(
+        event_type="TOOL_CALL",
+        tool_name="get_relation_history",
+        arguments={"relation_name": "raw_orders"},
+        fingerprint="f" * 64,
+        evidence_ids=(),
+        error_code="RELATION_NOT_ALLOWED",
+        elapsed_ms=1,
+    ), confirmed.trace[-1].model_copy(
+        update={
+            "status": DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+            "evidence_inventory": evidence_ids,
+        }
+    ))
+    return confirmed.model_copy(update={"diagnosis": diagnosis, "trace": trace})
+
+
+def test_evaluator_accepts_m10_permanent_orphan_with_temporal_boundary() -> None:
+    case_id = "orphan_payment_coupon_a"
+    result = DeterministicEvaluator.evaluate(
+        load_scenario_spec(case_id),
+        _m9_verification(case_id),
+        _m10_confirmed_run(case_id),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.PASSED
+
+
+@pytest.mark.parametrize(
+    ("relationship_count", "id_duplicates", "fingerprint_duplicates", "coupon_count", "watermark"),
+    (
+        (2, 0, 0, 16, "2018-04-09"),
+        (3, 1, 0, 16, "2018-04-09"),
+        (3, 0, 1, 16, "2018-04-09"),
+        (3, 0, 0, 15, "2018-04-09"),
+        (3, 0, 0, 16, "2018-04-02"),
+        (3, 0, 0, 16, None),
+        (3, 0, 0, 16, "not-a-date"),
+    ),
+)
+def test_evaluator_rejects_m10_incompatible_orphan_facts(
+    relationship_count: int,
+    id_duplicates: int,
+    fingerprint_duplicates: int,
+    coupon_count: int,
+    watermark: str | None,
+) -> None:
+    case_id = "orphan_payment_coupon_a"
+    result = DeterministicEvaluator.evaluate(
+        load_scenario_spec(case_id),
+        _m9_verification(case_id),
+        _m10_confirmed_run(
+            case_id,
+            relationship_count=relationship_count,
+            id_duplicates=id_duplicates,
+            fingerprint_duplicates=fingerprint_duplicates,
+            coupon_count=coupon_count,
+            watermark=watermark,
+        ),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.FAILED
+    assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
+
+
+def test_evaluator_rejects_m10_missing_history_or_lineage() -> None:
+    scenario = load_scenario_spec("orphan_payment_coupon_a")
+    for run in (
+        _m10_confirmed_run(scenario.incident_case_id, include_history=False),
+        _m10_confirmed_run(scenario.incident_case_id, include_lineage=False),
+    ):
+        result = DeterministicEvaluator.evaluate(
+            scenario,
+            _m9_verification(scenario.incident_case_id),
+            run,
+            recovery_succeeded=True,
+        )
+        assert result.status is EvaluationStatus.FAILED
+        assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
+
+
+def test_evaluator_accepts_m10_insufficient_history_pair_only_with_blocked_trace() -> None:
+    scenario = load_scenario_spec("orphan_payment_coupon_b")
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _m9_verification(scenario.incident_case_id),
+        _m10_insufficient_run(),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.PASSED
+
+
+def test_evaluator_rejects_m10_insufficient_pair_without_history_trace() -> None:
+    scenario = load_scenario_spec("orphan_payment_coupon_b")
+    run = _m10_insufficient_run()
+    trace = tuple(
+        event
+        for event in run.trace
+        if not (
+            isinstance(event, ToolTraceEvent)
+            and event.tool_name == "get_relation_history"
+        )
+    )
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _m9_verification(scenario.incident_case_id),
+        run.model_copy(update={"trace": trace}),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.FAILED
+    assert EvaluationCheckCode.INSUFFICIENCY_GAP_DECLARED in result.failed_check_codes
 
 
 def _health_run(bucket: str) -> DiagnosisRunResult:

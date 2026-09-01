@@ -21,7 +21,8 @@ The only root_cause_code values are SOURCE_SCHEMA_COLUMN_RENAMED,
 SOURCE_SCHEMA_COLUMN_TYPE_CHANGED, TRANSFORMATION_COLUMN_CAST_CHANGED,
 SOURCE_REQUIRED_FIELD_NULL, TRANSFORMATION_REQUIRED_FIELD_NULL,
 SOURCE_EXACT_PAYMENT_DUPLICATE, SOURCE_SEMANTIC_PAYMENT_DUPLICATE, and
-LEGITIMATE_SPLIT_PAYMENT.
+LEGITIMATE_SPLIT_PAYMENT, SOURCE_PERMANENT_ORPHAN_PAYMENT, and
+NORMAL_LATE_ARRIVING_ORDER.
 
 Use one fresh gap_id per business call. Choose the gap kind that matches the business tool,
 reference only registered hypothesis IDs, and register at least two compatible hypotheses
@@ -48,6 +49,10 @@ When the raw_payments profile is unavailable and payment idempotency or channel-
 not observable, preserve SOURCE_SEMANTIC_PAYMENT_DUPLICATE and LEGITIMATE_SPLIT_PAYMENT as
 alternatives and return INSUFFICIENT_EVIDENCE. PAYMENT_EVENT_IDENTITY is a missing-evidence
 declaration, not a business tool.
+
+A current payment-to-order relationship violation proves an orphan state, not permanence. Confirm a permanent orphan only when order history and its watermark show ingestion has advanced through
+the public settled window. If that boundary is unavailable, retain permanent-orphan and
+normal-late-arrival alternatives and return insufficient evidence.
 
 When the direct failed node is a dbt test, affected assets are its distance-1 upstream model
 dependencies, not the test node or the upstream seed relations. Bind those model claims to
