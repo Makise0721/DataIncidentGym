@@ -6,7 +6,7 @@ import os
 import re
 import tempfile
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
@@ -36,6 +36,18 @@ _IDENTIFIER_PATTERN = r"^[a-z_][a-z0-9_]*$"
 
 class ProfileError(ValueError):
     """Raised when a ProfileSpec or aggregate snapshot is invalid."""
+
+
+def parse_watermark_value(value: str) -> datetime:
+    """Parse a date or ISO watermark as an aware UTC datetime."""
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ProfileError("watermark must be a date or ISO datetime") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 class SnapshotKind(StrEnum):

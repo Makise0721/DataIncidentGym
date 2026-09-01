@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
@@ -29,6 +29,7 @@ from data_incident_gym.evidence import (
     RelationHistoryFact,
     RelationSchemaFact,
 )
+from data_incident_gym.profiles import parse_watermark_value
 
 _RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 _HYPOTHESIS_ID_PATTERN = r"^h_[a-z0-9_]{1,32}$"
@@ -461,6 +462,167 @@ def _orphan_root_supported(
     return True
 
 
+def _public_observation(
+    observations: tuple[tuple[str, str, str], ...],
+    kind: str,
+) -> tuple[str, str] | None:
+    matches = tuple(
+        (subject, value)
+        for observation_kind, subject, value in observations
+        if observation_kind == kind
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _silent_drop_root_supported(
+    root_cause_code: str,
+    records: list[EvidenceRecord],
+    incident_subjects: set[str],
+    observations: tuple[tuple[str, str, str], ...],
+    supporting_records: tuple[EvidenceRecord, ...] = (),
+) -> bool:
+    if root_cause_code != "SOURCE_PAYMENT_INGESTION_LOSS":
+        return False
+    current = _public_observation(observations, "CURRENT_PERIOD_COUNT")
+    expected = _public_observation(observations, "EXPECTED_PERIOD_COUNT")
+    relation_count = _public_observation(observations, "CURRENT_RELATION_COUNT")
+    settled = _public_observation(observations, "SETTLED_PAYMENT_WINDOW_END")
+    if current is None or expected is None or relation_count is None or settled is None:
+        return False
+    current_subject, current_raw = current
+    expected_subject, expected_raw = expected
+    payment_relation, payment_history, bucket = current_subject.split("/") if (
+        current_subject.count("/") == 2
+    ) else ("", "", "")
+    count_relation, relation_count_raw = relation_count
+    order_relation, settled_value = settled
+    if (
+        expected_subject != current_subject
+        or payment_relation not in incident_subjects
+        or order_relation not in incident_subjects
+        or count_relation != payment_relation
+        or payment_history != "payment_count_by_order_date"
+        or bucket != settled_value
+    ):
+        return False
+    try:
+        current_count = int(current_raw)
+        expected_count = int(expected_raw)
+        current_relation_count = int(relation_count_raw)
+        parse_watermark_value(bucket)
+        settled_at = parse_watermark_value(settled_value)
+    except (TypeError, ValueError):
+        return False
+    if (
+        current_count < 0
+        or expected_count <= current_count
+        or current_relation_count < 0
+    ):
+        return False
+
+    runs = [
+        record.content
+        for record in records
+        if isinstance(record.content, DbtRunResultsFact)
+    ]
+    payment_profiles = [
+        record.content
+        for record in records
+        if isinstance(record.content, RelationDataProfileFact)
+        and record.content.relation_name == payment_relation
+    ]
+    order_profiles = [
+        record.content
+        for record in records
+        if isinstance(record.content, RelationDataProfileFact)
+        and record.content.relation_name == order_relation
+    ]
+    if len(runs) != 1 or len(payment_profiles) != 1 or len(order_profiles) != 1:
+        return False
+    run = runs[0]
+    payment_profile = payment_profiles[0]
+    order_profile = order_profiles[0]
+    if (
+        run.run_status != "SUCCEEDED"
+        or run.dbt_exit_code != 0
+        or run.failed_nodes
+        or run.skipped_nodes
+        or payment_profile.snapshot.relation_name != payment_relation
+        or order_profile.snapshot.relation_name != order_relation
+        or payment_profile.snapshot.row_count != current_relation_count
+    ):
+        return False
+    reverse_relationship = next(
+        (
+            item
+            for item in order_profile.snapshot.relationship_violations
+            if item.name == "id_to_raw_payments_order_id"
+        ),
+        None,
+    )
+    if (
+        reverse_relationship is None
+        or reverse_relationship.violation_count != expected_count - current_count
+    ):
+        return False
+
+    payment_histories = [
+        record.content
+        for record in records
+        if isinstance(record.content, RelationHistoryFact)
+        and record.content.relation_name == payment_relation
+    ]
+    order_histories = [
+        record.content
+        for record in records
+        if isinstance(record.content, RelationHistoryFact)
+        and record.content.relation_name == order_relation
+    ]
+    if len(payment_histories) != 1 or len(order_histories) != 1:
+        return False
+    payment_series = tuple(
+        item
+        for item in payment_histories[0].snapshot.histories
+        if item.name == payment_history
+    )
+    order_series = tuple(
+        item
+        for item in order_histories[0].snapshot.histories
+        if item.name == "order_count_by_day"
+    )
+    if len(payment_series) != 1 or len(order_series) != 1:
+        return False
+    payment_point = tuple(
+        point for point in payment_series[0].points if point.bucket == bucket
+    )
+    order_history = order_series[0]
+    if (
+        len(payment_point) != 1
+        or payment_point[0].value != current_count
+        or order_history.watermark_column != "order_date"
+        or order_history.watermark_value is None
+    ):
+        return False
+    try:
+        watermark = parse_watermark_value(order_history.watermark_value)
+    except (TypeError, ValueError):
+        return False
+    if watermark < settled_at:
+        return False
+
+    lineage_records = (*records, *supporting_records)
+    return any(
+        isinstance(record.content, DbtLineageFact)
+        and record.content.direction == "downstream"
+        and record.content.node_id in incident_subjects
+        and any(
+            node.resource_type == "model" and node.distance >= 1
+            for node in record.content.related_nodes
+        )
+        for record in lineage_records
+    )
+
+
 class DiagnosticKernel:
     def __init__(
         self,
@@ -475,6 +637,8 @@ class DiagnosticKernel:
         observable_history_relations: tuple[str, ...] | None = None,
         incident_subjects: tuple[str, ...] = (),
         health_target_subjects: tuple[str, ...] = (),
+        incident_logical_observed_at: datetime | None = None,
+        incident_observations: tuple[tuple[str, str, str], ...] = (),
     ) -> None:
         self._run_id = run_id
         self._allowed_root_cause_codes = allowed_root_cause_codes
@@ -500,6 +664,8 @@ class DiagnosticKernel:
         }
         self._incident_subjects = set(incident_subjects)
         self._health_target_subjects = set(health_target_subjects)
+        self._incident_logical_observed_at = incident_logical_observed_at
+        self._incident_observations = incident_observations
         self._revision = 0
         self._hypotheses: list[Hypothesis] = []
         self._gaps: list[EvidenceGap] = []
@@ -526,6 +692,8 @@ class DiagnosticKernel:
         observable_history_relations: tuple[str, ...] | None = None,
         incident_subjects: tuple[str, ...] = (),
         health_target_subjects: tuple[str, ...] = (),
+        incident_logical_observed_at: datetime | None = None,
+        incident_observations: tuple[tuple[str, str, str], ...] = (),
     ) -> DiagnosticKernel:
         if len(allowed_root_cause_codes) < 2:
             raise ValueError("Diagnostic Kernel requires at least two ontology members")
@@ -546,6 +714,8 @@ class DiagnosticKernel:
             observable_history_relations=observable_history_relations,
             incident_subjects=incident_subjects,
             health_target_subjects=health_target_subjects,
+            incident_logical_observed_at=incident_logical_observed_at,
+            incident_observations=incident_observations,
         )
 
     @property
@@ -895,8 +1065,18 @@ class DiagnosticKernel:
             "SOURCE_EXACT_PAYMENT_DUPLICATE",
             "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
         }
+        silent_drop_root = root_claim.value == "SOURCE_PAYMENT_INGESTION_LOSS"
         orphan_root = root_claim.value == "SOURCE_PERMANENT_ORPHAN_PAYMENT"
-        if orphan_root:
+        if silent_drop_root:
+            if not _silent_drop_root_supported(
+                root_claim.value,
+                root_records,
+                self._incident_subjects,
+                self._incident_observations,
+                tuple(self._records),
+            ):
+                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
+        elif orphan_root:
             if not _orphan_root_supported(root_records, self._incident_subjects):
                 self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
         elif duplicate_root:
@@ -999,7 +1179,10 @@ class DiagnosticKernel:
             record for record in self._records if isinstance(record.content, DbtRunResultsFact)
         ]
         if not run_records or any(
-            record.content.run_status != "SUCCEEDED" or record.content.failed_nodes
+            record.content.run_status != "SUCCEEDED"
+            or record.content.dbt_exit_code != 0
+            or record.content.failed_nodes
+            or record.content.skipped_nodes
             for record in run_records
         ):
             self._error("HEALTH_RUN_NOT_PROVEN")
@@ -1043,22 +1226,6 @@ class DiagnosticKernel:
             )
             if history_series is None:
                 self._error("HEALTH_HISTORY_NOT_DECLARED")
-            if history_series.watermark_column is not None:
-                if history_series.watermark_value is None:
-                    self._error("HEALTH_WATERMARK_NOT_PROVEN")
-                if history_series.sla_seconds is not None:
-                    try:
-                        watermark = datetime.fromisoformat(history_series.watermark_value)
-                        observed_at = next(
-                            record.observed_at
-                            for record in records
-                            if record.content == history
-                        )
-                        lag = (observed_at - watermark).total_seconds()
-                    except (TypeError, ValueError):
-                        self._error("HEALTH_WATERMARK_INVALID")
-                    if lag < 0 or lag > history_series.sla_seconds:
-                        self._error("HEALTH_SLA_NOT_SATISFIED")
             if self._health_target_subjects and (
                 f"{claim.relation_name}/{claim.history_name}/{claim.bucket}"
                 not in self._health_target_subjects
@@ -1080,15 +1247,46 @@ class DiagnosticKernel:
                 or history.snapshot.relation_name != claim.relation_name
             ):
                 self._error("HEALTH_RELATION_MISMATCH")
-            prior = [
-                point.value
-                for series in history.snapshot.histories
-                if series.name == claim.history_name
-                for point in series.points
-                if point.periodic_key == current.periodic_key and point.bucket < current.bucket
-            ]
-            if len(prior) < 4 or not min(prior) <= current.value <= max(prior):
-                self._error("HEALTH_RANGE_NOT_PROVEN")
+            is_current_partition = current.bucket == history_series.watermark_value
+            if history_series.watermark_column is not None:
+                if history_series.watermark_value is None:
+                    self._error("HEALTH_WATERMARK_NOT_PROVEN")
+                try:
+                    watermark = parse_watermark_value(history_series.watermark_value)
+                except (TypeError, ValueError):
+                    self._error("HEALTH_WATERMARK_INVALID")
+                if is_current_partition:
+                    if history_series.sla_seconds is None:
+                        self._error("HEALTH_SLA_NOT_DECLARED")
+                    if (
+                        self._incident_logical_observed_at is None
+                        or self._incident_logical_observed_at.tzinfo is None
+                        or self._incident_logical_observed_at.utcoffset() is None
+                    ):
+                        self._error("HEALTH_WATERMARK_INVALID")
+                    lag = (
+                        self._incident_logical_observed_at.astimezone(UTC)
+                        - watermark
+                    ).total_seconds()
+                    if lag < 0 or lag > history_series.sla_seconds:
+                        self._error("HEALTH_SLA_NOT_SATISFIED")
+                else:
+                    try:
+                        current_bucket = parse_watermark_value(current.bucket)
+                    except (TypeError, ValueError):
+                        self._error("HEALTH_WATERMARK_INVALID")
+                    if current_bucket > watermark:
+                        self._error("HEALTH_POINT_AFTER_WATERMARK")
+            if not is_current_partition:
+                prior = [
+                    point.value
+                    for series in history.snapshot.histories
+                    if series.name == claim.history_name
+                    for point in series.points
+                    if point.periodic_key == current.periodic_key and point.bucket < current.bucket
+                ]
+                if len(prior) < 4 or not min(prior) <= current.value <= max(prior):
+                    self._error("HEALTH_RANGE_NOT_PROVEN")
         evidence_ids = tuple(
             dict.fromkeys(
                 evidence_id for claim in health_claims for evidence_id in claim.evidence_ids

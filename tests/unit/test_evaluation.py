@@ -916,7 +916,14 @@ def test_evaluator_rejects_m10_insufficient_pair_without_history_trace() -> None
     assert EvaluationCheckCode.INSUFFICIENCY_GAP_DECLARED in result.failed_check_codes
 
 
-def _health_run(bucket: str) -> DiagnosisRunResult:
+def _health_run(
+    bucket: str,
+    *,
+    watermark_column: str | None = None,
+    watermark_value: str | None = None,
+    sla_seconds: int | None = None,
+    observed_at: datetime | None = None,
+) -> DiagnosisRunResult:
     spec = load_profile_spec()
     snapshot = ProfileSnapshot.create(
         spec=spec,
@@ -950,8 +957,12 @@ def _health_run(bucket: str) -> DiagnosisRunResult:
                                 "2018-03-19",
                                 "2018-03-26",
                                 "2018-04-02",
+                                "2018-04-09",
                             )
                         ),
+                        watermark_column=watermark_column,
+                        watermark_value=watermark_value,
+                        sla_seconds=sla_seconds,
                     ),
                 ),
             ),
@@ -962,7 +973,7 @@ def _health_run(bucket: str) -> DiagnosisRunResult:
         evidence_type=EvidenceType.DBT_RUN_RESULTS,
         source=EvidenceSource.DBT_RUN_RESULTS,
         subject=RUN_ID,
-        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        observed_at=observed_at or datetime(2026, 8, 30, tzinfo=UTC),
         content=DbtRunResultsFact(
             kind="DBT_RUN_RESULTS",
             run_id=RUN_ID,
@@ -1027,15 +1038,34 @@ def _health_run(bucket: str) -> DiagnosisRunResult:
         status=DiagnosisStatus.NO_INCIDENT,
         evidence_inventory=evidence_ids,
     )
+    trace = tuple(
+        ToolTraceEvent(
+            event_type="TOOL_CALL",
+            tool_name=tool_name,
+            arguments=arguments,
+            fingerprint=f"{index + 1:064x}",
+            evidence_ids=(record.evidence_id,),
+            elapsed_ms=1,
+        )
+        for index, (tool_name, arguments, record) in enumerate(
+            (
+                ("get_dbt_run_results", {"run_id": RUN_ID}, run_record),
+                ("get_relation_data_profile", {"relation_name": "raw_orders"}, profile_record),
+                ("get_relation_history", {"relation_name": "raw_orders"}, history_record),
+            )
+        )
+    )
     return _model_error().model_copy(
-        update={"diagnosis": diagnosis, "evidence_records": records, "trace": (terminal,)}
+        update={"diagnosis": diagnosis, "evidence_records": records, "trace": (*trace, terminal)}
     )
 
 
-def _health_verification() -> ScenarioVerification:
+def _health_verification(
+    case_id: str = "order_volume_pattern_a",
+) -> ScenarioVerification:
     return ScenarioVerification(
         status=ScenarioVerificationStatus.HEALTHY_CONTROL,
-        incident_case_id="order_volume_pattern_a",
+        incident_case_id=case_id,
         run_id=RUN_ID,
         dbt_exit_code=0,
         failed_nodes=(),
@@ -1138,6 +1168,95 @@ def test_evaluator_rejects_health_claim_for_a_non_alert_bucket() -> None:
     assert result.status is EvaluationStatus.FAILED
     assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
     assert EvaluationCheckCode.POSITIVE_HEALTH_EVIDENCE in result.failed_check_codes
+
+
+def _scenario_with_logical_time(scenario, logical_observed_at: datetime):
+    brief = scenario.incident_brief.model_copy(
+        update={"logical_observed_at": logical_observed_at}
+    )
+    return scenario.model_copy(update={"incident_brief": brief})
+
+
+def test_evaluator_accepts_m11_current_partition_with_logical_sla() -> None:
+    scenario = load_scenario_spec("order_volume_within_sla")
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _health_verification("order_volume_within_sla"),
+        _health_run(
+            "2018-04-09",
+            watermark_column="order_date",
+            watermark_value="2018-04-09",
+            sla_seconds=86400,
+        ),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.PASSED
+
+
+@pytest.mark.parametrize(
+    ("run", "scenario"),
+    (
+        (
+            _health_run(
+                "2018-04-09",
+                watermark_column="order_date",
+                watermark_value="2018-04-09",
+            ),
+            load_scenario_spec("order_volume_within_sla"),
+        ),
+        (
+            _health_run(
+                "2018-04-09",
+                watermark_column="order_date",
+                watermark_value="2018-04-09",
+                sla_seconds=86400,
+            ),
+            _scenario_with_logical_time(
+                load_scenario_spec("order_volume_within_sla"),
+                datetime(2018, 4, 10, 13, tzinfo=UTC),
+            ),
+        ),
+        (
+            _health_run(
+                "2018-04-09",
+                watermark_column="order_date",
+                watermark_value="2018-04-09",
+                sla_seconds=86400,
+                observed_at=datetime(2018, 4, 9, 12, tzinfo=UTC),
+            ),
+            _scenario_with_logical_time(
+                load_scenario_spec("order_volume_within_sla"),
+                datetime(2026, 8, 30, tzinfo=UTC),
+            ),
+        ),
+    ),
+)
+def test_evaluator_rejects_m11_current_partition_without_logical_sla(
+    run: DiagnosisRunResult,
+    scenario,
+) -> None:
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _health_verification("order_volume_within_sla"),
+        run,
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.FAILED
+    assert EvaluationCheckCode.POSITIVE_HEALTH_EVIDENCE in result.failed_check_codes
+
+
+def test_evaluator_keeps_m10_health_on_historical_range_path() -> None:
+    scenario = load_scenario_spec("order_volume_pattern_a")
+    result = DeterministicEvaluator.evaluate(
+        scenario,
+        _health_verification(),
+        _health_run("2018-04-02"),
+        recovery_succeeded=True,
+    )
+
+    assert result.status is EvaluationStatus.PASSED
 
 
 def test_evaluator_rejects_root_evidence_for_an_unrelated_source_relation() -> None:

@@ -914,6 +914,565 @@ def test_kernel_rejects_permanent_orphan_without_compatible_relationship_history
         kernel.finalize(_orphan_decision(records))
 
 
+def _silent_kernel(
+    *,
+    observations: tuple[tuple[str, str, str], ...] = (
+        (
+            "CURRENT_PERIOD_COUNT",
+            "raw_payments/payment_count_by_order_date/2018-04-07",
+            "1",
+        ),
+        (
+            "EXPECTED_PERIOD_COUNT",
+            "raw_payments/payment_count_by_order_date/2018-04-07",
+            "2",
+        ),
+        ("CURRENT_RELATION_COUNT", "raw_payments", "112"),
+        ("SETTLED_PAYMENT_WINDOW_END", "raw_orders", "2018-04-07"),
+    ),
+) -> DiagnosticKernel:
+    return DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_PAYMENT_INGESTION_LOSS",
+            "NORMAL_BUSINESS_PAYMENT_DECLINE",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_schema_relations=("raw_payments",),
+        observable_profile_relations=("raw_payments", "raw_orders"),
+        observable_history_relations=("raw_payments", "raw_orders"),
+        incident_subjects=("seed.jaffle_shop.raw_payments", "raw_payments", "raw_orders"),
+        incident_observations=observations,
+    )
+
+
+def _silent_records(
+    *,
+    relationship_count: int = 1,
+    current_count: int = 1,
+    include_lineage: bool = True,
+) -> tuple[EvidenceRecord, ...]:
+    run = _record(
+        EvidenceType.DBT_RUN_RESULTS,
+        EvidenceSource.DBT_RUN_RESULTS,
+        RUN_ID,
+        DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
+            run_id=RUN_ID,
+            run_status="SUCCEEDED",
+            dbt_exit_code=0,
+            failed_nodes=(),
+            skipped_nodes=(),
+        ),
+    )
+    lineage = _record(
+        EvidenceType.DBT_LINEAGE,
+        EvidenceSource.DBT_MANIFEST,
+        "seed.jaffle_shop.raw_payments",
+        DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="seed.jaffle_shop.raw_payments",
+            direction="downstream",
+            related_nodes=(
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.stg_payments",
+                    resource_type="model",
+                    name="stg_payments",
+                    distance=1,
+                ),
+            ),
+        ),
+    )
+    payment_profile = _record(
+        EvidenceType.RELATION_DATA_PROFILE,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_payments",
+        RelationDataProfileFact(
+            kind="RELATION_DATA_PROFILE",
+            run_id=RUN_ID,
+            relation_name="raw_payments",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationProfileSnapshot(
+                relation_name="raw_payments",
+                row_count=112,
+                columns=(),
+                business_key_duplicates=(DuplicateProfileFact(name="id", duplicate_count=0),),
+                business_fingerprint_duplicates=(
+                    DuplicateProfileFact(name="order_payment_amount", duplicate_count=0),
+                ),
+                groups=(
+                    GroupProfileFact(
+                        name="payment_method",
+                        columns=("payment_method",),
+                        values=(("bank_transfer",),),
+                        counts=(32,),
+                    ),
+                ),
+            ),
+        ),
+    )
+    order_profile = _record(
+        EvidenceType.RELATION_DATA_PROFILE,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_orders",
+        RelationDataProfileFact(
+            kind="RELATION_DATA_PROFILE",
+            run_id=RUN_ID,
+            relation_name="raw_orders",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationProfileSnapshot(
+                relation_name="raw_orders",
+                row_count=99,
+                columns=(),
+                relationship_violations=(
+                    RelationshipViolationFact(
+                        name="id_to_raw_payments_order_id",
+                        violation_count=relationship_count,
+                    ),
+                ),
+            ),
+        ),
+    )
+    payment_history = _record(
+        EvidenceType.RELATION_HISTORY,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_payments",
+        RelationHistoryFact(
+            kind="RELATION_HISTORY",
+            run_id=RUN_ID,
+            relation_name="raw_payments",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationHistorySnapshot(
+                relation_name="raw_payments",
+                histories=(
+                    HistorySeries(
+                        name="payment_count_by_order_date",
+                        metric="count",
+                        points=(
+                            HistoryPoint(
+                                bucket="2018-04-07",
+                                periodic_key="2018-04-07",
+                                value=current_count,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    order_history = _record(
+        EvidenceType.RELATION_HISTORY,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_orders",
+        RelationHistoryFact(
+            kind="RELATION_HISTORY",
+            run_id=RUN_ID,
+            relation_name="raw_orders",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationHistorySnapshot(
+                relation_name="raw_orders",
+                histories=(
+                    HistorySeries(
+                        name="order_count_by_day",
+                        metric="count",
+                        points=(),
+                        watermark_column="order_date",
+                        watermark_value="2018-04-09",
+                    ),
+                ),
+            ),
+        ),
+    )
+    return (
+        run,
+        *((lineage,) if include_lineage else ()),
+        payment_profile,
+        order_profile,
+        payment_history,
+        order_history,
+    )
+
+
+def _close_silent_records(
+    kernel: DiagnosticKernel,
+    records: tuple[EvidenceRecord, ...],
+) -> None:
+    by_type_and_subject = {
+        (record.evidence_type, record.subject): record for record in records
+    }
+    run = by_type_and_subject[(EvidenceType.DBT_RUN_RESULTS, RUN_ID)]
+    payment_profile = by_type_and_subject[(EvidenceType.RELATION_DATA_PROFILE, "raw_payments")]
+    order_profile = by_type_and_subject[(EvidenceType.RELATION_DATA_PROFILE, "raw_orders")]
+    payment_history = by_type_and_subject[(EvidenceType.RELATION_HISTORY, "raw_payments")]
+    order_history = by_type_and_subject[(EvidenceType.RELATION_HISTORY, "raw_orders")]
+    _close(
+        kernel,
+        gap_id="g_run_silent",
+        gap_kind=EvidenceGapKind.LOCATE_FAILURE,
+        tool_name="get_dbt_run_results",
+        arguments={"run_id": RUN_ID},
+        record=run,
+        new_hypotheses=(
+            Hypothesis(
+                hypothesis_id="h_silent_loss",
+                root_cause_code="SOURCE_PAYMENT_INGESTION_LOSS",
+            ),
+            Hypothesis(
+                hypothesis_id="h_payment_decline",
+                root_cause_code="NORMAL_BUSINESS_PAYMENT_DECLINE",
+            ),
+        ),
+    )
+    lineage = next(
+        (record for record in records if record.evidence_type is EvidenceType.DBT_LINEAGE),
+        None,
+    )
+    if lineage is not None:
+        _close(
+            kernel,
+            gap_id="g_lineage_silent",
+            gap_kind=EvidenceGapKind.MAP_IMPACT,
+            tool_name="get_dbt_lineage",
+            arguments={"node_id": "seed.jaffle_shop.raw_payments", "direction": "downstream"},
+            record=lineage,
+        )
+    for relation, record, gap_id in (
+        ("raw_payments", payment_profile, "g_payment_profile_silent"),
+        ("raw_orders", order_profile, "g_order_profile_silent"),
+    ):
+        _close(
+            kernel,
+            gap_id=gap_id,
+            gap_kind=EvidenceGapKind.PROFILE_RELATION,
+            tool_name="get_relation_data_profile",
+            arguments={"relation_name": relation},
+            record=record,
+        )
+    for relation, record, gap_id in (
+        ("raw_payments", payment_history, "g_payment_history_silent"),
+        ("raw_orders", order_history, "g_order_history_silent"),
+    ):
+        _close(
+            kernel,
+            gap_id=gap_id,
+            gap_kind=EvidenceGapKind.COMPARE_HISTORY,
+            tool_name="get_relation_history",
+            arguments={"relation_name": relation},
+            record=record,
+        )
+
+
+def _silent_decision(records: tuple[EvidenceRecord, ...]) -> KernelDecision:
+    by_type_and_subject = {
+        (record.evidence_type, record.subject): record for record in records
+    }
+    run = by_type_and_subject[(EvidenceType.DBT_RUN_RESULTS, RUN_ID)]
+    payment_profile = by_type_and_subject[(EvidenceType.RELATION_DATA_PROFILE, "raw_payments")]
+    order_profile = by_type_and_subject[(EvidenceType.RELATION_DATA_PROFILE, "raw_orders")]
+    payment_history = by_type_and_subject[(EvidenceType.RELATION_HISTORY, "raw_payments")]
+    order_history = by_type_and_subject[(EvidenceType.RELATION_HISTORY, "raw_orders")]
+    lineage = next(record for record in records if record.evidence_type is EvidenceType.DBT_LINEAGE)
+    root_ids = tuple(
+        record.evidence_id
+        for record in (run, payment_profile, order_profile, payment_history, order_history)
+    )
+    return KernelDecision(
+        status="CONFIRMED",
+        run_id=RUN_ID,
+        selected_hypothesis_id="h_silent_loss",
+        assessments=(
+            HypothesisAssessment(
+                hypothesis_id="h_silent_loss",
+                verdict=HypothesisVerdict.SUPPORTED,
+                evidence_ids=root_ids,
+            ),
+            HypothesisAssessment(
+                hypothesis_id="h_payment_decline",
+                verdict=HypothesisVerdict.REFUTED,
+                evidence_ids=(payment_profile.evidence_id, order_profile.evidence_id),
+            ),
+        ),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value="SOURCE_PAYMENT_INGESTION_LOSS",
+                evidence_ids=root_ids,
+            ),
+            *(
+                ClaimEvidence(
+                    kind=ClaimKind.AFFECTED_ASSET,
+                    value=asset,
+                    evidence_ids=(lineage.evidence_id,),
+                )
+                for asset in ("model.jaffle_shop.stg_payments",)
+            ),
+        ),
+        summary="The settled payment volume is missing source events.",
+        recommended_actions=(),
+        confidence=0.9,
+    )
+
+
+def test_kernel_confirms_silent_payment_loss_from_public_aggregate_evidence() -> None:
+    kernel = _silent_kernel()
+    records = _silent_records()
+    _close_silent_records(kernel, records)
+
+    outcome = kernel.finalize(_silent_decision(records))
+
+    assert outcome.status is KernelFinalStatus.CONFIRMED
+    assert outcome.root_cause_code == "SOURCE_PAYMENT_INGESTION_LOSS"
+
+
+@pytest.mark.parametrize(
+    "observations",
+    (
+        (
+            ("CURRENT_PERIOD_COUNT", "raw_payments/payment_count_by_order_date/2018-04-07", "1"),
+            ("CURRENT_RELATION_COUNT", "raw_payments", "112"),
+            ("SETTLED_PAYMENT_WINDOW_END", "raw_orders", "2018-04-07"),
+        ),
+        (
+            ("CURRENT_PERIOD_COUNT", "raw_payments/payment_count_by_order_date/2018-04-07", "1"),
+            ("EXPECTED_PERIOD_COUNT", "raw_payments/payment_count_by_order_date/2018-04-07", "1"),
+            ("CURRENT_RELATION_COUNT", "raw_payments", "112"),
+            ("SETTLED_PAYMENT_WINDOW_END", "raw_orders", "2018-04-07"),
+        ),
+    ),
+)
+def test_kernel_rejects_silent_payment_loss_without_public_comparison(
+    observations: tuple[tuple[str, str, str], ...],
+) -> None:
+    kernel = _silent_kernel(observations=observations)
+    records = _silent_records()
+    _close_silent_records(kernel, records)
+
+    with pytest.raises(KernelError, match="ROOT_CLAIM_EVIDENCE_INCOMPATIBLE"):
+        kernel.finalize(_silent_decision(records))
+
+
+def test_kernel_rejects_silent_payment_loss_without_downstream_lineage() -> None:
+    kernel = _silent_kernel()
+    records = _silent_records(include_lineage=False)
+    _close_silent_records(kernel, records)
+    decision = _silent_decision_without_lineage(records)
+
+    with pytest.raises(KernelError, match="ROOT_CLAIM_EVIDENCE_INCOMPATIBLE"):
+        kernel.finalize(decision)
+
+
+def _silent_decision_without_lineage(records: tuple[EvidenceRecord, ...]) -> KernelDecision:
+    decision = _silent_decision_with_assets_from_records(records)
+    return decision
+
+
+def _silent_decision_with_assets_from_records(
+    records: tuple[EvidenceRecord, ...],
+) -> KernelDecision:
+    by_type_and_subject = {
+        (record.evidence_type, record.subject): record for record in records
+    }
+    run = by_type_and_subject[(EvidenceType.DBT_RUN_RESULTS, RUN_ID)]
+    payment_profile = by_type_and_subject[(EvidenceType.RELATION_DATA_PROFILE, "raw_payments")]
+    order_profile = by_type_and_subject[(EvidenceType.RELATION_DATA_PROFILE, "raw_orders")]
+    payment_history = by_type_and_subject[(EvidenceType.RELATION_HISTORY, "raw_payments")]
+    order_history = by_type_and_subject[(EvidenceType.RELATION_HISTORY, "raw_orders")]
+    root_ids = tuple(
+        record.evidence_id
+        for record in (run, payment_profile, order_profile, payment_history, order_history)
+    )
+    return KernelDecision(
+        status="CONFIRMED",
+        run_id=RUN_ID,
+        selected_hypothesis_id="h_silent_loss",
+        assessments=(
+            HypothesisAssessment(
+                hypothesis_id="h_silent_loss",
+                verdict=HypothesisVerdict.SUPPORTED,
+                evidence_ids=root_ids,
+            ),
+            HypothesisAssessment(
+                hypothesis_id="h_payment_decline",
+                verdict=HypothesisVerdict.REFUTED,
+                evidence_ids=(payment_profile.evidence_id, order_profile.evidence_id),
+            ),
+        ),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value="SOURCE_PAYMENT_INGESTION_LOSS",
+                evidence_ids=root_ids,
+            ),
+            ClaimEvidence(
+                kind=ClaimKind.AFFECTED_ASSET,
+                value="model.jaffle_shop.stg_payments",
+                evidence_ids=(payment_profile.evidence_id,),
+            ),
+        ),
+        summary="The settled payment volume is missing source events.",
+        recommended_actions=(),
+        confidence=0.9,
+    )
+
+
+def _health_kernel(
+    *,
+    logical_observed_at: datetime,
+    sla_seconds: int | None = 86400,
+) -> tuple[DiagnosticKernel, tuple[EvidenceRecord, ...]]:
+    kernel = DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=("NORMAL_BUSINESS_PAYMENT_DECLINE", "OTHER_CAUSE"),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_profile_relations=("raw_orders",),
+        observable_history_relations=("raw_orders",),
+        incident_subjects=("raw_orders",),
+        health_target_subjects=("raw_orders/order_count_by_day/2018-04-09",),
+        incident_logical_observed_at=logical_observed_at,
+    )
+    run = _record(
+        EvidenceType.DBT_RUN_RESULTS,
+        EvidenceSource.DBT_RUN_RESULTS,
+        RUN_ID,
+        DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
+            run_id=RUN_ID,
+            run_status="SUCCEEDED",
+            dbt_exit_code=0,
+            failed_nodes=(),
+            skipped_nodes=(),
+        ),
+    )
+    profile = _record(
+        EvidenceType.RELATION_DATA_PROFILE,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_orders",
+        RelationDataProfileFact(
+            kind="RELATION_DATA_PROFILE",
+            run_id=RUN_ID,
+            relation_name="raw_orders",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationProfileSnapshot(
+                relation_name="raw_orders",
+                row_count=99,
+                columns=(),
+            ),
+        ),
+    )
+    history = _record(
+        EvidenceType.RELATION_HISTORY,
+        EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        "raw_orders",
+        RelationHistoryFact(
+            kind="RELATION_HISTORY",
+            run_id=RUN_ID,
+            relation_name="raw_orders",
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationHistorySnapshot(
+                relation_name="raw_orders",
+                histories=(
+                    HistorySeries(
+                        name="order_count_by_day",
+                        metric="count",
+                        points=(
+                            HistoryPoint(
+                                bucket="2018-04-09",
+                                periodic_key="1",
+                                value=1,
+                            ),
+                        ),
+                        watermark_column="order_date",
+                        watermark_value="2018-04-09",
+                        sla_seconds=sla_seconds,
+                    ),
+                ),
+            ),
+        ),
+    )
+    _close(
+        kernel,
+        gap_id="g_health_run",
+        gap_kind=EvidenceGapKind.LOCATE_FAILURE,
+        tool_name="get_dbt_run_results",
+        arguments={"run_id": RUN_ID},
+        record=run,
+    )
+    _close(
+        kernel,
+        gap_id="g_health_profile",
+        gap_kind=EvidenceGapKind.PROFILE_RELATION,
+        tool_name="get_relation_data_profile",
+        arguments={"relation_name": "raw_orders"},
+        record=profile,
+    )
+    _close(
+        kernel,
+        gap_id="g_health_history",
+        gap_kind=EvidenceGapKind.COMPARE_HISTORY,
+        tool_name="get_relation_history",
+        arguments={"relation_name": "raw_orders"},
+        record=history,
+    )
+    return kernel, (run, profile, history)
+
+
+def _health_decision(records: tuple[EvidenceRecord, ...]) -> KernelDecision:
+    evidence_ids = tuple(record.evidence_id for record in records)
+    return KernelDecision(
+        status="NO_INCIDENT",
+        run_id=RUN_ID,
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.HEALTH_STATE,
+                value="raw_orders/order_count_by_day/2018-04-09",
+                relation_name="raw_orders",
+                history_name="order_count_by_day",
+                bucket="2018-04-09",
+                current_value=1,
+                evidence_ids=evidence_ids,
+            ),
+        ),
+        summary="The current order partition is within its service window.",
+        recommended_actions=(),
+        confidence=0.9,
+    )
+
+
+@pytest.mark.parametrize(
+    ("logical_observed_at", "sla_seconds", "error_code"),
+    (
+        (datetime(2018, 4, 9, 12, tzinfo=UTC), 86400, None),
+        (datetime(2026, 8, 30, tzinfo=UTC), 86400, "HEALTH_SLA_NOT_SATISFIED"),
+        (datetime(2018, 4, 9, 12, tzinfo=UTC), None, "HEALTH_SLA_NOT_DECLARED"),
+    ),
+)
+def test_kernel_uses_logical_time_for_current_partition_sla(
+    logical_observed_at: datetime,
+    sla_seconds: int | None,
+    error_code: str | None,
+) -> None:
+    kernel, records = _health_kernel(
+        logical_observed_at=logical_observed_at,
+        sla_seconds=sla_seconds,
+    )
+
+    if error_code is None:
+        outcome = kernel.finalize(_health_decision(records))
+        assert outcome.status is KernelFinalStatus.NO_INCIDENT
+    else:
+        with pytest.raises(KernelError, match=error_code):
+            kernel.finalize(_health_decision(records))
+
+
 def test_kernel_binds_blocked_history_and_watermark_unresolved_evidence() -> None:
     kernel = DiagnosticKernel.start(
         run_id=RUN_ID,
@@ -971,6 +1530,82 @@ def test_kernel_binds_blocked_history_and_watermark_unresolved_evidence() -> Non
         (item.evidence_kind, item.subject, item.reason_code)
         for item in outcome.unresolved_evidence
     ) == (
+        ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED"),
+        ("INGESTION_WATERMARK", "raw_orders", "NOT_OBSERVABLE"),
+    )
+
+
+def test_kernel_binds_m11_history_pair_and_watermark_unresolved_evidence() -> None:
+    kernel = DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_PAYMENT_INGESTION_LOSS",
+            "NORMAL_BUSINESS_PAYMENT_DECLINE",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        incident_subjects=("raw_payments", "raw_orders"),
+    )
+    for relation, gap_id, hypotheses in (
+        (
+            "raw_payments",
+            "g_blocked_payment_history",
+            (
+                Hypothesis(
+                    hypothesis_id="h_silent_loss",
+                    root_cause_code="SOURCE_PAYMENT_INGESTION_LOSS",
+                ),
+                Hypothesis(
+                    hypothesis_id="h_payment_decline",
+                    root_cause_code="NORMAL_BUSINESS_PAYMENT_DECLINE",
+                ),
+            ),
+        ),
+        ("raw_orders", "g_blocked_order_history", ()),
+    ):
+        prepared = kernel.prepare_tool(
+            intent=InvestigationIntent(
+                gap_id=gap_id,
+                gap_kind=EvidenceGapKind.COMPARE_HISTORY,
+                new_hypotheses=hypotheses,
+            ),
+            tool_name="get_relation_history",
+            arguments={"relation_name": relation},
+        )
+        kernel.record_tool_failure(prepared, "RELATION_NOT_ALLOWED")
+
+    outcome = kernel.finalize(
+        KernelDecision(
+            status="INSUFFICIENT_EVIDENCE",
+            run_id=RUN_ID,
+            unresolved_evidence=(
+                {
+                    "evidence_kind": "RELATION_HISTORY",
+                    "subject": "raw_payments",
+                    "reason_code": "RELATION_NOT_ALLOWED",
+                },
+                {
+                    "evidence_kind": "RELATION_HISTORY",
+                    "subject": "raw_orders",
+                    "reason_code": "RELATION_NOT_ALLOWED",
+                },
+                {
+                    "evidence_kind": "INGESTION_WATERMARK",
+                    "subject": "raw_orders",
+                    "reason_code": "NOT_OBSERVABLE",
+                },
+            ),
+            summary="The payment and order history boundary is unavailable.",
+            recommended_actions=(),
+            confidence=0.2,
+        )
+    )
+
+    assert tuple(
+        (item.evidence_kind, item.subject, item.reason_code)
+        for item in outcome.unresolved_evidence
+    ) == (
+        ("RELATION_HISTORY", "raw_payments", "RELATION_NOT_ALLOWED"),
         ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED"),
         ("INGESTION_WATERMARK", "raw_orders", "NOT_OBSERVABLE"),
     )

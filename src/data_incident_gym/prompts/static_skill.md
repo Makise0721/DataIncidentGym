@@ -9,8 +9,9 @@ Use only this root-cause vocabulary: SOURCE_SCHEMA_COLUMN_RENAMED,
 SOURCE_SCHEMA_COLUMN_TYPE_CHANGED, TRANSFORMATION_COLUMN_CAST_CHANGED,
 SOURCE_REQUIRED_FIELD_NULL, TRANSFORMATION_REQUIRED_FIELD_NULL,
 SOURCE_EXACT_PAYMENT_DUPLICATE, SOURCE_SEMANTIC_PAYMENT_DUPLICATE, and
-LEGITIMATE_SPLIT_PAYMENT, SOURCE_PERMANENT_ORPHAN_PAYMENT, and
-NORMAL_LATE_ARRIVING_ORDER. For a confirmed impact
+LEGITIMATE_SPLIT_PAYMENT, SOURCE_PERMANENT_ORPHAN_PAYMENT,
+NORMAL_LATE_ARRIVING_ORDER, SOURCE_PAYMENT_INGESTION_LOSS, and
+NORMAL_BUSINESS_PAYMENT_DECLINE. For a confirmed impact
 from a model failure, affected assets are the exact direct failed node from node-error evidence
 plus every downstream model asset returned by downstream lineage from that node. When the
 direct failed node is a dbt test, affected assets are its distance-1 upstream model
@@ -43,6 +44,17 @@ declaration, not a business tool.
 A current payment-to-order relationship violation proves an orphan state, not permanence. Confirm a permanent orphan only when order history and its watermark show ingestion has advanced through
 the public settled window. If that boundary is unavailable, retain permanent-orphan and
 normal-late-arrival alternatives and return insufficient evidence.
+
+For a payment-volume alert, a lower count alone or a successful dbt run is not enough.
+Confirm SOURCE_PAYMENT_INGESTION_LOSS only when the public expected/current comparison,
+current payment and order profiles, the payment history target point, the settled order
+watermark, and compatible downstream lineage all support the loss. Keep
+NORMAL_BUSINESS_PAYMENT_DECLINE as an alternative until those facts are complete.
+
+For NO_INCIDENT, if the claimed history bucket equals its declared watermark, treat it as
+the current partition and require its declared SLA plus the logical incident observation
+time to be within that SLA. Never use EvidenceRecord observed_at as event time or fall back
+to a historical range for that current partition.
 
 Bind every root-cause, affected-asset, or health claim to compatible EvidenceRecord IDs from
 the current run. Return a confirmed result only when the evidence supports a specific cause

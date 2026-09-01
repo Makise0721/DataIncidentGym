@@ -143,7 +143,7 @@ def test_static_prompt_exposes_the_shared_m7_claim_contract() -> None:
     )
 
 
-def test_both_prompts_expose_the_shared_m8_ontology_and_test_claim_rule() -> None:
+def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> None:
     expected = (
         "SOURCE_SCHEMA_COLUMN_RENAMED",
         "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
@@ -155,13 +155,15 @@ def test_both_prompts_expose_the_shared_m8_ontology_and_test_claim_rule() -> Non
         "LEGITIMATE_SPLIT_PAYMENT",
         "SOURCE_PERMANENT_ORPHAN_PAYMENT",
         "NORMAL_LATE_ARRIVING_ORDER",
+        "SOURCE_PAYMENT_INGESTION_LOSS",
+        "NORMAL_BUSINESS_PAYMENT_DECLINE",
     )
 
     assert expected == P1_ROOT_CAUSE_CODES
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
-        "p1.kernel.v4",
-        "p1.static.v4",
-        "p1.controller.v3",
+        "p1.kernel.v5",
+        "p1.static.v5",
+        "p1.controller.v4",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)

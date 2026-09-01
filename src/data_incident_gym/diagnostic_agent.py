@@ -60,9 +60,9 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v4"
-STATIC_PROMPT_VERSION = "p1.static.v4"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v3"
+KERNEL_PROMPT_VERSION = "p1.kernel.v5"
+STATIC_PROMPT_VERSION = "p1.static.v5"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v4"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -75,6 +75,8 @@ P1_ROOT_CAUSE_CODES = (
     "LEGITIMATE_SPLIT_PAYMENT",
     "SOURCE_PERMANENT_ORPHAN_PAYMENT",
     "NORMAL_LATE_ARRIVING_ORDER",
+    "SOURCE_PAYMENT_INGESTION_LOSS",
+    "NORMAL_BUSINESS_PAYMENT_DECLINE",
 )
 
 MODEL_REQUEST_LIMIT = 8
@@ -1045,6 +1047,11 @@ class DiagnosisRunner:
                 observation.subject
                 for observation in context.incident_brief.observations
                 if observation.kind == "CURRENT_PERIOD_COUNT"
+            ),
+            incident_logical_observed_at=context.incident_brief.logical_observed_at,
+            incident_observations=tuple(
+                (observation.kind, observation.subject, observation.value)
+                for observation in context.incident_brief.observations
             ),
         )
 

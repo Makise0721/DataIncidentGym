@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from data_incident_gym.profiles import (
     ProfileError,
     load_profile_spec,
     parse_profile_spec,
+    parse_watermark_value,
 )
 
 
@@ -87,3 +89,22 @@ def test_profile_spec_rejects_duplicate_json_keys(project_root: Path) -> None:
 
     with pytest.raises(ProfileError, match="重复键"):
         parse_profile_spec(payload)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        ("2018-04-09", datetime(2018, 4, 9, tzinfo=UTC)),
+        ("2018-04-09T12:00:00+08:00", datetime(2018, 4, 9, 4, tzinfo=UTC)),
+    ),
+)
+def test_watermark_values_are_normalized_to_aware_utc(
+    value: str,
+    expected: datetime,
+) -> None:
+    assert parse_watermark_value(value) == expected
+
+
+def test_watermark_value_rejects_non_iso_text() -> None:
+    with pytest.raises(ProfileError):
+        parse_watermark_value("not-a-date")

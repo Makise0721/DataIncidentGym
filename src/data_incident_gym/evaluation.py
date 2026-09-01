@@ -23,14 +23,17 @@ from data_incident_gym.evidence import (
     RelationSchemaFact,
 )
 from data_incident_gym.lab_verifier import ScenarioVerification
+from data_incident_gym.profiles import parse_watermark_value
 from data_incident_gym.scenarios import (
     Answerability,
     ColumnRenameMutation,
     ColumnTypeMutation,
+    DeletePaymentRowsMutation,
     DuplicatePaymentRowsMutation,
     OrphanPaymentRowsMutation,
     ScenarioSpec,
     SetFieldNullMutation,
+    deleted_payment_rows,
 )
 
 
@@ -244,7 +247,12 @@ def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunRe
             or history.snapshot.relation_name != claim.relation_name
         ):
             return False
-        if run.run_status != "SUCCEEDED" or run.failed_nodes:
+        if (
+            run.run_status != "SUCCEEDED"
+            or run.dbt_exit_code != 0
+            or run.failed_nodes
+            or run.skipped_nodes
+        ):
             return False
         history_series = next(
             (series for series in history.snapshot.histories if series.name == claim.history_name),
@@ -252,20 +260,6 @@ def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunRe
         )
         if history_series is None:
             return False
-        if history_series.watermark_column is not None:
-            if history_series.watermark_value is None:
-                return False
-            if history_series.sla_seconds is not None:
-                try:
-                    watermark = datetime.fromisoformat(history_series.watermark_value)
-                    observed_at = next(
-                        record.observed_at for record in records if record.content == history
-                    )
-                except (StopIteration, TypeError, ValueError):
-                    return False
-                lag = (observed_at - watermark).total_seconds()
-                if lag < 0 or lag > history_series.sla_seconds:
-                    return False
         current = next(
             (
                 point
@@ -277,24 +271,257 @@ def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunRe
         )
         if current is None or current.value != claim.current_value:
             return False
-        for series in history.snapshot.histories:
-            if series.name != claim.history_name:
-                continue
-            prior = [
-                point.value
-                for point in series.points
-                if point.periodic_key == current.periodic_key and point.bucket < current.bucket
-            ]
-            return len(prior) >= 4 and min(prior) <= current.value <= max(prior)
-        return False
+        is_current_partition = current.bucket == history_series.watermark_value
+        if history_series.watermark_column is not None:
+            if history_series.watermark_value is None:
+                return False
+            try:
+                watermark = parse_watermark_value(history_series.watermark_value)
+            except (TypeError, ValueError):
+                return False
+            if is_current_partition:
+                if history_series.sla_seconds is None:
+                    return False
+                logical_observed_at = scenario.incident_brief.logical_observed_at
+                if logical_observed_at.tzinfo is None or logical_observed_at.utcoffset() is None:
+                    return False
+                lag = (
+                    logical_observed_at.astimezone(watermark.tzinfo) - watermark
+                ).total_seconds()
+                if lag < 0 or lag > history_series.sla_seconds:
+                    return False
+            else:
+                try:
+                    current_bucket = parse_watermark_value(current.bucket)
+                except (TypeError, ValueError):
+                    return False
+                if current_bucket > watermark:
+                    return False
+        if not is_current_partition:
+            for series in history.snapshot.histories:
+                if series.name != claim.history_name:
+                    continue
+                prior = [
+                    point.value
+                    for point in series.points
+                    if point.periodic_key == current.periodic_key and point.bucket < current.bucket
+                ]
+                return len(prior) >= 4 and min(prior) <= current.value <= max(prior)
+        return True
     return bool(diagnosis.claims)
+
+
+def _scenario_observation(
+    scenario: ScenarioSpec,
+    kind: str,
+) -> tuple[str, str] | None:
+    matches = tuple(
+        (observation.subject, observation.value)
+        for observation in scenario.incident_brief.observations
+        if observation.kind == kind
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _silent_drop_evidence_compatible(
+    scenario: ScenarioSpec,
+    mutation: DeletePaymentRowsMutation,
+    root_records: list[EvidenceRecord],
+    supporting_records: tuple[EvidenceRecord, ...],
+) -> bool:
+    current = _scenario_observation(scenario, "CURRENT_PERIOD_COUNT")
+    expected = _scenario_observation(scenario, "EXPECTED_PERIOD_COUNT")
+    relation_count = _scenario_observation(scenario, "CURRENT_RELATION_COUNT")
+    settled = _scenario_observation(scenario, "SETTLED_PAYMENT_WINDOW_END")
+    if current is None or expected is None or relation_count is None or settled is None:
+        return False
+    current_subject, current_raw = current
+    expected_subject, expected_raw = expected
+    payment_relation, payment_history, bucket = current_subject.split("/") if (
+        current_subject.count("/") == 2
+    ) else ("", "", "")
+    count_relation, relation_count_raw = relation_count
+    order_relation, settled_value = settled
+    if (
+        expected_subject != current_subject
+        or count_relation != payment_relation
+        or payment_history != "payment_count_by_order_date"
+        or bucket != settled_value
+    ):
+        return False
+    try:
+        current_count = int(current_raw)
+        expected_count = int(expected_raw)
+        current_relation_count = int(relation_count_raw)
+        parse_watermark_value(bucket)
+        settled_at = parse_watermark_value(settled_value)
+    except (TypeError, ValueError):
+        return False
+    if expected_count <= current_count or current_relation_count != current_count:
+        return False
+    deleted_rows = deleted_payment_rows(mutation)
+    expected_channels = {
+        "bank_transfer": 33,
+        "coupon": 13,
+        "credit_card": 55,
+        "gift_card": 12,
+    }
+    for _, _, payment_method, _ in deleted_rows:
+        expected_channels[payment_method] -= 1
+
+    runs = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, DbtRunResultsFact)
+    ]
+    payment_profiles = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, RelationDataProfileFact)
+        and record.content.relation_name == payment_relation
+    ]
+    order_profiles = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, RelationDataProfileFact)
+        and record.content.relation_name == order_relation
+    ]
+    payment_histories = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, RelationHistoryFact)
+        and record.content.relation_name == payment_relation
+    ]
+    order_histories = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, RelationHistoryFact)
+        and record.content.relation_name == order_relation
+    ]
+    if (
+        len(runs) != 1
+        or len(payment_profiles) != 1
+        or len(order_profiles) != 1
+        or len(payment_histories) != 1
+        or len(order_histories) != 1
+    ):
+        return False
+    run = runs[0]
+    payment_profile = payment_profiles[0]
+    order_profile = order_profiles[0]
+    if (
+        run.run_status != "SUCCEEDED"
+        or run.dbt_exit_code != 0
+        or run.failed_nodes
+        or run.skipped_nodes
+        or payment_profile.snapshot.row_count != 113 - len(deleted_rows)
+        or order_profile.snapshot.row_count != 99
+    ):
+        return False
+    relationship = next(
+        (
+            item
+            for item in order_profile.snapshot.relationship_violations
+            if item.name == "id_to_raw_payments_order_id"
+        ),
+        None,
+    )
+    key = next(
+        (item for item in payment_profile.snapshot.business_key_duplicates if item.name == "id"),
+        None,
+    )
+    fingerprint = next(
+        (
+            item
+            for item in payment_profile.snapshot.business_fingerprint_duplicates
+            if item.name == "order_payment_amount"
+        ),
+        None,
+    )
+    group = next(
+        (item for item in payment_profile.snapshot.groups if item.name == "payment_method"),
+        None,
+    )
+    if relationship is None or relationship.violation_count != len(deleted_rows):
+        return False
+    if key is None or fingerprint is None or key.duplicate_count or fingerprint.duplicate_count:
+        return False
+    if group is None or group.columns != ("payment_method",):
+        return False
+    channel_counts = {
+        values[0]: count
+        for values, count in zip(group.values, group.counts, strict=True)
+        if len(values) == 1
+    }
+    if channel_counts != expected_channels:
+        return False
+
+    payment_series = tuple(
+        item
+        for item in payment_histories[0].snapshot.histories
+        if item.name == payment_history
+    )
+    order_series = tuple(
+        item
+        for item in order_histories[0].snapshot.histories
+        if item.name == "order_count_by_day"
+    )
+    if len(payment_series) != 1 or len(order_series) != 1:
+        return False
+    payment_points = tuple(
+        point for point in payment_series[0].points if point.bucket == bucket
+    )
+    order_history = order_series[0]
+    if (
+        len(payment_points) != 1
+        or payment_points[0].value != current_count
+        or order_history.watermark_column != "order_date"
+        or order_history.watermark_value is None
+    ):
+        return False
+    try:
+        watermark = parse_watermark_value(order_history.watermark_value)
+    except (TypeError, ValueError):
+        return False
+    if watermark < settled_at:
+        return False
+    lineage_records = (*root_records, *supporting_records)
+    return any(
+        isinstance(record.content, DbtLineageFact)
+        and record.content.direction == "downstream"
+        and record.content.node_id in scenario.incident_brief.subjects
+        and any(
+            node.resource_type == "model" and node.distance >= 1
+            for node in record.content.related_nodes
+        )
+        for record in lineage_records
+    )
 
 
 def _root_cause_evidence_compatible(
     scenario: ScenarioSpec,
     root_cause_code: str,
     root_records: list[EvidenceRecord],
+    supporting_records: tuple[EvidenceRecord, ...] = (),
 ) -> bool:
+    silent = next(
+        (
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, DeletePaymentRowsMutation)
+        ),
+        None,
+    )
+    if silent is not None:
+        return (
+            root_cause_code == "SOURCE_PAYMENT_INGESTION_LOSS"
+            and _silent_drop_evidence_compatible(
+                scenario,
+                silent,
+                root_records,
+                supporting_records,
+            )
+        )
     duplicate = next(
         (
             item
@@ -583,6 +810,7 @@ def _claim_evidence_compatible(
         scenario,
         roots[0].root_cause_code,
         root_records,
+        tuple(diagnosis_run.evidence_records),
     ):
         return False
     for claim in assets:
