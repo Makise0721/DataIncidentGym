@@ -36,6 +36,12 @@
           "local_columns": ["user_id"],
           "referenced_relation": "raw_customers",
           "referenced_columns": ["id"]
+        },
+        {
+          "name": "id_to_raw_payments_order_id",
+          "local_columns": ["id"],
+          "referenced_relation": "raw_payments",
+          "referenced_columns": ["order_id"]
         }
       ],
       "groups": [],
@@ -48,7 +54,7 @@
           "max_points": 90,
           "join_path": null,
           "watermark_column": "order_date",
-          "sla_seconds": null
+          "sla_seconds": 86400
         }
       ]
     },

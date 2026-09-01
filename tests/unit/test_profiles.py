@@ -31,6 +31,18 @@ def test_checked_in_profile_spec_is_scenario_independent(project_root: Path) -> 
     orders = spec.relation("raw_orders")
     assert orders.histories[0].name == "order_count_by_day"
     assert orders.histories[0].periodicity.value == "DAY_OF_WEEK"
+    assert orders.histories[0].sla_seconds == 86400
+    assert (
+        orders.relationships[1].name,
+        orders.relationships[1].local_columns,
+        orders.relationships[1].referenced_relation,
+        orders.relationships[1].referenced_columns,
+    ) == (
+        "id_to_raw_payments_order_id",
+        ("id",),
+        "raw_payments",
+        ("order_id",),
+    )
     payments = spec.relation("raw_payments")
     assert payments.business_keys[0].columns == ("id",)
     assert payments.business_fingerprints[0].columns == (

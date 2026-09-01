@@ -51,13 +51,23 @@ P1_M10_SCENARIO_IDS = (
     "orphan_payment_coupon_a",
     "orphan_payment_coupon_b",
 )
+P1_M11_SCENARIO_IDS = (
+    "silent_payment_drop_record",
+    "silent_payment_drop_partition_a",
+    "silent_payment_drop_partition_b",
+    "order_volume_within_sla",
+)
 REGRESSION_SCENARIO_IDS = ("schema_rename_payment_amount",)
-SUPPORTED_SCENARIO_IDS = (
-    REGRESSION_SCENARIO_IDS
-    + P1_M7_SCENARIO_IDS
+P1_SCENARIO_IDS = (
+    P1_M7_SCENARIO_IDS
     + P1_M8_SCENARIO_IDS
     + P1_M9_SCENARIO_IDS
     + P1_M10_SCENARIO_IDS
+    + P1_M11_SCENARIO_IDS
+)
+SUPPORTED_SCENARIO_IDS = (
+    REGRESSION_SCENARIO_IDS
+    + P1_SCENARIO_IDS
 )
 
 
@@ -71,6 +81,7 @@ class FaultFamily(StrEnum):
     REQUIRED_FIELD_NULL = "REQUIRED_FIELD_NULL"
     PAYMENT_DUPLICATE = "PAYMENT_DUPLICATE"
     PAYMENT_ORPHAN = "PAYMENT_ORPHAN"
+    PAYMENT_SILENT_DROP = "PAYMENT_SILENT_DROP"
     ORDER_VOLUME_PATTERN = "ORDER_VOLUME_PATTERN"
 
 
@@ -264,6 +275,35 @@ def orphan_payment_rows(mutation: OrphanPaymentRowsMutation) -> tuple[PaymentRow
     return _M10_ORPHAN_BATCHES[key]
 
 
+_M11_DELETE_BATCHES: dict[tuple[str, tuple[int, ...]], tuple[PaymentRow, ...]] = {
+    ("SOURCE_BATCH", (111,)): ((111, 97, "bank_transfer", 1400),),
+    ("SETTLED_PARTITION", (89, 92)): (
+        (89, 78, "bank_transfer", 2600),
+        (92, 80, "gift_card", 300),
+    ),
+}
+
+
+class DeletePaymentRowsMutation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["DELETE_PAYMENT_ROWS"]
+    purpose: Literal["FAULT"]
+    relation: Literal["raw_payments"]
+    mode: Literal["SOURCE_BATCH", "SETTLED_PARTITION"]
+    deleted_payment_ids: tuple[StrictInt, ...]
+
+    @model_validator(mode="after")
+    def validate_frozen_batch(self) -> Self:
+        if (self.mode, self.deleted_payment_ids) not in _M11_DELETE_BATCHES:
+            raise ValueError("unsupported silent-payment-drop batch")
+        return self
+
+
+def deleted_payment_rows(mutation: DeletePaymentRowsMutation) -> tuple[PaymentRow, ...]:
+    return _M11_DELETE_BATCHES[(mutation.mode, mutation.deleted_payment_ids)]
+
+
 class NoMutation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -277,6 +317,7 @@ ScenarioMutation = Annotated[
     | SetFieldNullMutation
     | DuplicatePaymentRowsMutation
     | OrphanPaymentRowsMutation
+    | DeletePaymentRowsMutation
     | NoMutation,
     Field(discriminator="kind"),
 ]
@@ -480,7 +521,11 @@ class ScenarioSpec(BaseModel):
             if (
                 self.direct_failure is None
                 and self.fault_family
-                not in {FaultFamily.PAYMENT_DUPLICATE, FaultFamily.PAYMENT_ORPHAN}
+                not in {
+                    FaultFamily.PAYMENT_DUPLICATE,
+                    FaultFamily.PAYMENT_ORPHAN,
+                    FaultFamily.PAYMENT_SILENT_DROP,
+                }
             ):
                 raise ValueError("this insufficient scenario requires a direct dbt failure")
         elif self.answerability is Answerability.CONFIRMABLE:
@@ -580,6 +625,49 @@ class ScenarioSpec(BaseModel):
                 raise ValueError("orphan-payment development role has no distractor")
         elif any(isinstance(item, OrphanPaymentRowsMutation) for item in mutations):
             raise ValueError("ORPHAN_PAYMENT_ROWS is only valid for orphan payments")
+        if self.fault_family is FaultFamily.PAYMENT_SILENT_DROP:
+            delete_mutations = tuple(
+                mutation
+                for mutation in mutations
+                if isinstance(mutation, DeletePaymentRowsMutation)
+            )
+            nullable_distractors = tuple(
+                mutation
+                for mutation in mutations
+                if isinstance(mutation, AddNullableColumnMutation)
+            )
+            if len(delete_mutations) != 1:
+                raise ValueError("silent-payment-drop scenarios require one frozen delete batch")
+            is_test_role = self.variant_role in {
+                VariantRole.TEST_CONFIRMABLE,
+                VariantRole.TEST_INSUFFICIENT,
+            }
+            expected_mode = "SETTLED_PARTITION" if is_test_role else "SOURCE_BATCH"
+            if delete_mutations[0].mode != expected_mode:
+                raise ValueError("silent-payment-drop role and mutation mode do not match")
+            if len(nullable_distractors) != (1 if is_test_role else 0):
+                raise ValueError("silent-payment-drop test roles require one schema distractor")
+            if is_test_role:
+                if len(self.distractors) != 1 or not isinstance(
+                    self.distractors[0],
+                    NullableColumnSchemaDriftDistractor,
+                ):
+                    raise ValueError("silent-payment-drop test roles need the declared distractor")
+                declared = self.distractors[0]
+                distractor = nullable_distractors[0]
+                if (
+                    distractor.relation != declared.relation
+                    or distractor.column != declared.column
+                    or distractor.data_type != declared.data_type
+                    or distractor.nullable != declared.nullable
+                ):
+                    raise ValueError("silent-payment-drop distractor does not match declaration")
+                if self.direct_failure is not None or not self.affected_assets:
+                    raise ValueError("silent-payment-drop scenarios are dbt-success anomalies")
+            elif self.distractors:
+                raise ValueError("silent-payment-drop development role has no distractor")
+        elif any(isinstance(item, DeletePaymentRowsMutation) for item in mutations):
+            raise ValueError("DELETE_PAYMENT_ROWS is only valid for silent payment drops")
         if self.fault_family is FaultFamily.REQUIRED_FIELD_NULL:
             faults = tuple(
                 mutation

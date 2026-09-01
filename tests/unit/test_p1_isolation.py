@@ -60,6 +60,10 @@ def test_private_case_ids_never_reach_diagnosis_sources() -> None:
         "orphan_payment_record",
         "orphan_payment_coupon_a",
         "orphan_payment_coupon_b",
+        "silent_payment_drop_record",
+        "silent_payment_drop_partition_a",
+        "silent_payment_drop_partition_b",
+        "order_volume_within_sla",
     ):
         assert case_id not in source
         assert case_id == load_scenario_spec(case_id).incident_case_id
@@ -69,5 +73,17 @@ def test_private_case_ids_never_reach_diagnosis_sources() -> None:
 
 def test_duplicate_payment_private_rows_never_reach_diagnosis_sources() -> None:
     source = "\n".join(path.read_text(encoding="utf-8") for path in _diagnosis_source_paths())
-    for private_value in ("47", "66", "86", "114", "115", "116", "coupon_count"):
+    for private_value in (
+        "47",
+        "66",
+        "86",
+        "114",
+        "115",
+        "116",
+        "coupon_count",
+        "89",
+        "92",
+        "111",
+        "silent_payment_drop_",
+    ):
         assert private_value not in source

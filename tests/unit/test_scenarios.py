@@ -8,11 +8,16 @@ from data_incident_gym.scenarios import (
     P1_M8_SCENARIO_IDS,
     P1_M9_SCENARIO_IDS,
     P1_M10_SCENARIO_IDS,
+    P1_M11_SCENARIO_IDS,
+    P1_SCENARIO_IDS,
+    SUPPORTED_SCENARIO_IDS,
     Answerability,
+    DeletePaymentRowsMutation,
     DuplicatePaymentRowsMutation,
     OrphanPaymentRowsMutation,
     ScenarioError,
     VariantRole,
+    deleted_payment_rows,
     duplicate_payment_rows,
     load_scenario_spec,
     orphan_payment_rows,
@@ -338,6 +343,84 @@ def test_m10_public_brief_contains_no_private_orphan_contract(project_root: Path
             case_id,
         ):
             assert forbidden not in public
+
+
+def test_m11_catalog_and_test_twin_are_exact(project_root: Path) -> None:
+    assert P1_M11_SCENARIO_IDS == (
+        "silent_payment_drop_record",
+        "silent_payment_drop_partition_a",
+        "silent_payment_drop_partition_b",
+        "order_volume_within_sla",
+    )
+    assert len(P1_SCENARIO_IDS) == 17
+    assert len(P1_SCENARIO_IDS) == len(set(P1_SCENARIO_IDS))
+    assert len(SUPPORTED_SCENARIO_IDS) == 18
+
+    dev, confirmable, insufficient, health = (
+        load_scenario_spec(case_id, project_root) for case_id in P1_M11_SCENARIO_IDS
+    )
+    assert dev.variant_role is VariantRole.DEV_CONFIRMABLE
+    assert confirmable.variant_role is VariantRole.TEST_CONFIRMABLE
+    assert insufficient.variant_role is VariantRole.TEST_INSUFFICIENT
+    assert health.variant_role is VariantRole.NO_INCIDENT_CONTROL
+    for field_name in (
+        "incident_brief",
+        "reset_and_injection_contract",
+        "direct_failure",
+        "affected_assets",
+        "distractors",
+    ):
+        assert getattr(confirmable, field_name) == getattr(insufficient, field_name)
+    assert confirmable.observable_evidence_contract.profile_relations == (
+        "raw_orders",
+        "raw_payments",
+    )
+    assert confirmable.observable_evidence_contract.history_relations == (
+        "raw_orders",
+        "raw_payments",
+    )
+    assert insufficient.observable_evidence_contract.profile_relations == (
+        "raw_orders",
+        "raw_payments",
+    )
+    assert insufficient.observable_evidence_contract.history_relations == ()
+    assert tuple(
+        (gap.gap_kind, gap.subject, gap.reason_code, gap.tool_name)
+        for gap in insufficient.observable_evidence_contract.unresolved_gaps
+    ) == (
+        ("RELATION_HISTORY", "raw_payments", "RELATION_NOT_ALLOWED", "get_relation_history"),
+        ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED", "get_relation_history"),
+        ("INGESTION_WATERMARK", "raw_orders", "NOT_OBSERVABLE", None),
+    )
+    mutation = next(
+        item
+        for item in confirmable.reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    assert deleted_payment_rows(mutation) == (
+        (89, 78, "bank_transfer", 2600),
+        (92, 80, "gift_card", 300),
+    )
+    assert health.observable_evidence_contract.history_relations == ("raw_orders",)
+
+
+@pytest.mark.parametrize("case_id", P1_M11_SCENARIO_IDS[:3])
+def test_m11_public_brief_contains_no_private_delete_contract(
+    project_root: Path,
+    case_id: str,
+) -> None:
+    public = load_scenario_spec(case_id, project_root).incident_brief.model_dump_json()
+    for forbidden in (
+        "deleted_payment_ids",
+        "SOURCE_PAYMENT_INGESTION_LOSS",
+        "NORMAL_BUSINESS_PAYMENT_DECLINE",
+        "TEST_INSUFFICIENT",
+        "INSUFFICIENT_EVIDENCE",
+        "89",
+        "92",
+        case_id,
+    ):
+        assert forbidden not in public
 
 
 def test_public_brief_does_not_include_private_scenario_fields(project_root: Path) -> None:
