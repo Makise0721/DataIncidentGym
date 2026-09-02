@@ -93,8 +93,26 @@ def _subject_relations(context: ObservableRunContext) -> tuple[str, ...]:
 
 
 def _named_relation(context: ObservableRunContext, token: str) -> str | None:
+    observable_relations = sorted(
+        {
+            relation
+            for kind in ("schema", "profile", "history")
+            for relation in _relation_names(context, kind)
+        }
+    )
+    observable_match = next(
+        (relation for relation in observable_relations if token in relation.lower()),
+        None,
+    )
+    if observable_match is not None:
+        return observable_match
     return next(
-        (relation for relation in _subject_relations(context) if token in relation.lower()),
+        (
+            subject
+            for subject in context.incident_brief.subjects
+            if re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", subject)
+            and token in subject.lower()
+        ),
         None,
     )
 

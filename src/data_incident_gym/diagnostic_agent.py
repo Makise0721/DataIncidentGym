@@ -12,6 +12,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Annotated, Any, Literal, Protocol
 
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, StrictStr
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
 from pydantic_ai.exceptions import (
@@ -1025,6 +1026,7 @@ class DiagnosisRunner:
         model_identity: ModelIdentity,
         strategy: DiagnosticStrategy,
         context: ObservableRunContext,
+        owned_model_client: AsyncOpenAI | None = None,
     ) -> None:
         self._run_id = run_id
         self._settings = settings
@@ -1034,6 +1036,7 @@ class DiagnosisRunner:
         self._model_identity = model_identity
         self._strategy = strategy
         self._context = context
+        self._owned_model_client = owned_model_client
         self._budget = DiagnosisBudget()
         surface = policy_surface_for_strategy(strategy, model=model)
         self._tool_schema_payload = surface.tool_schema_payload
@@ -1062,13 +1065,17 @@ class DiagnosisRunner:
         if strategy not in MODEL_STRATEGIES:
             raise ValueError("strategy is not model-backed")
         context = resolve_run_context(run_id, project_root=project_root)
+        owned_model_client = None
         if model is None:
-            provider = OpenAIProvider(
+            client = AsyncOpenAI(
                 base_url=str(settings.model_base_url),
                 api_key=settings.model_api_key.get_secret_value(),
+                max_retries=0,
             )
+            provider = OpenAIProvider(openai_client=client)
             model = OpenAIChatModel(settings.model_name, provider=provider)
             model_identity = ModelIdentity("openai-compatible", settings.model_name)
+            owned_model_client = client
         elif model_identity is None:
             raise ValueError("model_identity is required when injecting a model")
         if tools is None:
@@ -1084,6 +1091,7 @@ class DiagnosisRunner:
             model_identity=model_identity,
             strategy=strategy,
             context=context,
+            owned_model_client=owned_model_client,
         )
 
     @property
@@ -1331,6 +1339,13 @@ class DiagnosisRunner:
         return self._result(state)
 
     async def diagnose(self) -> DiagnosisRunResult:
+        try:
+            return await self._diagnose_once()
+        finally:
+            if self._owned_model_client is not None:
+                await self._owned_model_client.close()
+
+    async def _diagnose_once(self) -> DiagnosisRunResult:
         kernel = (
             self._kernel(self._context)
             if _is_kernel_strategy(self._strategy)

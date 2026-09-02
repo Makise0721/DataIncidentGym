@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -119,6 +120,7 @@ def _runner(
         artifact_writer=writer or _FakeWriter(),
         clock=lambda: NOW,
         checkout_verifier=lambda _manifest: None,
+        checkout_revision_reader=lambda: "a" * 40,
     )
 
 
@@ -134,6 +136,7 @@ def test_runner_verifies_before_doctor_and_executes_each_cell_once(tmp_path: Pat
         doctor_calls=doctor_calls,
     )
 
+    __import__("asyncio").run(runner.preflight())
     result = __import__("asyncio").run(runner.run())
 
     assert result.status == "COMPLETED"
@@ -149,6 +152,162 @@ def test_runner_verifies_before_doctor_and_executes_each_cell_once(tmp_path: Pat
     assert doctor_calls == ["doctor"]
 
 
+def test_preflight_runs_doctor_and_writes_receipt_before_execution(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    doctor_calls: list[str] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=doctor_calls,
+    )
+
+    result = __import__("asyncio").run(runner.preflight())
+
+    assert result.status is DoctorStatus.PASSED
+    assert doctor_calls == ["doctor"]
+    suite_root = tmp_path / "artifacts" / "benchmarks" / manifest.manifest_id
+    receipt = suite_root / "doctor.json"
+    assert receipt.is_file()
+    assert not tuple(suite_root.glob(".doctor.json.*.tmp"))
+    assert not (suite_root / "ledger.jsonl").exists()
+    assert not calls
+
+
+def test_runner_requires_a_passed_preflight_receipt(tmp_path: Path) -> None:
+    manifest = build_manifest("b" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    doctor_calls: list[str] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=doctor_calls,
+    )
+
+    with pytest.raises(BenchmarkRunnerError, match="preflight receipt"):
+        __import__("asyncio").run(runner.run())
+
+    assert doctor_calls == []
+    assert calls == []
+
+
+def test_preflight_rejects_existing_target_artifact(tmp_path: Path) -> None:
+    manifest = build_manifest("c" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    doctor_calls: list[str] = []
+    artifact = tmp_path / "artifacts" / manifest.cells[0].run_id
+    artifact.mkdir(parents=True)
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=doctor_calls,
+    )
+
+    with pytest.raises(BenchmarkRunnerError, match="artifact already exists"):
+        __import__("asyncio").run(runner.preflight())
+
+    assert doctor_calls == []
+
+
+def test_preflight_binds_and_run_rechecks_checkout_revision(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    doctor_calls: list[str] = []
+    checkout_revision = {"value": "b" * 40}
+    runner = BenchmarkRunner(
+        manifest,
+        project_root=tmp_path,
+        doctor_factory=lambda: _FakeDoctor(_doctor_result(), doctor_calls),
+        evaluation_runner_factory=lambda: _FakeEvaluationRunner(calls),
+        artifact_writer=_FakeWriter(),
+        clock=lambda: NOW,
+        checkout_verifier=lambda _manifest: None,
+        checkout_revision_reader=lambda: checkout_revision["value"],
+    )
+
+    __import__("asyncio").run(runner.preflight())
+    receipt_path = runner._suite_root() / "doctor.json"
+    receipt = __import__("json").loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["checkout_revision"] == "b" * 40
+
+    checkout_revision["value"] = "c" * 40
+    with pytest.raises(BenchmarkRunnerError, match="checkout revision"):
+        __import__("asyncio").run(runner.run())
+
+    assert calls == []
+
+
+def test_preflight_rejects_residual_suite_files(tmp_path: Path) -> None:
+    manifest = build_manifest("6" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    doctor_calls: list[str] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=doctor_calls,
+    )
+    suite_root = runner._suite_root()
+    (suite_root / "summary.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(BenchmarkRunnerError, match="untouched benchmark suite"):
+        __import__("asyncio").run(runner.preflight())
+
+    assert doctor_calls == []
+
+
+def test_run_rejects_receipt_with_drifted_result_inputs(tmp_path: Path) -> None:
+    manifest = build_manifest("4" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    doctor_calls: list[str] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=doctor_calls,
+    )
+    __import__("asyncio").run(runner.preflight())
+    receipt_path = runner._suite_root() / "doctor.json"
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload["result_inputs_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(BenchmarkRunnerError, match="result inputs do not match manifest"):
+        __import__("asyncio").run(runner.run())
+
+    assert doctor_calls == ["doctor"]
+    assert calls == []
+
+
+def test_run_rejects_artifact_for_cell_that_never_started(tmp_path: Path) -> None:
+    manifest = build_manifest("5" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    doctor_calls: list[str] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=doctor_calls,
+    )
+    __import__("asyncio").run(runner.preflight())
+    artifact = tmp_path / "artifacts" / manifest.cells[1].run_id
+    artifact.mkdir(parents=True)
+
+    with pytest.raises(BenchmarkRunnerError, match="artifact already exists"):
+        __import__("asyncio").run(runner.run())
+
+    assert calls == []
+
+
 def test_runner_reuses_terminal_ledger_without_retry(tmp_path: Path) -> None:
     manifest = build_manifest("b" * 40)
     calls: list[tuple[str, DiagnosticStrategy, str]] = []
@@ -161,6 +320,7 @@ def test_runner_reuses_terminal_ledger_without_retry(tmp_path: Path) -> None:
         doctor_calls=doctor_calls,
     )
 
+    __import__("asyncio").run(runner.preflight())
     first = __import__("asyncio").run(runner.run())
     second = __import__("asyncio").run(runner.run())
 
@@ -181,10 +341,10 @@ def test_runner_doctor_failure_creates_no_started_cell(tmp_path: Path) -> None:
         doctor_calls=doctor_calls,
     )
 
-    result = __import__("asyncio").run(runner.run())
+    __import__("asyncio").run(runner.preflight())
+    with pytest.raises(BenchmarkRunnerError, match="receipt is not PASSED"):
+        __import__("asyncio").run(runner.run())
 
-    assert result.status == "FAILED"
-    assert result.terminal_cells == 0
     assert calls == []
     suite_root = tmp_path / "artifacts" / "benchmarks" / "p1-formal-v1"
     assert (suite_root / "doctor.json").is_file()
@@ -204,6 +364,7 @@ def test_runner_materializes_an_interrupted_cell_once(tmp_path: Path) -> None:
         doctor_calls=doctor_calls,
         writer=writer,
     )
+    __import__("asyncio").run(runner.preflight())
     suite_root = runner._suite_root()
     started = BenchmarkLedgerEntry.create(
         manifest_id=manifest.manifest_id,
@@ -253,7 +414,7 @@ def test_runner_rejects_terminal_ledger_entry_without_started_predecessor(tmp_pa
         runner._read_ledger(suite_root / "ledger.jsonl")
 
 
-def test_runner_materializes_stale_cell_before_returning_doctor_failure(tmp_path: Path) -> None:
+def test_runner_materializes_stale_cell_with_passed_doctor_receipt(tmp_path: Path) -> None:
     manifest = build_manifest("1" * 40)
     calls: list[tuple[str, DiagnosticStrategy, str]] = []
     doctor_calls: list[str] = []
@@ -261,11 +422,12 @@ def test_runner_materializes_stale_cell_before_returning_doctor_failure(tmp_path
     runner = _runner(
         manifest,
         tmp_path,
-        doctor_result=_doctor_result(False),
+        doctor_result=_doctor_result(),
         calls=calls,
         doctor_calls=doctor_calls,
         writer=writer,
     )
+    __import__("asyncio").run(runner.preflight())
     suite_root = runner._suite_root()
     started = BenchmarkLedgerEntry.create(
         manifest_id=manifest.manifest_id,
@@ -282,10 +444,12 @@ def test_runner_materializes_stale_cell_before_returning_doctor_failure(tmp_path
     result = __import__("asyncio").run(runner.run())
 
     assert result.status == "FAILED"
-    assert result.terminal_cells == result.failed_cells == 1
-    assert calls == []
+    assert result.terminal_cells == 106
+    assert result.completed_cells == 105
+    assert result.failed_cells == 1
+    assert len(calls) == 105
     assert len(writer.runs) == 1
-    assert len((suite_root / "ledger.jsonl").read_text(encoding="utf-8").splitlines()) == 2
+    assert len((suite_root / "ledger.jsonl").read_text(encoding="utf-8").splitlines()) == 212
 
 
 def test_runner_binds_manifest_model_configuration_to_runtime_settings(tmp_path: Path) -> None:

@@ -17,6 +17,7 @@ from data_incident_gym.benchmark_manifest import (
     load_manifest,
     verify_manifest,
 )
+from data_incident_gym.benchmark_report import BenchmarkReporter, BenchmarkReportError
 from data_incident_gym.benchmark_runner import BenchmarkRunner, BenchmarkRunnerError
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.diagnosis import DiagnosisStatus, DiagnosticStrategy
@@ -108,6 +109,11 @@ def create_benchmark_runner(manifest) -> BenchmarkRunner:
     return BenchmarkRunner.for_project(manifest)
 
 
+def create_benchmark_reporter(manifest) -> BenchmarkReporter:
+    suite_root = PROJECT_ROOT / "artifacts" / "benchmarks" / manifest.manifest_id
+    return BenchmarkReporter(manifest, suite_root)
+
+
 def _canonical_benchmark_manifest_path(path: Path) -> Path:
     candidate = Path(path)
     if not candidate.is_absolute():
@@ -121,6 +127,16 @@ def _canonical_benchmark_manifest_path(path: Path) -> Path:
             "formal manifest path must be config/benchmark/p1-formal-v1.json"
         )
     return resolved
+
+
+def _confirmed_benchmark_manifest(path: Path, confirm_sha256: str):
+    manifest_path = _canonical_benchmark_manifest_path(path)
+    actual_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    if confirm_sha256 != actual_sha256:
+        raise BenchmarkRunnerError("manifest SHA-256 confirmation does not match file")
+    loaded = load_manifest(manifest_path)
+    verify_manifest(loaded)
+    return manifest_path, loaded
 
 
 def _exit_lab_error(error: LabError | ScenarioError) -> None:
@@ -293,12 +309,7 @@ def benchmark_run(
 ) -> None:
     """执行已冻结的正式 benchmark；无重试、替换或扩展样本选项。"""
     try:
-        manifest = _canonical_benchmark_manifest_path(manifest)
-        actual_sha256 = hashlib.sha256(manifest.read_bytes()).hexdigest()
-        if confirm_sha256 != actual_sha256:
-            raise BenchmarkRunnerError("manifest SHA-256 confirmation does not match file")
-        loaded = load_manifest(manifest)
-        verify_manifest(loaded)
+        _, loaded = _confirmed_benchmark_manifest(manifest, confirm_sha256)
         result = asyncio.run(create_benchmark_runner(loaded).run())
     except (BenchmarkManifestError, BenchmarkRunnerError, OSError, ValueError) as exc:
         typer.echo(f"benchmark 执行失败：{exc}", err=True)
@@ -308,6 +319,50 @@ def benchmark_run(
     typer.echo(f"ledger: {result.ledger_path}")
     if result.status != "COMPLETED":
         raise typer.Exit(code=1)
+
+
+@benchmark_app.command("preflight")
+def benchmark_preflight(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+) -> None:
+    """执行 Manifest-bound doctor；不会创建正式 cell 或 ledger。"""
+    try:
+        _, loaded = _confirmed_benchmark_manifest(manifest, confirm_sha256)
+        result = asyncio.run(create_benchmark_runner(loaded).preflight())
+    except (BenchmarkManifestError, BenchmarkRunnerError, OSError, ValueError) as exc:
+        typer.echo(f"benchmark preflight 失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"status: {result.status.value}")
+    typer.echo(
+        "receipt: "
+        f"{PROJECT_ROOT / 'artifacts' / 'benchmarks' / loaded.manifest_id / 'doctor.json'}"
+    )
+    typer.echo("started_cells: 0")
+    if result.status is not DoctorStatus.PASSED:
+        raise typer.Exit(code=1)
+
+
+@benchmark_app.command("report")
+def benchmark_report(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+) -> None:
+    """只读校验并汇总正式 suite；不会调用模型、数据库或 evaluator。"""
+    try:
+        _, loaded = _confirmed_benchmark_manifest(manifest, confirm_sha256)
+        summary_path, report_path = create_benchmark_reporter(loaded).write()
+    except (
+        BenchmarkManifestError,
+        BenchmarkReportError,
+        BenchmarkRunnerError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"benchmark report 失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"summary: {summary_path}")
+    typer.echo(f"report: {report_path}")
 
 
 @lab_app.command("reset")

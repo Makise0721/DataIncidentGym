@@ -11,6 +11,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, Self
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -21,7 +22,12 @@ from pydantic import (
     model_validator,
 )
 
-from data_incident_gym.artifacts import ArtifactRun, ArtifactWriter, RecoveryStatus
+from data_incident_gym.artifacts import (
+    ARTIFACT_FILENAMES,
+    ArtifactRun,
+    ArtifactWriter,
+    RecoveryStatus,
+)
 from data_incident_gym.benchmark_manifest import (
     BenchmarkManifest,
     verify_manifest,
@@ -71,11 +77,13 @@ from data_incident_gym.lab import IncidentLab
 from data_incident_gym.scenarios import load_scenario_spec
 
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
+_REVISION_PATTERN = r"^[0-9a-f]{40}$"
 _ARTIFACT_PATH_PATTERN = re.compile(r"^artifacts/[0-9a-f]{32}$")
 _REASON_CODES = frozenset({"RUN_SETUP_ERROR", "EVALUATION_FAILED"})
 _LEDGER_FILENAME = "ledger.jsonl"
 _DOCTOR_FILENAME = "doctor.json"
 _LOCK_FILENAME = ".lock"
+_INTERRUPTED_ARTIFACTS_DIRNAME = "interrupted-artifacts"
 
 
 class BenchmarkRunnerError(RuntimeError):
@@ -146,10 +154,11 @@ class BenchmarkLedgerEntry(BaseModel):
 class BenchmarkDoctorReceipt(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["p1.benchmark_doctor.v1"] = "p1.benchmark_doctor.v1"
+    schema_version: Literal["p1.benchmark_doctor.v2"] = "p1.benchmark_doctor.v2"
     manifest_id: StrictStr
     manifest_sha256: Annotated[StrictStr, Field(pattern=_DIGEST_PATTERN)]
     implementation_revision: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{40}$")]
+    checkout_revision: Annotated[StrictStr, Field(pattern=_REVISION_PATTERN)]
     result_inputs_sha256: Annotated[StrictStr, Field(pattern=_DIGEST_PATTERN)]
     checked_at: datetime
     result: DoctorResult
@@ -172,6 +181,7 @@ class BenchmarkRunResult(BaseModel):
 DoctorFactory = Callable[[], DoctorRunner]
 EvaluationRunnerFactory = Callable[[], EvaluationRunner]
 CheckoutVerifier = Callable[[BenchmarkManifest], None]
+CheckoutRevisionReader = Callable[[], str]
 Clock = Callable[[], datetime]
 
 
@@ -348,6 +358,7 @@ class BenchmarkRunner:
         artifact_writer: ArtifactWriter,
         clock: Clock = lambda: datetime.now(UTC),
         checkout_verifier: CheckoutVerifier | None = None,
+        checkout_revision_reader: CheckoutRevisionReader | None = None,
     ) -> None:
         self._manifest = manifest
         self._project_root = project_root
@@ -356,6 +367,9 @@ class BenchmarkRunner:
         self._artifact_writer = artifact_writer
         self._clock = clock
         self._checkout_verifier = checkout_verifier or self._verify_checkout
+        self._checkout_revision_reader = (
+            checkout_revision_reader or self._read_checkout_revision
+        )
 
     @classmethod
     def for_project(
@@ -476,6 +490,12 @@ class BenchmarkRunner:
             raise BenchmarkRunnerError("git checkout verification failed")
         return result.stdout.strip()
 
+    def _read_checkout_revision(self) -> str:
+        revision = self._git_output(["rev-parse", "HEAD"])
+        if re.fullmatch(_REVISION_PATTERN, revision) is None:
+            raise BenchmarkRunnerError("checkout revision is invalid")
+        return revision
+
     def _read_ledger(self, path: Path) -> dict[str, BenchmarkLedgerEntry]:
         if path.is_symlink():
             raise BenchmarkRunnerError("benchmark ledger must not be a symlink")
@@ -536,11 +556,14 @@ class BenchmarkRunner:
         self,
         path: Path,
         result: DoctorResult,
+        *,
+        checkout_revision: str,
     ) -> BenchmarkDoctorReceipt:
         receipt = BenchmarkDoctorReceipt(
             manifest_id=self._manifest.manifest_id,
             manifest_sha256=self._manifest.digest(),
             implementation_revision=self._manifest.implementation_revision,
+            checkout_revision=checkout_revision,
             result_inputs_sha256=_digest(self._manifest.result_inputs.model_dump(mode="json")),
             checked_at=_aware_utc(self._clock()),
             result=result,
@@ -555,28 +578,49 @@ class BenchmarkRunner:
             if existing != receipt:
                 raise BenchmarkRunnerError("doctor receipt already exists for another run")
             return existing
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         try:
-            with path.open("x", encoding="utf-8", newline="\n") as handle:
+            with temporary.open("x", encoding="utf-8", newline="\n") as handle:
                 handle.write(receipt.model_dump_json(indent=2) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.rename(path)
         except OSError as exc:
             raise BenchmarkRunnerError("cannot write doctor receipt") from exc
+        finally:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
         return receipt
 
-    async def _doctor(self, path: Path) -> DoctorResult:
-        if path.exists() and not path.is_symlink():
-            try:
-                receipt = BenchmarkDoctorReceipt.model_validate(
-                    json.loads(path.read_text(encoding="utf-8"))
-                )
-            except Exception as exc:
-                raise BenchmarkRunnerError("existing doctor receipt is invalid") from exc
-            if (
-                receipt.manifest_id != self._manifest.manifest_id
-                or receipt.manifest_sha256 != self._manifest.digest()
-                or receipt.implementation_revision != self._manifest.implementation_revision
-            ):
-                raise BenchmarkRunnerError("doctor receipt does not match manifest")
-            return receipt.result
+    def _read_doctor_receipt(self, path: Path) -> BenchmarkDoctorReceipt:
+        if path.is_symlink() or not path.exists():
+            raise BenchmarkRunnerError("benchmark requires a preflight receipt")
+        try:
+            receipt = BenchmarkDoctorReceipt.model_validate(
+                json.loads(path.read_text(encoding="utf-8"))
+            )
+        except Exception as exc:
+            raise BenchmarkRunnerError("existing doctor receipt is invalid") from exc
+        if (
+            receipt.manifest_id != self._manifest.manifest_id
+            or receipt.manifest_sha256 != self._manifest.digest()
+            or receipt.implementation_revision != self._manifest.implementation_revision
+        ):
+            raise BenchmarkRunnerError("doctor receipt does not match manifest")
+        if receipt.checkout_revision != self._checkout_revision_reader():
+            raise BenchmarkRunnerError("doctor receipt checkout revision does not match")
+        if receipt.result_inputs_sha256 != _digest(
+            self._manifest.result_inputs.model_dump(mode="json")
+        ):
+            raise BenchmarkRunnerError("doctor receipt result inputs do not match manifest")
+        return receipt
+
+    async def _run_doctor(
+        self,
+        path: Path,
+        *,
+        checkout_revision: str,
+    ) -> DoctorResult:
         doctor = self._doctor_factory()
         try:
             result = doctor.run()
@@ -586,8 +630,54 @@ class BenchmarkRunner:
                 raise TypeError("doctor returned an invalid result")
         except Exception:
             result = _failed_doctor()
-        self._write_doctor_receipt(path, result)
+        self._write_doctor_receipt(
+            path,
+            result,
+            checkout_revision=checkout_revision,
+        )
         return result
+
+    def _assert_unstarted_artifacts_absent(
+        self,
+        ledger: dict[str, BenchmarkLedgerEntry],
+    ) -> None:
+        artifact_root = self._project_root.resolve(strict=True) / "artifacts"
+        if artifact_root.is_symlink():
+            raise BenchmarkRunnerError("artifacts root must not be a symlink")
+        for cell in self._manifest.cells:
+            if cell.run_id in ledger:
+                continue
+            path = artifact_root / cell.run_id
+            if path.is_symlink() or path.exists():
+                raise BenchmarkRunnerError(
+                    f"artifact already exists for unstarted cell {cell.run_id}"
+                )
+
+    async def preflight(self) -> DoctorResult:
+        """Validate an untouched suite and persist its bound doctor receipt."""
+
+        self._checkout_verifier(self._manifest)
+        suite_root = self._suite_root()
+        ledger_path = suite_root / _LEDGER_FILENAME
+        doctor_path = suite_root / _DOCTOR_FILENAME
+        lock_path = suite_root / _LOCK_FILENAME
+        with _ExclusiveSuiteLock(lock_path):
+            if doctor_path.is_symlink() or doctor_path.exists():
+                raise BenchmarkRunnerError("preflight receipt already exists")
+            residual = tuple(
+                path for path in suite_root.iterdir() if path.name != _LOCK_FILENAME
+            )
+            if residual:
+                raise BenchmarkRunnerError("preflight requires an untouched benchmark suite")
+            ledger = self._read_ledger(ledger_path)
+            if ledger:
+                raise BenchmarkRunnerError("preflight requires an empty benchmark ledger")
+            self._assert_unstarted_artifacts_absent(ledger)
+            checkout_revision = self._checkout_revision_reader()
+            return await self._run_doctor(
+                doctor_path,
+                checkout_revision=checkout_revision,
+            )
 
     def _materialize_setup_error(
         self,
@@ -626,7 +716,24 @@ class BenchmarkRunner:
         ledger_path: Path,
         ledger: dict[str, BenchmarkLedgerEntry],
     ) -> None:
-        self._materialize_setup_error(cell, started_at=started_at)
+        artifact_root = self._project_root.resolve(strict=True) / "artifacts"
+        artifact_path = artifact_root / cell.run_id
+        preserved_root = self._suite_root() / _INTERRUPTED_ARTIFACTS_DIRNAME
+        preserved_path = preserved_root / cell.run_id
+        if artifact_path.is_symlink() or preserved_path.is_symlink():
+            raise BenchmarkRunnerError("interrupted artifact must not be a symlink")
+        if not self._is_setup_failure_artifact(artifact_path, cell):
+            if artifact_path.exists():
+                if preserved_path.exists():
+                    raise BenchmarkRunnerError("interrupted artifact was already preserved")
+                if preserved_root.is_symlink():
+                    raise BenchmarkRunnerError("interrupted artifact root must not be a symlink")
+                preserved_root.mkdir(exist_ok=True)
+                try:
+                    artifact_path.rename(preserved_path)
+                except OSError as exc:
+                    raise BenchmarkRunnerError("cannot preserve interrupted artifact") from exc
+            self._materialize_setup_error(cell, started_at=started_at)
         terminal = BenchmarkLedgerEntry.create(
             manifest_id=self._manifest.manifest_id,
             sequence=cell.sequence,
@@ -641,6 +748,28 @@ class BenchmarkRunner:
         self._append_ledger(ledger_path, terminal)
         ledger[cell.run_id] = terminal
 
+    def _is_setup_failure_artifact(self, path: Path, cell: object) -> bool:
+        if not path.exists() or not path.is_dir():
+            return False
+        try:
+            if {item.name for item in path.iterdir()} != set(ARTIFACT_FILENAMES):
+                return False
+            metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
+            diagnosis = json.loads((path / "diagnosis.json").read_text(encoding="utf-8"))
+            evaluation = json.loads((path / "evaluation.json").read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return (
+            metadata.get("run_id") == cell.run_id
+            and metadata.get("incident_case_id") == cell.incident_case_id
+            and metadata.get("benchmark_manifest_sha256") == self._manifest.digest()
+            and diagnosis.get("run_id") == cell.run_id
+            and diagnosis.get("status") == DiagnosisStatus.MODEL_ERROR.value
+            and diagnosis.get("summary") == "RUN_SETUP_ERROR"
+            and evaluation.get("run_id") == cell.run_id
+            and evaluation.get("status") == EvaluationStatus.FAILED.value
+        )
+
     async def run(self) -> BenchmarkRunResult:
         self._checkout_verifier(self._manifest)
         suite_root = self._suite_root()
@@ -649,29 +778,11 @@ class BenchmarkRunner:
         lock_path = suite_root / _LOCK_FILENAME
         with _ExclusiveSuiteLock(lock_path):
             ledger = self._read_ledger(ledger_path)
-            doctor_result = await self._doctor(doctor_path)
-            if doctor_result.status is DoctorStatus.FAILED:
-                for cell in self._manifest.cells:
-                    previous = ledger.get(cell.run_id)
-                    if previous is not None and previous.state == "STARTED":
-                        self._materialize_interrupted_cell(
-                            cell,
-                            started_at=previous.started_at,
-                            ledger_path=ledger_path,
-                            ledger=ledger,
-                        )
-                terminal = tuple(entry for entry in ledger.values() if entry.state != "STARTED")
-                return BenchmarkRunResult(
-                    manifest_id=self._manifest.manifest_id,
-                    status="FAILED",
-                    total_cells=len(self._manifest.cells),
-                    terminal_cells=len(terminal),
-                    completed_cells=sum(entry.state == "COMPLETED" for entry in terminal),
-                    failed_cells=sum(entry.state == "FAILED" for entry in terminal),
-                    doctor_status=doctor_result.status,
-                    doctor_path=doctor_path,
-                    ledger_path=ledger_path,
-                )
+            receipt = self._read_doctor_receipt(doctor_path)
+            doctor_result = receipt.result
+            if doctor_result.status is not DoctorStatus.PASSED:
+                raise BenchmarkRunnerError("doctor receipt is not PASSED")
+            self._assert_unstarted_artifacts_absent(ledger)
 
             for cell in self._manifest.cells:
                 previous = ledger.get(cell.run_id)

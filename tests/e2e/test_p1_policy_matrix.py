@@ -29,6 +29,7 @@ from data_incident_gym.evidence import (
     RelationHistoryFact,
     RelationSchemaFact,
 )
+from data_incident_gym.fixed_rule import FixedRuleRunner
 from data_incident_gym.lab import IncidentLab
 from data_incident_gym.run_context import resolve_run_context
 from data_incident_gym.scenarios import (
@@ -1886,8 +1887,17 @@ def _runner(project_root: Path, strategy: DiagnosticStrategy) -> EvaluationRunne
     diagnostic_settings = DiagnosticSettings(_env_file=None)
     lab = IncidentLab(settings, project_root)
 
-    def diagnosis_factory(run_id: str, selected_strategy: DiagnosticStrategy) -> DiagnosisRunner:
+    def diagnosis_factory(
+        run_id: str,
+        selected_strategy: DiagnosticStrategy,
+    ) -> DiagnosisRunner | FixedRuleRunner:
         assert selected_strategy is strategy
+        if selected_strategy is DiagnosticStrategy.FIXED_RULE:
+            return FixedRuleRunner.for_run(
+                run_id,
+                diagnostic_settings,
+                project_root,
+            )
         public_context = resolve_run_context(run_id, project_root=project_root)
         return DiagnosisRunner.for_run(
             run_id,
@@ -2058,3 +2068,80 @@ async def test_p1_function_model_policy_matrix(
         for event in trace
         if event.get("event_type") == "TOOL_CALL"
     )
+
+
+AUXILIARY_POLICY_CASES = (
+    (
+        "order_volume_within_sla",
+        DiagnosticStrategy.NO_TOOL,
+        DiagnosisStatus.MODEL_ERROR,
+        EvaluationStatus.FAILED,
+        frozenset(),
+    ),
+    (
+        "silent_payment_drop_partition_a",
+        DiagnosticStrategy.KERNEL_NO_LINEAGE,
+        DiagnosisStatus.MODEL_ERROR,
+        EvaluationStatus.FAILED,
+        frozenset({"get_dbt_lineage"}),
+    ),
+    (
+        "required_null_order_customer_a",
+        DiagnosticStrategy.KERNEL_NO_SCHEMA,
+        DiagnosisStatus.MODEL_ERROR,
+        EvaluationStatus.FAILED,
+        frozenset({"get_relation_schema"}),
+    ),
+    (
+        "order_volume_within_sla",
+        DiagnosticStrategy.FIXED_RULE,
+        DiagnosisStatus.NO_INCIDENT,
+        EvaluationStatus.PASSED,
+        frozenset(),
+    ),
+)
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize(
+    "case_id,strategy,expected_diagnosis_status,expected_evaluation_status,excluded_tools",
+    AUXILIARY_POLICY_CASES,
+    ids=lambda value: value.value if isinstance(value, DiagnosticStrategy) else str(value),
+)
+@pytest.mark.asyncio
+async def test_p1_auxiliary_policy_surfaces_complete_and_fail_closed(
+    project_root: Path,
+    case_id: str,
+    strategy: DiagnosticStrategy,
+    expected_diagnosis_status: DiagnosisStatus,
+    expected_evaluation_status: EvaluationStatus,
+    excluded_tools: frozenset[str],
+) -> None:
+    result = await _runner(project_root, strategy).run(case_id, strategy)
+
+    assert result.status is expected_evaluation_status
+    assert result.evaluation.status is expected_evaluation_status
+    assert {path.name for path in result.artifact_dir.iterdir()} == set(ARTIFACT_FILENAMES)
+
+    diagnosis = json.loads(
+        (result.artifact_dir / "diagnosis.json").read_text(encoding="utf-8")
+    )
+    assert diagnosis["status"] == expected_diagnosis_status.value
+
+    metadata = json.loads(
+        (result.artifact_dir / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata["recovery_status"] == "HEALTHY"
+
+    trace = [
+        json.loads(line)["event"]
+        for line in (result.artifact_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    tool_names = {
+        event["tool_name"]
+        for event in trace
+        if event.get("event_type") == "TOOL_CALL"
+    }
+    assert not tool_names & excluded_tools
+    if strategy is DiagnosticStrategy.NO_TOOL:
+        assert not tool_names
