@@ -103,7 +103,7 @@ def _sha256_json(value: object) -> str:
 
 def _sha256_file(path: Path) -> str:
     try:
-        return _sha256_bytes(path.read_bytes())
+        return _sha256_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
     except OSError as exc:
         raise BenchmarkManifestError(f"无法读取结果输入：{path}") from exc
 

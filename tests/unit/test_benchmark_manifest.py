@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from data_incident_gym.benchmark_manifest import (
     run_id_for_cell,
     verify_manifest,
 )
+from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import DiagnosticStrategy
 from data_incident_gym.scenarios import P1_SCENARIO_IDS
 
@@ -137,6 +139,16 @@ def test_manifest_verification_recomputes_result_inputs() -> None:
     )
     with pytest.raises(BenchmarkManifestError, match="result-input hashes"):
         verify_manifest(changed)
+
+
+def test_manifest_normalizes_evaluator_line_endings_for_portable_hash() -> None:
+    manifest = build_manifest("a" * 40)
+    evaluator_path = PROJECT_ROOT / "src" / "data_incident_gym" / "evaluation.py"
+    expected = hashlib.sha256(
+        evaluator_path.read_bytes().replace(b"\r\n", b"\n")
+    ).hexdigest()
+
+    assert manifest.result_inputs.evaluator_sha256 == expected
 
 
 def test_manifest_serialization_is_valid_json() -> None:
