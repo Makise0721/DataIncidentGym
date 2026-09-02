@@ -4,7 +4,7 @@ DataIncidentGym 是一个可复现的数据事故诊断实验场：它在真实 
 
 ## 当前状态
 
-项目当前包含 M7 的确定性基建、M8 必填字段空值故障族、M9 重复支付故障族、M10 孤立支付故障族和 M11 静默支付丢失/订单 SLA 场景，形成“健康基线 → 隔离场景 → 证据调查 → 结构化诊断 → 确定性评测 → 六文件报告 → 健康恢复”的闭环。M11 已将 P1 题库和确定性主矩阵完成到 17/17、34/34；`p1-formal-v1` Manifest 仍待 exact-head Ubuntu CI 后冻结。M7 的模型质量观察仍是历史结果 1/8，不是 P1 benchmark；94 次真实模型运行、fixed-rule 结果、聚合指标和策略优劣结论均尚未开始。
+项目当前包含 M7 的确定性基建、M8 必填字段空值故障族、M9 重复支付故障族、M10 孤立支付故障族和 M11 静默支付丢失/订单 SLA 场景，形成“健康基线 → 隔离场景 → 证据调查 → 结构化诊断 → 确定性评测 → 六文件报告 → 健康恢复”的闭环。P1 题库和确定性主矩阵已完成到 17/17、34/34；`p1-formal-v1` 已执行唯一一次，但因 harness 缺陷永久封存为 `INVALID_HARNESS`，不产生有效的 P1 真实模型 benchmark 结论，也不允许重跑或重新冻结。M7 的模型质量观察仍是历史结果 1/8，不是 P1 benchmark；post-M12 修复记录见 [M12 harness postmortem](docs/m12-harness-postmortem.md)。
 
 当前固定支持十七个 P1 场景和一个 P0 回归场景：
 
@@ -73,14 +73,14 @@ uv run data-incident-gym doctor
 
 `doctor` 会执行模型最小能力探针，成功只表示环境与工具调用能力就绪，不代表完整评测通过。
 
-M11 的正式 Manifest 只在实现提交通过 exact-head Ubuntu CI 后独占冻结；冻结和验证不发起模型请求：
+`p1-formal-v1` 的 Manifest 和正式产物属于已封存的历史批次；以下命令仅用于理解历史流程，不得再次 freeze 或 run：
 
 ```powershell
 uv run data-incident-gym benchmark freeze --manifest-id p1-formal-v1 --implementation-revision <40-hex-revision>
 uv run data-incident-gym benchmark verify --manifest config/benchmark/p1-formal-v1.json
 ```
 
-正式 `benchmark run` 属于后续 M12，必须另行确认 Manifest SHA-256；M11 不执行它。
+正式 `benchmark run` 已在 M12 执行唯一一次。harness 修复不追溯旧批次，真实模型测试保持默认 deselected；新的正式模型批次必须经过独立需求和授权。
 
 ## 运行
 

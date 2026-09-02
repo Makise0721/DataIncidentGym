@@ -1091,6 +1091,11 @@ def test_evaluator_keeps_required_confirmation_checks_applicable_on_model_error(
     assert next(
         check for check in result.checks if check.code is EvaluationCheckCode.STATUS_EXACT
     ).passed is False
+    assert next(
+        check
+        for check in result.checks
+        if check.code is EvaluationCheckCode.EVIDENCE_IDS_EXIST
+    ).passed is True
     assert all(
         check.applicability is EvaluationApplicability.APPLICABLE and not check.passed
         for check in result.checks

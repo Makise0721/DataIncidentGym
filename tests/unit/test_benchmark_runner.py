@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +25,11 @@ from data_incident_gym.evaluation import (
     EvaluationResult,
     EvaluationStatus,
 )
-from data_incident_gym.evaluation_runner import EvaluationAttemptResult, EvaluationRunner
+from data_incident_gym.evaluation_runner import (
+    EvaluationAttemptResult,
+    EvaluationRunner,
+    EvaluationWorkflowError,
+)
 
 NOW = datetime(2026, 9, 1, tzinfo=UTC)
 
@@ -103,6 +108,82 @@ class _FakeWriter:
         return Path("artifacts") / run.run_id
 
 
+def _evaluation_with_gate_failure(
+    case_id: str,
+    run_id: str,
+    failed_code: EvaluationCheckCode,
+) -> EvaluationResult:
+    base = _evaluation(case_id, run_id)
+    checks = []
+    for check in base.checks:
+        if check.code is EvaluationCheckCode.ENVIRONMENT_VERIFIED:
+            passed = failed_code is not check.code
+            update = {
+                "applicability": EvaluationApplicability.APPLICABLE,
+                "passed": passed,
+                "expected": ("PRIVATE_SCENARIO_VERIFIED",),
+                "actual": ("VERIFIED",) if passed else ("INVALID",),
+                "reason_code": f"{check.code.value}_{'PASSED' if passed else 'FAILED'}",
+            }
+        elif check.code is EvaluationCheckCode.RECOVERY_HEALTHY:
+            passed = failed_code is not check.code
+            update = {
+                "applicability": EvaluationApplicability.APPLICABLE,
+                "passed": passed,
+                "expected": ("RECOVERY_HEALTHY",),
+                "actual": ("HEALTHY",) if passed else ("FAILED",),
+                "reason_code": f"{check.code.value}_{'PASSED' if passed else 'FAILED'}",
+            }
+        elif check.code is failed_code:
+            update = {
+                "applicability": EvaluationApplicability.APPLICABLE,
+                "passed": False,
+                "expected": ("EXPECTED",),
+                "actual": ("ACTUAL",),
+                "reason_code": f"{check.code.value}_FAILED",
+            }
+        else:
+            checks.append(check)
+            continue
+        checks.append(check.model_copy(update=update))
+    checks_tuple = tuple(checks)
+    failed = tuple(check.code for check in checks_tuple if not check.passed)
+    return EvaluationResult(
+        incident_case_id=case_id,
+        run_id=run_id,
+        status=EvaluationStatus.FAILED if failed else EvaluationStatus.PASSED,
+        checks=checks_tuple,
+        failed_check_codes=failed,
+        answerability="UNAVAILABLE",
+        expected_status="UNAVAILABLE",
+    )
+
+
+class _ScriptedEvaluationRunner:
+    def __init__(self, actions: list[object]) -> None:
+        self.actions = actions
+        self.calls: list[tuple[str, DiagnosticStrategy, str]] = []
+
+    async def run(
+        self,
+        case_id: str,
+        strategy: DiagnosticStrategy,
+        *,
+        run_id: str,
+    ) -> EvaluationAttemptResult:
+        self.calls.append((case_id, strategy, run_id))
+        action = self.actions.pop(0)
+        if isinstance(action, BaseException):
+            raise action
+        return EvaluationAttemptResult(
+            incident_case_id=case_id,
+            run_id=run_id,
+            status=action.status,
+            evaluation=action,
+            artifact_dir=Path("artifacts") / run_id,
+        )
+
+
 def _runner(
     manifest,
     tmp_path: Path,
@@ -111,12 +192,14 @@ def _runner(
     calls: list[tuple[str, DiagnosticStrategy, str]],
     doctor_calls: list[str],
     writer: object | None = None,
+    evaluation_runner_factory: object | None = None,
 ) -> BenchmarkRunner:
     return BenchmarkRunner(
         manifest,
         project_root=tmp_path,
         doctor_factory=lambda: _FakeDoctor(doctor_result, doctor_calls),
-        evaluation_runner_factory=lambda: _FakeEvaluationRunner(calls),
+        evaluation_runner_factory=evaluation_runner_factory
+        or (lambda: _FakeEvaluationRunner(calls)),
         artifact_writer=writer or _FakeWriter(),
         clock=lambda: NOW,
         checkout_verifier=lambda _manifest: None,
@@ -150,6 +233,121 @@ def test_runner_verifies_before_doctor_and_executes_each_cell_once(tmp_path: Pat
     ledger_lines = ledger_path.read_text(encoding="utf-8").splitlines()
     assert len(ledger_lines) == 212
     assert doctor_calls == ["doctor"]
+
+
+def test_runner_stops_after_setup_error_and_records_stage_and_recovery(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    scripted = _ScriptedEvaluationRunner(
+        [EvaluationWorkflowError("BUILD_FAILED", recovery_succeeded=True)]
+    )
+    writer = _FakeWriter()
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        writer=writer,
+        evaluation_runner_factory=lambda: scripted,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    assert result.status == "FAILED"
+    assert result.terminal_cells == 1
+    assert result.completed_cells == 0
+    assert result.failed_cells == 1
+    assert len(scripted.calls) == 1
+    assert len(writer.runs) == 1
+    setup_run = writer.runs[0]
+    environment = next(
+        check
+        for check in setup_run.evaluation.checks
+        if check.code is EvaluationCheckCode.ENVIRONMENT_VERIFIED
+    )
+    recovery = next(
+        check
+        for check in setup_run.evaluation.checks
+        if check.code is EvaluationCheckCode.RECOVERY_HEALTHY
+    )
+    assert environment.actual == ("BUILD_FAILED",)
+    assert recovery.passed is True
+    assert all(
+        check.applicability is EvaluationApplicability.NOT_APPLICABLE
+        for check in setup_run.evaluation.checks
+        if check.code
+        not in {
+            EvaluationCheckCode.ENVIRONMENT_VERIFIED,
+            EvaluationCheckCode.RECOVERY_HEALTHY,
+        }
+    )
+    assert setup_run.diagnosis_run.trace[0].reason_code == "BUILD_FAILED"
+    ledger = runner._suite_root() / "ledger.jsonl"
+    assert len(ledger.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_runner_continues_after_quality_failure_with_healthy_gates(tmp_path: Path) -> None:
+    manifest = build_manifest("b" * 40)
+    scripted = _ScriptedEvaluationRunner(
+        [
+            _evaluation_with_gate_failure(
+                manifest.cells[0].incident_case_id,
+                manifest.cells[0].run_id,
+                EvaluationCheckCode.STATUS_EXACT,
+            ),
+            *(
+                _evaluation(cell.incident_case_id, cell.run_id)
+                for cell in manifest.cells[1:]
+            ),
+        ]
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        evaluation_runner_factory=lambda: scripted,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    assert result.status == "FAILED"
+    assert result.terminal_cells == 106
+    assert result.completed_cells == 105
+    assert result.failed_cells == 1
+    assert len(scripted.calls) == 106
+
+
+def test_runner_stops_after_applicable_environment_failure(tmp_path: Path) -> None:
+    manifest = build_manifest("c" * 40)
+    scripted = _ScriptedEvaluationRunner(
+        [
+            _evaluation_with_gate_failure(
+                manifest.cells[0].incident_case_id,
+                manifest.cells[0].run_id,
+                EvaluationCheckCode.ENVIRONMENT_VERIFIED,
+            )
+        ]
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        evaluation_runner_factory=lambda: scripted,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    assert result.status == "FAILED"
+    assert result.terminal_cells == 1
+    assert result.failed_cells == 1
+    assert len(scripted.calls) == 1
 
 
 def test_preflight_runs_doctor_and_writes_receipt_before_execution(tmp_path: Path) -> None:

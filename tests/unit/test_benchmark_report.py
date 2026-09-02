@@ -333,9 +333,7 @@ def test_reporter_retains_legal_safety_gate_failure_as_invalid_conclusion(tmp_pa
     assert summary["invalid_gates"][0]["run_id"] == manifest.cells[0].run_id
 
 
-def test_reporter_independently_rejects_tool_outside_strategy_allowlist(
-    tmp_path: Path,
-) -> None:
+def test_reporter_accepts_legal_fixed_rule_evidence_tool(tmp_path: Path) -> None:
     suite_root, artifact_root = _write_fixture(tmp_path)
     manifest = build_manifest("a" * 40)
     fixed_cell = next(
@@ -352,6 +350,39 @@ def test_reporter_independently_rejects_tool_outside_strategy_allowlist(
             "event_type": "TOOL_CALL",
             "tool_name": "get_dbt_run_results",
             "arguments": {"run_id": fixed_cell.run_id},
+            "fingerprint": "e" * 64,
+            "evidence_ids": [],
+            "error_code": None,
+            "elapsed_ms": 0,
+        },
+    }
+    trace_path.write_text(
+        "\n".join(json.dumps(item) for item in [tool_call, *envelopes]) + "\n",
+        encoding="utf-8",
+    )
+
+    BenchmarkReporter(manifest, suite_root).write()
+
+
+def test_reporter_independently_rejects_tool_outside_strategy_allowlist(
+    tmp_path: Path,
+) -> None:
+    suite_root, artifact_root = _write_fixture(tmp_path)
+    manifest = build_manifest("a" * 40)
+    no_tool_cell = next(
+        cell for cell in manifest.cells if cell.strategy is DiagnosticStrategy.NO_TOOL
+    )
+    trace_path = artifact_root / no_tool_cell.run_id / "trace.jsonl"
+    envelopes = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    for envelope in envelopes:
+        envelope["sequence"] += 1
+    tool_call = {
+        "schema_version": "p1.trace.v1",
+        "sequence": 1,
+        "event": {
+            "event_type": "TOOL_CALL",
+            "tool_name": "get_dbt_run_results",
+            "arguments": {"run_id": no_tool_cell.run_id},
             "fingerprint": "f" * 64,
             "evidence_ids": [],
             "error_code": None,

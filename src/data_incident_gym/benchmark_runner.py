@@ -71,6 +71,7 @@ from data_incident_gym.evaluation import (
 from data_incident_gym.evaluation_runner import (
     EvaluationAttemptResult,
     EvaluationRunner,
+    EvaluationWorkflowError,
 )
 from data_incident_gym.fixed_rule import FixedRuleRunner, fixed_rule_policy_identity
 from data_incident_gym.lab import IncidentLab
@@ -223,39 +224,55 @@ def _setup_failure_evaluation(
     incident_case_id: str,
     run_id: str,
     *,
+    stage_code: str,
     recovery_succeeded: bool,
 ) -> EvaluationResult:
-    checks = tuple(
-        EvaluationCheck(
-            code=code,
-            applicability=EvaluationApplicability.APPLICABLE,
-            passed=code is EvaluationCheckCode.RECOVERY_HEALTHY and recovery_succeeded,
-            expected=(
-                ("RECOVERY_HEALTHY",)
-                if code is EvaluationCheckCode.RECOVERY_HEALTHY
-                else ("RUN_SETUP_COMPLETE",)
-            ),
-            actual=(
-                ("HEALTHY",)
-                if code is EvaluationCheckCode.RECOVERY_HEALTHY and recovery_succeeded
-                else ("RUN_SETUP_ERROR",)
-            ),
-            reason_code=(
-                f"{code.value}_PASSED"
-                if code is EvaluationCheckCode.RECOVERY_HEALTHY and recovery_succeeded
-                else f"{code.value}_FAILED"
-            ),
-        )
-        for code in EvaluationCheckCode
-    )
+    checks = []
+    for code in EvaluationCheckCode:
+        if code is EvaluationCheckCode.ENVIRONMENT_VERIFIED:
+            checks.append(
+                EvaluationCheck(
+                    code=code,
+                    applicability=EvaluationApplicability.APPLICABLE,
+                    passed=False,
+                    expected=("RUN_SETUP_COMPLETE",),
+                    actual=(stage_code,),
+                    reason_code=f"{code.value}_FAILED",
+                )
+            )
+        elif code is EvaluationCheckCode.RECOVERY_HEALTHY:
+            checks.append(
+                EvaluationCheck(
+                    code=code,
+                    applicability=EvaluationApplicability.APPLICABLE,
+                    passed=recovery_succeeded,
+                    expected=("RECOVERY_HEALTHY",),
+                    actual=("HEALTHY",) if recovery_succeeded else ("FAILED",),
+                    reason_code=(
+                        f"{code.value}_PASSED"
+                        if recovery_succeeded
+                        else f"{code.value}_FAILED"
+                    ),
+                )
+            )
+        else:
+            checks.append(
+                EvaluationCheck(
+                    code=code,
+                    applicability=EvaluationApplicability.NOT_APPLICABLE,
+                    passed=True,
+                    expected=("NOT_APPLICABLE",),
+                    actual=("NOT_APPLICABLE",),
+                    reason_code="NOT_APPLICABLE",
+                )
+            )
+    checks_tuple = tuple(checks)
     return EvaluationResult(
         incident_case_id=incident_case_id,
         run_id=run_id,
         status=EvaluationStatus.FAILED,
-        checks=checks,
-        failed_check_codes=tuple(
-            check.code for check in checks if not check.passed
-        ),
+        checks=checks_tuple,
+        failed_check_codes=tuple(check.code for check in checks_tuple if not check.passed),
         answerability="UNAVAILABLE",
         expected_status="UNAVAILABLE",
     )
@@ -265,6 +282,7 @@ def _setup_failure_diagnosis(
     *,
     run_id: str,
     strategy: DiagnosticStrategy,
+    stage_code: str = "RUN_SETUP_ERROR",
 ) -> DiagnosisRunResult:
     identity: PolicyIdentity = (
         fixed_rule_policy_identity()
@@ -281,7 +299,7 @@ def _setup_failure_diagnosis(
     trace: list[object] = [
         EvidenceGateTraceEvent(
             event_type="EVIDENCE_GATE",
-            reason_code="RUN_SETUP_ERROR",
+            reason_code=stage_code,
             accepted=True,
         )
     ]
@@ -684,6 +702,7 @@ class BenchmarkRunner:
         cell: object,
         *,
         started_at: datetime,
+        stage_code: str = "RUN_SETUP_ERROR",
         recovery_succeeded: bool = False,
     ) -> Path:
         run = ArtifactRun(
@@ -699,10 +718,12 @@ class BenchmarkRunner:
             diagnosis_run=_setup_failure_diagnosis(
                 run_id=cell.run_id,
                 strategy=cell.strategy,
+                stage_code=stage_code,
             ),
             evaluation=_setup_failure_evaluation(
                 cell.incident_case_id,
                 cell.run_id,
+                stage_code=stage_code,
                 recovery_succeeded=recovery_succeeded,
             ),
         )
@@ -820,13 +841,36 @@ class BenchmarkRunner:
                         "COMPLETED" if attempt.status is EvaluationStatus.PASSED else "FAILED"
                     )
                     reason = None if state == "COMPLETED" else "EVALUATION_FAILED"
+                except EvaluationWorkflowError as error:
+                    self._materialize_setup_error(
+                        cell,
+                        started_at=started_at,
+                        stage_code=error.code,
+                        recovery_succeeded=error.recovery_succeeded,
+                    )
+                    state = "FAILED"
+                    reason = "RUN_SETUP_ERROR"
+                    stop_after_cell = True
                 except Exception:
                     self._materialize_setup_error(
                         cell,
                         started_at=started_at,
+                        stage_code="RUN_SETUP_ERROR",
                     )
                     state = "FAILED"
                     reason = "RUN_SETUP_ERROR"
+                    stop_after_cell = True
+                else:
+                    stop_after_cell = any(
+                        check.code
+                        in {
+                            EvaluationCheckCode.ENVIRONMENT_VERIFIED,
+                            EvaluationCheckCode.RECOVERY_HEALTHY,
+                        }
+                        and check.applicability is EvaluationApplicability.APPLICABLE
+                        and not check.passed
+                        for check in attempt.evaluation.checks
+                    )
                 terminal = BenchmarkLedgerEntry.create(
                     manifest_id=self._manifest.manifest_id,
                     sequence=cell.sequence,
@@ -840,6 +884,8 @@ class BenchmarkRunner:
                 )
                 self._append_ledger(ledger_path, terminal)
                 ledger[cell.run_id] = terminal
+                if stop_after_cell:
+                    break
 
             terminal = tuple(entry for entry in ledger.values() if entry.state != "STARTED")
             completed = sum(entry.state == "COMPLETED" for entry in terminal)

@@ -41,7 +41,7 @@ from data_incident_gym.scenarios import (
     deleted_payment_rows,
 )
 
-EVALUATOR_VERSION = "p1.evaluator.v1"
+EVALUATOR_VERSION = "p1.evaluator.v2"
 
 
 class EvaluationStatus(StrEnum):
@@ -1003,13 +1003,13 @@ class DeterministicEvaluator:
         records = diagnosis_run.evidence_records
         inventory = {record.evidence_id: record for record in records}
         cited_ids = tuple(dict.fromkeys(diagnosis.evidence_ids))
-        unknown = tuple(item for item in cited_ids if item not in inventory)
         all_claim_ids = tuple(
             evidence_id
             for claim in diagnosis.claims
             for evidence_id in claim.evidence_ids
         )
         all_citations = tuple(dict.fromkeys((*cited_ids, *all_claim_ids)))
+        unknown = tuple(item for item in all_citations if item not in inventory)
         trace_events = tuple(
             event for event in diagnosis_run.trace if isinstance(event, ToolTraceEvent)
         )
@@ -1087,9 +1087,7 @@ class DeterministicEvaluator:
             ),
             _check(
                 EvaluationCheckCode.EVIDENCE_IDS_EXIST,
-                bool(cited_ids)
-                and not unknown
-                and all(item in inventory for item in all_claim_ids),
+                not unknown,
                 ("ALL_CITED_IDS_EXIST",),
                 unknown if unknown else ("ALL_CITED_IDS_EXIST",),
             ),

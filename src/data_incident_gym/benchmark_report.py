@@ -485,7 +485,7 @@ class BenchmarkReporter:
         if terminal.evidence_inventory != evidence_ids:
             self._fail(f"trace evidence inventory does not match evidence artifact: {cell.run_id}")
         allowed_tools = set(_EVIDENCE_TOOL_NAMES)
-        if cell.strategy in {DiagnosticStrategy.NO_TOOL, DiagnosticStrategy.FIXED_RULE}:
+        if cell.strategy is DiagnosticStrategy.NO_TOOL:
             allowed_tools.clear()
         elif cell.strategy is DiagnosticStrategy.KERNEL_NO_LINEAGE:
             allowed_tools.remove("get_dbt_lineage")

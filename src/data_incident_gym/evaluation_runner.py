@@ -27,8 +27,9 @@ from data_incident_gym.scenarios import ScenarioSpec, load_scenario_spec
 
 
 class EvaluationWorkflowError(RuntimeError):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, recovery_succeeded: bool = False) -> None:
         self.code = code
+        self.recovery_succeeded = recovery_succeeded
         super().__init__(code)
         self.__cause__ = None
         self.__context__ = None
@@ -54,8 +55,8 @@ class EvaluationAttemptResult(BaseModel):
         return self
 
 
-def _raise_workflow_error(code: str) -> NoReturn:
-    raise EvaluationWorkflowError(code)
+def _raise_workflow_error(code: str, *, recovery_succeeded: bool = False) -> NoReturn:
+    raise EvaluationWorkflowError(code, recovery_succeeded=recovery_succeeded)
 
 
 def _failed_evaluation(
@@ -165,7 +166,7 @@ class EvaluationRunner:
         if run_id is not None and re.fullmatch(RUN_ID_PATTERN, run_id) is None:
             raise ValueError("preassigned run_id must be 32 lowercase hexadecimal characters")
         started_at = self._clock()
-        mutation_started = False
+        recovery_required = True
         recovery_succeeded = False
         scenario_run: ScenarioRun | None = None
         diagnosis_run: DiagnosisRunResult | None = None
@@ -174,7 +175,6 @@ class EvaluationRunner:
 
         try:
             self._lab.reset(incident_case_id)
-            mutation_started = True
             stage = "PREPARE"
             self._lab.prepare(incident_case_id)
             stage = "BUILD"
@@ -190,7 +190,7 @@ class EvaluationRunner:
         except Exception:
             primary_error_code = f"{stage}_FAILED"
         finally:
-            if mutation_started:
+            if recovery_required:
                 try:
                     recovery_succeeded = (
                         self._lab.restore(incident_case_id).state == "HEALTHY"
@@ -203,9 +203,15 @@ class EvaluationRunner:
         if primary_error_code is not None and (
             scenario_run is None or diagnosis_run is None
         ):
-            _raise_workflow_error(primary_error_code)
+            _raise_workflow_error(
+                primary_error_code,
+                recovery_succeeded=recovery_succeeded,
+            )
         if scenario_run is None or diagnosis_run is None:
-            _raise_workflow_error("DIAGNOSIS_FAILED")
+            _raise_workflow_error(
+                "DIAGNOSIS_FAILED",
+                recovery_succeeded=recovery_succeeded,
+            )
 
         try:
             scenario = self._private_scenario_loader(incident_case_id)
@@ -270,9 +276,15 @@ class EvaluationRunner:
                 artifact_dir=artifact_dir,
             )
         except (TypeError, ValueError, ValidationError):
-            _raise_workflow_error("ARTIFACT_WRITE_FAILED")
+            _raise_workflow_error(
+                "ARTIFACT_WRITE_FAILED",
+                recovery_succeeded=recovery_succeeded,
+            )
         except Exception:
-            _raise_workflow_error("ARTIFACT_WRITE_FAILED")
+            _raise_workflow_error(
+                "ARTIFACT_WRITE_FAILED",
+                recovery_succeeded=recovery_succeeded,
+            )
 
 
 __all__ = [
