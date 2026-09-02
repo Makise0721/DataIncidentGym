@@ -1,626 +1,121 @@
-import json
-import re
+from __future__ import annotations
+
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
 from typer.testing import CliRunner
 
 import data_incident_gym.cli as cli
-from data_incident_gym.baseline import BaselineError, make_baseline_summary
-from data_incident_gym.diagnosis import Diagnosis, DiagnosisMetrics, DiagnosisRunResult
-from data_incident_gym.diagnostic_kernel import (
-    Hypothesis,
-    InvestigationState,
-    KernelFinalStatus,
-    KernelStateTraceEvent,
+from data_incident_gym.benchmark_manifest import MANIFEST_PATH, BenchmarkManifestError
+from data_incident_gym.cli import (
+    CliStrategy,
+    _canonical_benchmark_manifest_path,
+    _diagnostic_strategy,
+    app,
 )
-from data_incident_gym.doctor import (
-    DoctorCheck,
-    DoctorCheckCode,
-    DoctorResult,
-    DoctorStatus,
-)
-from data_incident_gym.evaluation import (
-    EvaluationCheck,
-    EvaluationCheckCode,
-    EvaluationResult,
-    EvaluationStatus,
-)
-from data_incident_gym.evaluation_runner import EvaluationAttemptResult
-from data_incident_gym.incidents import IncidentCaseError
-from data_incident_gym.lab import InvalidIncidentState
-from data_incident_gym.run_context import ActiveRun, RunContextError
+from data_incident_gym.config import PROJECT_ROOT
+from data_incident_gym.diagnosis import DiagnosticStrategy
+from data_incident_gym.doctor import DoctorStatus
+from data_incident_gym.scenarios import SUPPORTED_SCENARIO_IDS
 
 runner = CliRunner()
-_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
-def _plain_help(text: str) -> str:
-    return _ANSI_ESCAPE.sub("", text)
-
-
-def _summary() -> SimpleNamespace:
-    summary = make_baseline_summary("analytics", ())
-    return SimpleNamespace(
-        schema=summary.schema,
-        relations=summary.relations,
-        fingerprint=summary.fingerprint,
-    )
-
-
-def test_pipeline_build_success_does_not_call_real_infrastructure(monkeypatch) -> None:
-    summary = _summary()
-
-    class FakeBuilder:
-        def build(self):
-            return summary
-
-    monkeypatch.setattr(cli, "create_baseline_builder", lambda: FakeBuilder())
-
-    result = runner.invoke(cli.app, ["pipeline", "build"])
+def test_top_level_help_lists_m7_commands_and_scenarios() -> None:
+    result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    assert "健康基线构建成功" in result.stdout
-    assert "schema: analytics" in result.stdout
-    assert "relations: 0" in result.stdout
-    assert f"fingerprint: {summary.fingerprint}" in result.stdout
-    assert "summary: .dig/baseline-summary.json" in result.stdout
+    assert "diagnose" in result.stdout
+    assert "doctor" in result.stdout
 
 
-def test_pipeline_build_baseline_error_is_chinese_stderr_without_traceback(monkeypatch) -> None:
-    class FakeBuilder:
-        def build(self):
-            raise BaselineError("执行 dbt 失败")
+def test_eval_help_exposes_both_strategies_and_catalog() -> None:
+    result = runner.invoke(app, ["eval", "run", "--help"])
 
-    monkeypatch.setattr(cli, "create_baseline_builder", lambda: FakeBuilder())
-
-    result = runner.invoke(cli.app, ["pipeline", "build"])
-
-    assert result.exit_code != 0
-    assert "健康基线构建失败：执行 dbt 失败" in result.stderr
-    assert "Traceback" not in result.stderr
-    assert "Traceback" not in result.stdout
+    assert result.exit_code == 0
+    help_text = click.unstyle(result.stdout)
+    assert "--strategy" in help_text
+    assert all(case_id in help_text for case_id in SUPPORTED_SCENARIO_IDS)
 
 
-def test_help_is_in_chinese_for_app_pipeline_and_build() -> None:
-    app_help = runner.invoke(cli.app, ["--help"])
-    pipeline_help = runner.invoke(cli.app, ["pipeline", "--help"])
-    build_help = runner.invoke(cli.app, ["pipeline", "build", "--help"])
-
-    assert app_help.exit_code == 0
-    assert "可复现的数据事故诊断实验场" in app_help.stdout
-    assert pipeline_help.exit_code == 0
-    assert "构建并检查 dbt 数据管道" in pipeline_help.stdout
-    assert build_help.exit_code == 0
-    assert "重置 seeds，运行 dbt build，并生成健康基线摘要" in build_help.stdout
-
-
-def test_lab_commands_delegate_without_real_infrastructure(monkeypatch) -> None:
-    class FakeLab:
-        def reset(self, case_id: str):
-            assert case_id == "schema_rename_payment_amount"
-            return SimpleNamespace(state="HEALTHY", fingerprint="a" * 64)
-
-        def inject(self, case_id: str):
-            assert case_id == "schema_rename_payment_amount"
-            return SimpleNamespace(state="INJECTED", fingerprint="b" * 64)
-
-        def build(self, case_id: str):
-            assert case_id == "schema_rename_payment_amount"
-            return SimpleNamespace(
-                run_id="0123456789abcdef0123456789abcdef",
-                dbt_exit_code=1,
-                artifact_dir=Path(".dig/lab/runs/0123456789abcdef0123456789abcdef"),
-                verification=SimpleNamespace(status="EXPECTED_FAILURE"),
-            )
-
-    monkeypatch.setattr(cli, "create_incident_lab", lambda: FakeLab())
-
-    reset = runner.invoke(cli.app, ["lab", "reset", "schema_rename_payment_amount"])
-    inject = runner.invoke(cli.app, ["lab", "inject", "schema_rename_payment_amount"])
-    build = runner.invoke(cli.app, ["lab", "build", "schema_rename_payment_amount"])
-
-    assert reset.exit_code == 0
-    assert "HEALTHY" in reset.stdout
-    assert inject.exit_code == 0
-    assert "INJECTED" in inject.stdout
-    assert build.exit_code == 0
-    assert "EXPECTED_FAILURE" in build.stdout
-    assert "dbt_exit_code: 1" in build.stdout
-
-
-def test_lab_error_is_chinese_stderr_with_nonzero_exit(monkeypatch) -> None:
-    class FakeLab:
-        def inject(self, case_id: str):
-            raise InvalidIncidentState("当前状态：INJECTED")
-
-    monkeypatch.setattr(cli, "create_incident_lab", lambda: FakeLab())
-
-    result = runner.invoke(
-        cli.app,
-        ["lab", "inject", "schema_rename_payment_amount"],
+def test_cli_strategy_maps_to_the_common_diagnostic_strategy() -> None:
+    assert _diagnostic_strategy(CliStrategy.STATIC_SKILL) is DiagnosticStrategy.STATIC_SKILL
+    assert (
+        _diagnostic_strategy(CliStrategy.DIAGNOSTIC_KERNEL)
+        is DiagnosticStrategy.DIAGNOSTIC_KERNEL
     )
 
-    assert result.exit_code != 0
-    assert "故障实验失败" in result.stderr
-    assert "INVALID_INCIDENT_STATE" in result.stderr
-    assert "当前状态：INJECTED" in result.stderr
-    assert "Traceback" not in result.stderr
-    assert "Traceback" not in result.stdout
+
+def test_cli_benchmark_commands_use_the_canonical_manifest_path() -> None:
+    assert _canonical_benchmark_manifest_path(MANIFEST_PATH) == (
+        PROJECT_ROOT / MANIFEST_PATH
+    ).resolve()
+
+    with pytest.raises(BenchmarkManifestError, match="config/benchmark/p1-formal-v1.json"):
+        _canonical_benchmark_manifest_path(Path("other" , "manifest.json"))
 
 
-def test_incident_case_error_uses_stable_error_code(monkeypatch) -> None:
-    class FakeLab:
-        def reset(self, case_id: str):
-            raise IncidentCaseError("TEST_REDACTED_VALUE")
+def test_benchmark_help_exposes_preflight_report_and_one_shot_run() -> None:
+    result = runner.invoke(app, ["benchmark", "--help"])
 
-    monkeypatch.setattr(cli, "create_incident_lab", lambda: FakeLab())
-
-    result = runner.invoke(
-        cli.app,
-        ["lab", "reset", "schema_rename_payment_amount"],
-    )
-
-    assert result.exit_code != 0
-    assert "故障实验失败" in result.stderr
-    assert "INCIDENT_CASE_ERROR" in result.stderr
-    assert "TEST_REDACTED_VALUE" in result.stderr
-    assert "Traceback" not in result.stderr
+    assert result.exit_code == 0
+    help_text = click.unstyle(result.stdout)
+    assert "preflight" in help_text
+    assert "report" in help_text
+    assert "run" in help_text
 
 
-def test_lab_help_is_chinese_and_lists_only_m2_actions() -> None:
-    lab_help = runner.invoke(cli.app, ["lab", "--help"])
-
-    assert lab_help.exit_code == 0
-    assert "重置、注入并复现固定数据故障" in lab_help.stdout
-    assert "reset" in lab_help.stdout
-    assert "inject" in lab_help.stdout
-    assert "build" in lab_help.stdout
-    for forbidden in (
-        "replay",
-        "evidence",
-        "diagnose",
-        "eval",
-        "--sql",
-        "--table",
-        "--column",
-        "--skip-seed",
-        "--run-id",
-        "--path",
-    ):
-        assert forbidden not in lab_help.stdout
-
-
-def test_lab_registers_only_reset_inject_and_build() -> None:
-    assert {
-        command.name for command in cli.lab_app.registered_commands
-    } == {"reset", "inject", "build"}
-
-
-def test_lab_rejects_unscoped_options_and_extra_arguments_before_delegation(
-    monkeypatch,
+def test_benchmark_preflight_uses_confirmed_manifest_without_starting_cells(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_if_called():
-        raise AssertionError("CLI parser should reject the invocation first")
+    manifest = SimpleNamespace(manifest_id="p1-formal-v1")
 
-    monkeypatch.setattr(cli, "create_incident_lab", fail_if_called)
-    invalid_invocations = (
-        ["lab", "reset", "schema_rename_payment_amount", "--sql", "select 1"],
-        ["lab", "inject", "schema_rename_payment_amount", "--table", "raw_payments"],
-        ["lab", "build", "schema_rename_payment_amount", "--column", "amount"],
-        ["lab", "reset", "schema_rename_payment_amount", "--skip-seed"],
-        ["lab", "reset", "schema_rename_payment_amount", "--run-id", "run"],
-        ["lab", "reset", "schema_rename_payment_amount", "--path", "run"],
-        ["lab", "reset", "schema_rename_payment_amount", "extra"],
-    )
+    class StubRunner:
+        async def preflight(self):
+            return SimpleNamespace(status=DoctorStatus.PASSED)
 
-    for invocation in invalid_invocations:
-        result = runner.invoke(cli.app, invocation)
-        assert result.exit_code == 2
-
-
-def _diagnosis(status: str) -> Diagnosis:
-    if status == "CONFIRMED":
-        return Diagnosis(
-            status=status,
-            incident_case_id="schema_rename_payment_amount",
-            run_id="a" * 32,
-            root_cause_code="SOURCE_SCHEMA_COLUMN_RENAMED",
-            summary="Evidence confirms the incident.",
-            affected_assets=("stg_payments",),
-            evidence_ids=("ev_" + "b" * 64,),
-            recommended_actions=("Collect additional evidence before making a change.",),
-            confidence=0.9,
-        )
-    if status == "INSUFFICIENT_EVIDENCE":
-        return Diagnosis(
-            status=status,
-            incident_case_id="schema_rename_payment_amount",
-            run_id="a" * 32,
-            root_cause_code=None,
-            summary="INSUFFICIENT_EVIDENCE",
-            affected_assets=(),
-            evidence_ids=(),
-            recommended_actions=("Collect additional evidence before making a change.",),
-            confidence=0.0,
-        )
-    return Diagnosis(
-        status="MODEL_ERROR",
-        incident_case_id="schema_rename_payment_amount",
-        run_id="a" * 32,
-        root_cause_code=None,
-        summary="MODEL_RUNTIME_ERROR",
-        affected_assets=(),
-        evidence_ids=(),
-        recommended_actions=("Collect additional evidence before making a change.",),
-        confidence=0.0,
-    )
-
-
-def _diagnosis_result(status: str) -> DiagnosisRunResult:
-    final_status = KernelFinalStatus(status)
-    state = InvestigationState(
-        schema_version="m6.investigation.v1",
-        incident_case_id="schema_rename_payment_amount",
-        run_id="a" * 32,
-        revision=0,
-        allowed_root_cause_codes=(
-            "SOURCE_SCHEMA_COLUMN_RENAMED",
-            "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
-        ),
-        hypotheses=(
-            Hypothesis(
-                hypothesis_id="h_selected",
-                root_cause_code="SOURCE_SCHEMA_COLUMN_RENAMED",
-            ),
-        )
-        if status == "CONFIRMED"
-        else (),
-        gaps=(),
-        assessments=(),
-        claims=(),
-        evidence_inventory=(),
-        tool_fingerprints=(),
-        model_request_limit=8,
-        model_requests_used=1,
-        model_requests_remaining=7,
-        tool_call_limit=8,
-        tool_calls_used=0,
-        tool_calls_remaining=8,
-        final_status=final_status,
-        gate_reason=("MODEL_RUNTIME_ERROR" if status == "MODEL_ERROR" else status),
-        selected_hypothesis_id=("h_selected" if status == "CONFIRMED" else None),
-    )
-    return DiagnosisRunResult(
-        diagnosis=_diagnosis(status),
-        evidence_records=(),
-        trace=(KernelStateTraceEvent(event_type="KERNEL_STATE", state=state),),
-        investigation_state=state,
-        metrics=DiagnosisMetrics(
-            provider="openai-compatible",
-            model="mimo-v2.5",
-            model_requests=1,
-            input_tokens=0,
-            output_tokens=0,
-            tool_call_attempts=0,
-            successful_tool_calls=0,
-            elapsed_ms=1,
-        ),
-    )
-
-
-def test_top_level_help_adds_only_diagnose_and_diagnose_options_are_bounded() -> None:
-    app_help = runner.invoke(cli.app, ["--help"])
-    diagnose_help = runner.invoke(cli.app, ["diagnose", "--help"])
-    diagnose_help_text = _plain_help(diagnose_help.stdout)
-
-    assert app_help.exit_code == 0
-    assert "diagnose" in app_help.stdout
-    assert {command.name for command in cli.app.registered_commands} == {"diagnose", "doctor"}
-    assert diagnose_help.exit_code == 0
-    assert "case_id" in diagnose_help_text
-    assert "--run-id" in diagnose_help_text
-    assert "schema_rename_payment_amount" in diagnose_help_text
-    assert "schema_type_change_payment_amount" in diagnose_help_text
-    assert "Ollama" not in diagnose_help_text
-    assert "MiMo" not in diagnose_help_text
-    for forbidden in (
-        "--path",
-        "--sql",
-        "--table",
-        "--prompt",
-        "--model",
-        "--base-url",
-        "--budget",
-    ):
-        assert forbidden not in diagnose_help_text
-
-
-def test_diagnose_active_and_explicit_run_use_only_case_and_optional_run_id(monkeypatch) -> None:
-    calls: list[tuple[str, str]] = []
-
-    class FakeRunner:
-        async def diagnose(self, case_id: str):
-            calls.append(("diagnose", case_id))
-            return _diagnosis_result("INSUFFICIENT_EVIDENCE")
-
-    def fake_factory(run_id: str):
-        calls.append(("runner", run_id))
-        return FakeRunner()
-
-    monkeypatch.setattr(cli, "create_diagnosis_runner", fake_factory)
     monkeypatch.setattr(
         cli,
-        "resolve_active_run",
-        lambda **_: ActiveRun(
-            "schema_rename_payment_amount", "a" * 32, "m4.active_fault_run.v1", "EXPECTED_FAILURE"
-        ),
+        "_confirmed_benchmark_manifest",
+        lambda path, digest: (path, manifest),
     )
+    monkeypatch.setattr(cli, "create_benchmark_runner", lambda loaded: StubRunner())
 
-    active = runner.invoke(cli.app, ["diagnose", "schema_rename_payment_amount"])
-    explicit = runner.invoke(
-        cli.app,
-        ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32],
-    )
-
-    assert active.exit_code == 2
-    assert explicit.exit_code == 2
-    assert calls == [
-        ("runner", "a" * 32),
-        ("diagnose", "schema_rename_payment_amount"),
-        ("runner", "a" * 32),
-        ("diagnose", "schema_rename_payment_amount"),
-    ]
-
-
-def test_diagnose_confirmed_prints_chinese_message_and_strict_json(monkeypatch) -> None:
-    class FakeRunner:
-        async def diagnose(self, case_id: str):
-            return _diagnosis_result("CONFIRMED")
-
-    monkeypatch.setattr(cli, "create_diagnosis_runner", lambda _: FakeRunner())
     result = runner.invoke(
-        cli.app, ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32]
+        app,
+        ["benchmark", "preflight", "--manifest", "manifest.json", "--confirm-sha256", "abc"],
     )
 
     assert result.exit_code == 0
-    assert "诊断完成" in result.stdout
-    payload = json.loads(result.stdout[result.stdout.index("{") :])
-    assert payload == _diagnosis("CONFIRMED").model_dump(mode="json")
-    assert "trace" not in payload
-    assert "metrics" not in payload
+    assert "status: PASSED" in result.stdout
+    assert "started_cells: 0" in result.stdout
 
 
-def test_diagnose_insufficient_is_structured_exit_2(monkeypatch) -> None:
-    class FakeRunner:
-        async def diagnose(self, case_id: str):
-            return _diagnosis_result("INSUFFICIENT_EVIDENCE")
-
-    monkeypatch.setattr(cli, "create_diagnosis_runner", lambda _: FakeRunner())
-    result = runner.invoke(
-        cli.app, ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32]
-    )
-
-    assert result.exit_code == 2
-    assert "INSUFFICIENT_EVIDENCE" in result.stdout
-    assert "Traceback" not in result.stdout + result.stderr
-
-
-@pytest.mark.parametrize("status", ["MODEL_ERROR"])
-def test_diagnose_model_error_is_safe_exit_1(monkeypatch, status: str) -> None:
-    class FakeRunner:
-        async def diagnose(self, case_id: str):
-            return _diagnosis_result(status)
-
-    monkeypatch.setattr(cli, "create_diagnosis_runner", lambda _: FakeRunner())
-    result = runner.invoke(
-        cli.app, ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32]
-    )
-
-    assert result.exit_code == 1
-    assert "MODEL_RUNTIME_ERROR" in result.stdout
-    assert "Traceback" not in result.stdout + result.stderr
-
-
-def test_diagnose_preflight_and_provider_errors_are_redacted(monkeypatch) -> None:
+def test_benchmark_report_uses_confirmed_manifest_and_read_only_reporter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    manifest = SimpleNamespace(manifest_id="p1-formal-v1")
+    summary = tmp_path / "summary.json"
+    report = tmp_path / "report.md"
     monkeypatch.setattr(
         cli,
-        "resolve_active_run",
-        lambda **_: (_ for _ in ()).throw(
-            RunContextError("provider=raw password=TEST_REDACTED_VALUE C:\\secret\\run.json")
-        ),
+        "_confirmed_benchmark_manifest",
+        lambda path, digest: (path, manifest),
     )
-    preflight = runner.invoke(cli.app, ["diagnose", "schema_rename_payment_amount"])
-
-    assert preflight.exit_code == 1
-    assert "诊断失败" in preflight.stderr
-    assert "TEST_REDACTED_VALUE" not in preflight.stdout + preflight.stderr
-    assert "C:\\secret\\run.json" not in preflight.stdout + preflight.stderr
-    assert "Traceback" not in preflight.stdout + preflight.stderr
-
-    class FailingRunner:
-        async def diagnose(self, case_id: str):
-            raise RuntimeError(
-                "provider raw exception api_key=TEST_REDACTED_VALUE C:\\secret\\trace.log"
-            )
-
-    monkeypatch.setattr(cli, "create_diagnosis_runner", lambda _: FailingRunner())
-    provider = runner.invoke(
-        cli.app,
-        ["diagnose", "schema_rename_payment_amount", "--run-id", "a" * 32],
-    )
-    assert provider.exit_code == 1
-    assert "TEST_REDACTED_VALUE" not in provider.stdout + provider.stderr
-    assert "C:\\secret\\trace.log" not in provider.stdout + provider.stderr
-    assert "provider raw exception" not in provider.stdout + provider.stderr
-    assert "Traceback" not in provider.stdout + provider.stderr
-
-
-def _doctor_result(failed_code: DoctorCheckCode | None = None) -> DoctorResult:
-    checks = tuple(
-        DoctorCheck(
-            code=code,
-            passed=code is not failed_code,
-            observed="OK" if code is not failed_code else "UNAVAILABLE",
-            reason_code=f"{code.value}_{'FAILED' if code is failed_code else 'PASSED'}",
-            recommendation_code=(None if code is not failed_code else "CHECK_MODEL_ENDPOINT"),
-        )
-        for code in DoctorCheckCode
-    )
-    return DoctorResult(
-        status=DoctorStatus.FAILED if failed_code is not None else DoctorStatus.PASSED,
-        checks=checks,
+    monkeypatch.setattr(
+        cli,
+        "create_benchmark_reporter",
+        lambda loaded: SimpleNamespace(write=lambda: (summary, report)),
     )
 
-
-def test_doctor_success_prints_fixed_checks_and_explanation(monkeypatch) -> None:
-    class FakeDoctorRunner:
-        async def run(self) -> DoctorResult:
-            return _doctor_result()
-
-    monkeypatch.setattr(cli, "create_doctor_runner", lambda: FakeDoctorRunner())
-    result = runner.invoke(cli.app, ["doctor"])
+    result = runner.invoke(
+        app,
+        ["benchmark", "report", "--manifest", "manifest.json", "--confirm-sha256", "abc"],
+    )
 
     assert result.exit_code == 0
-    assert "[通过] PYTHON: OK" in result.stdout
-    assert "doctor 通过不代表 P0 评测通过" in result.stdout
-    assert "Traceback" not in result.stdout + result.stderr
-
-
-def test_doctor_failure_prints_recommendation_and_exits_one(monkeypatch) -> None:
-    class FakeDoctorRunner:
-        async def run(self) -> DoctorResult:
-            return _doctor_result(DoctorCheckCode.MODEL_ENDPOINT)
-
-    monkeypatch.setattr(cli, "create_doctor_runner", lambda: FakeDoctorRunner())
-    result = runner.invoke(cli.app, ["doctor"])
-
-    assert result.exit_code == 1
-    assert "[失败] MODEL_ENDPOINT: UNAVAILABLE" in result.stdout
-    assert "模型服务 endpoint" in result.stdout
-    assert "doctor 通过不代表 P0 评测通过" in result.stdout
-    assert "Traceback" not in result.stdout + result.stderr
-
-
-def test_doctor_setup_error_is_fixed_and_redacted(monkeypatch) -> None:
-    def failing_factory():
-        raise RuntimeError("password=TEST_REDACTED_VALUE C:\\secret\\settings.toml")
-
-    monkeypatch.setattr(cli, "create_doctor_runner", failing_factory)
-    result = runner.invoke(cli.app, ["doctor"])
-
-    assert result.exit_code == 1
-    assert "DOCTOR_SETUP_FAILED" in result.stderr
-    assert "TEST_REDACTED_VALUE" not in result.stdout + result.stderr
-    assert "C:\\secret\\settings.toml" not in result.stdout + result.stderr
-    assert "Traceback" not in result.stdout + result.stderr
-
-
-def _evaluation(status: EvaluationStatus) -> EvaluationResult:
-    failed_code = (
-        EvaluationCheckCode.DIAGNOSIS_CONFIRMED
-        if status is EvaluationStatus.FAILED
-        else None
-    )
-    checks = tuple(
-        EvaluationCheck(
-            code=code,
-            passed=code is not failed_code,
-            expected=(),
-            actual=(),
-            reason_code=f"{code.value}_{'FAILED' if code is failed_code else 'PASSED'}",
-        )
-        for code in EvaluationCheckCode
-    )
-    return EvaluationResult(
-        schema_version="m6.evaluation.v1",
-        incident_case_id="schema_rename_payment_amount",
-        run_id="a" * 32,
-        status=status,
-        checks=checks,
-        failed_check_codes=() if failed_code is None else (failed_code,),
-    )
-
-
-def _attempt(status: EvaluationStatus) -> EvaluationAttemptResult:
-    return EvaluationAttemptResult(
-        incident_case_id="schema_rename_payment_amount",
-        run_id="a" * 32,
-        status=status,
-        evaluation=_evaluation(status),
-        artifact_dir=Path("artifacts") / ("a" * 32),
-    )
-
-
-def test_eval_run_is_one_bounded_attempt(monkeypatch) -> None:
-    calls: list[str] = []
-
-    class FakeEvaluationRunner:
-        async def run(self, case_id: str) -> EvaluationAttemptResult:
-            calls.append(case_id)
-            return _attempt(EvaluationStatus.PASSED)
-
-    monkeypatch.setattr(cli, "create_evaluation_runner", lambda: FakeEvaluationRunner())
-    result = runner.invoke(cli.app, ["eval", "run", "schema_rename_payment_amount"])
-
-    assert result.exit_code == 0
-    assert calls == ["schema_rename_payment_amount"]
-    assert "PASSED" in result.stdout
-    assert "artifacts/" + ("a" * 32) in result.stdout
-
-
-def test_eval_run_failed_score_keeps_artifact_path_and_exits_nonzero(monkeypatch) -> None:
-    class FakeEvaluationRunner:
-        async def run(self, case_id: str) -> EvaluationAttemptResult:
-            return _attempt(EvaluationStatus.FAILED)
-
-    monkeypatch.setattr(cli, "create_evaluation_runner", lambda: FakeEvaluationRunner())
-    result = runner.invoke(cli.app, ["eval", "run", "schema_rename_payment_amount"])
-
-    assert result.exit_code == 1
-    assert "FAILED" in result.stdout
-    assert "artifacts" in result.stdout
-    assert "Traceback" not in result.stdout + result.stderr
-
-
-def test_eval_run_setup_error_is_fixed_and_redacted(monkeypatch) -> None:
-    def failing_factory():
-        raise RuntimeError("provider=raw TEST_REDACTED_VALUE C:\\secret\\settings.toml")
-
-    monkeypatch.setattr(cli, "create_evaluation_runner", failing_factory)
-    result = runner.invoke(cli.app, ["eval", "run", "schema_rename_payment_amount"])
-
-    assert result.exit_code == 1
-    assert "EVALUATION_SETUP_FAILED" in result.stderr
-    assert "TEST_REDACTED_VALUE" not in result.stdout + result.stderr
-    assert "C:\\secret\\settings.toml" not in result.stdout + result.stderr
-    assert "Traceback" not in result.stdout + result.stderr
-
-
-def test_eval_run_has_one_case_argument_and_rejects_unscoped_options() -> None:
-    help_result = runner.invoke(cli.app, ["eval", "run", "--help"])
-    assert help_result.exit_code == 0
-    assert "case_id" in _plain_help(help_result.stdout)
-    assert "schema_rename_payment_amount" in help_result.stdout
-    assert "schema_type_change_payment_amount" in help_result.stdout
-    assert "Ollama" not in help_result.stdout
-    assert "MiMo" not in help_result.stdout
-    for forbidden in (
-        "--repeat",
-        "--runs",
-        "--run-id",
-        "--model",
-        "--base-url",
-        "--prompt",
-        "--path",
-        "--sql",
-        "--table",
-        "--repair",
-    ):
-        assert forbidden not in help_result.stdout
-        result = runner.invoke(
-            cli.app,
-            ["eval", "run", "schema_rename_payment_amount", forbidden, "value"],
-        )
-        assert result.exit_code == 2
+    assert str(summary) in result.stdout
+    assert str(report) in result.stdout

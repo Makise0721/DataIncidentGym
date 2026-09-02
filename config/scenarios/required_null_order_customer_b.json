@@ -1,0 +1,108 @@
+{
+  "schema_version": "scenario.v1",
+  "incident_case_id": "required_null_order_customer_b",
+  "suite": "P1",
+  "fault_family": "REQUIRED_FIELD_NULL",
+  "variant_role": "TEST_INSUFFICIENT",
+  "answerability": "INSUFFICIENT",
+  "seed": {
+    "schema_version": "seed.v1",
+    "fixture_path": "third_party/jaffle_shop",
+    "fixture_commit": "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb",
+    "seed_names": ["raw_customers", "raw_orders", "raw_payments"],
+    "refresh": "FULL_REFRESH"
+  },
+  "incident_brief": {
+    "schema_version": "incident_brief.v1",
+    "signal_code": "DBT_TEST_FAILED",
+    "summary": "A required-field dbt test failed in the order pipeline.",
+    "subjects": [
+      "test.jaffle_shop.not_null_orders_customer_id.c5f02694af",
+      "raw_orders",
+      "raw_customers"
+    ],
+    "logical_observed_at": "2018-04-09T12:00:00Z",
+    "observations": [
+      {
+        "kind": "DBT_TEST_FAILURE",
+        "subject": "test.jaffle_shop.not_null_orders_customer_id.c5f02694af",
+        "value": "fail"
+      }
+    ]
+  },
+  "reset_and_injection_contract": {
+    "schema_version": "reset_injection.v1",
+    "mutations": [
+      {
+        "kind": "SET_FIELD_NULL",
+        "purpose": "FAULT",
+        "relation": "raw_orders",
+        "column": "user_id",
+        "selector_column": "id",
+        "selector_value": 42,
+        "expected_value": 92
+      },
+      {
+        "kind": "SET_FIELD_NULL",
+        "purpose": "DISTRACTOR",
+        "relation": "raw_customers",
+        "column": "last_name",
+        "selector_column": "id",
+        "selector_value": 7,
+        "expected_value": "M."
+      }
+    ],
+    "restore_strategy": "FULL_REFRESH_BASELINE"
+  },
+  "ground_truth_or_acceptable_root_causes": [
+    "SOURCE_REQUIRED_FIELD_NULL",
+    "TRANSFORMATION_REQUIRED_FIELD_NULL"
+  ],
+  "direct_failure": "test.jaffle_shop.not_null_orders_customer_id.c5f02694af",
+  "affected_assets": ["model.jaffle_shop.orders"],
+  "observable_evidence_contract": {
+    "schema_version": "observable_evidence.v1",
+    "schema_relations": ["raw_orders", "raw_customers"],
+    "profile_relations": ["raw_customers"],
+    "history_relations": [],
+    "unresolved_gaps": [
+      {
+        "gap_kind": "RELATION_DATA_PROFILE",
+        "subject": "raw_orders",
+        "reason_code": "RELATION_NOT_ALLOWED",
+        "tool_name": "get_relation_data_profile"
+      },
+      {
+        "gap_kind": "TRANSFORMATION_DEFINITION",
+        "subject": "model.jaffle_shop.stg_orders",
+        "reason_code": "NOT_OBSERVABLE",
+        "tool_name": null
+      }
+    ]
+  },
+  "required_evidence_types": [
+    "DBT_RUN_RESULTS",
+    "DBT_NODE_ERROR",
+    "DBT_LINEAGE",
+    "RELATION_SCHEMA",
+    "RELATION_DATA_PROFILE"
+  ],
+  "forbidden_leakage": [
+    "SCENARIO_SPEC",
+    "GROUND_TRUTH",
+    "VARIANT_ROLE",
+    "ANSWERABILITY",
+    "EXPECTED_STATUS",
+    "PRIVATE_PATH"
+  ],
+  "distractors": [
+    {
+      "kind": "NULLABLE_FIELD_NULL",
+      "relation": "raw_customers",
+      "column": "last_name",
+      "selector_column": "id",
+      "selector_value": 7
+    }
+  ],
+  "expected_status": "INSUFFICIENT_EVIDENCE"
+}

@@ -18,6 +18,8 @@ from pydantic import (
     model_validator,
 )
 
+from data_incident_gym.profiles import RelationHistorySnapshot, RelationProfileSnapshot
+
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
@@ -26,12 +28,15 @@ class EvidenceType(StrEnum):
     DBT_NODE_ERROR = "DBT_NODE_ERROR"
     RELATION_SCHEMA = "RELATION_SCHEMA"
     DBT_LINEAGE = "DBT_LINEAGE"
+    RELATION_DATA_PROFILE = "RELATION_DATA_PROFILE"
+    RELATION_HISTORY = "RELATION_HISTORY"
 
 
 class EvidenceSource(StrEnum):
     DBT_RUN_RESULTS = "dbt_artifact:run_results.json"
     DBT_MANIFEST = "dbt_artifact:manifest.json"
     POSTGRES_CATALOG = "postgres_catalog"
+    POSTGRES_PROFILE_SNAPSHOT = "postgres_profile_snapshot"
 
 
 class RelationSchemaColumn(BaseModel):
@@ -94,11 +99,38 @@ class DbtLineageFact(BaseModel):
     related_nodes: tuple[DbtLineageNode, ...]
 
 
+class RelationDataProfileFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["RELATION_DATA_PROFILE"]
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
+    relation_name: StrictStr
+    profile_spec_version: Literal["profile_spec.v1"]
+    profile_spec_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    snapshot: RelationProfileSnapshot
+
+
+class RelationHistoryFact(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["RELATION_HISTORY"]
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
+    relation_name: StrictStr
+    profile_spec_version: Literal["profile_spec.v1"]
+    profile_spec_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    snapshot: RelationHistorySnapshot
+
+
 SchemaColumn = RelationSchemaColumn
 LineageNode = DbtLineageNode
 
 type EvidenceContent = Annotated[
-    DbtRunResultsFact | DbtNodeErrorFact | RelationSchemaFact | DbtLineageFact,
+    DbtRunResultsFact
+    | DbtNodeErrorFact
+    | RelationSchemaFact
+    | DbtLineageFact
+    | RelationDataProfileFact
+    | RelationHistoryFact,
     Field(discriminator="kind"),
 ]
 
@@ -123,6 +155,8 @@ _CONTENT_TYPES: dict[EvidenceType, type[BaseModel]] = {
     EvidenceType.DBT_NODE_ERROR: DbtNodeErrorFact,
     EvidenceType.RELATION_SCHEMA: RelationSchemaFact,
     EvidenceType.DBT_LINEAGE: DbtLineageFact,
+    EvidenceType.RELATION_DATA_PROFILE: RelationDataProfileFact,
+    EvidenceType.RELATION_HISTORY: RelationHistoryFact,
 }
 
 _SOURCE_TYPES: dict[EvidenceType, EvidenceSource] = {
@@ -130,6 +164,8 @@ _SOURCE_TYPES: dict[EvidenceType, EvidenceSource] = {
     EvidenceType.DBT_NODE_ERROR: EvidenceSource.DBT_RUN_RESULTS,
     EvidenceType.RELATION_SCHEMA: EvidenceSource.POSTGRES_CATALOG,
     EvidenceType.DBT_LINEAGE: EvidenceSource.DBT_MANIFEST,
+    EvidenceType.RELATION_DATA_PROFILE: EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+    EvidenceType.RELATION_HISTORY: EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
 }
 
 
@@ -289,6 +325,22 @@ class ReadOnlyDatabaseError(EvidenceToolError):
     code = "READ_ONLY_DATABASE_ERROR"
 
 
+class ProfileSpecInvalidError(EvidenceToolError):
+    code = "PROFILE_SPEC_INVALID"
+
+
+class ProfileMetricUnavailableError(EvidenceToolError):
+    code = "PROFILE_METRIC_UNAVAILABLE"
+
+
+class ProfileSnapshotMismatchError(EvidenceToolError):
+    code = "PROFILE_SNAPSHOT_MISMATCH"
+
+
+class ProfileOutputLimitError(EvidenceToolError):
+    code = "PROFILE_OUTPUT_LIMIT"
+
+
 InvalidRunId = InvalidRunIdError
 RunNotFound = RunNotFoundError
 RunContextMismatch = RunContextMismatchError
@@ -300,6 +352,10 @@ RelationNotAllowed = RelationNotAllowedError
 RelationNotFound = RelationNotFoundError
 RunStateDrift = RunStateDriftError
 ReadOnlyDatabase = ReadOnlyDatabaseError
+ProfileSpecInvalid = ProfileSpecInvalidError
+ProfileMetricUnavailable = ProfileMetricUnavailableError
+ProfileSnapshotMismatch = ProfileSnapshotMismatchError
+ProfileOutputLimit = ProfileOutputLimitError
 
 
 def _clean(error: EvidenceToolError) -> EvidenceToolError:

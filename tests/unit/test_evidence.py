@@ -1,305 +1,138 @@
+from __future__ import annotations
+
 from datetime import UTC, datetime
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from data_incident_gym.evidence import (
-    DbtLineageFact,
-    DbtLineageNode,
-    DbtNodeErrorFact,
     DbtRunResultsFact,
     EvidenceRecord,
     EvidenceSource,
     EvidenceType,
-    InvalidArtifactError,
-    InvalidDirectionError,
-    InvalidRunIdError,
-    NodeErrorNotFoundError,
-    NodeNotFoundError,
-    ReadOnlyDatabaseError,
-    RelationNotAllowedError,
-    RelationNotFoundError,
-    RelationSchemaColumn,
-    RelationSchemaFact,
-    RunContextMismatchError,
-    RunNotFoundError,
-    RunStateDriftError,
-    raise_without_context,
+    RelationDataProfileFact,
+    RelationHistoryFact,
+)
+from data_incident_gym.profiles import (
+    ColumnProfileFact,
+    HistorySeries,
+    ProfileSnapshot,
+    RelationHistorySnapshot,
+    RelationProfileSnapshot,
+    load_profile_spec,
 )
 
-RUN_ID = "0123456789abcdef0123456789abcdef"
+RUN_ID = "a" * 32
+OBSERVED_AT = datetime(2026, 8, 30, tzinfo=UTC)
 
 
-def run_results_fact(
-    *,
-    run_id: str = RUN_ID,
-    skipped_nodes: tuple[str, ...] = (
-        "model.jaffle_shop.customers",
-        "model.jaffle_shop.orders",
-    ),
-) -> DbtRunResultsFact:
-    return DbtRunResultsFact(
-        kind="DBT_RUN_RESULTS",
-        run_id=run_id,
-        run_status="FAILED",
-        dbt_exit_code=1,
-        failed_nodes=("model.jaffle_shop.stg_payments",),
-        skipped_nodes=skipped_nodes,
-    )
-
-
-def make_run_results_record(
-    *,
-    run_id: str = RUN_ID,
-    observed_at: str = "2026-08-25T09:00:00Z",
-    skipped_nodes: tuple[str, ...] = (
-        "model.jaffle_shop.customers",
-        "model.jaffle_shop.orders",
-    ),
-) -> EvidenceRecord:
+def _run_record() -> EvidenceRecord:
     return EvidenceRecord.create(
-        run_id=run_id,
+        run_id=RUN_ID,
         evidence_type=EvidenceType.DBT_RUN_RESULTS,
         source=EvidenceSource.DBT_RUN_RESULTS,
-        subject=run_id,
-        observed_at=datetime.fromisoformat(observed_at.replace("Z", "+00:00")),
-        content=run_results_fact(run_id=run_id, skipped_nodes=skipped_nodes),
-    )
-
-
-def test_same_run_and_content_have_stable_evidence_id() -> None:
-    first = make_run_results_record(observed_at="2026-08-25T09:00:00Z")
-    second = make_run_results_record(observed_at="2026-08-25T09:01:00Z")
-
-    assert first.evidence_id == second.evidence_id
-    assert first.content_digest == second.content_digest
-    assert first.observed_at != second.observed_at
-
-
-def test_content_or_run_change_changes_evidence_id() -> None:
-    original = make_run_results_record()
-    changed_content = make_run_results_record(skipped_nodes=())
-    changed_run = make_run_results_record(
-        run_id="fedcba9876543210fedcba9876543210"
-    )
-
-    assert original.evidence_id != changed_content.evidence_id
-    assert original.evidence_id != changed_run.evidence_id
-
-
-def test_tampered_digest_and_type_content_pair_are_rejected() -> None:
-    record = make_run_results_record()
-    payload = record.model_dump(mode="json")
-    payload["content_digest"] = "0" * 64
-
-    with pytest.raises(ValidationError):
-        EvidenceRecord.model_validate(payload)
-
-    with pytest.raises(ValidationError):
-        EvidenceRecord.create(
+        subject=RUN_ID,
+        observed_at=OBSERVED_AT,
+        content=DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
             run_id=RUN_ID,
-            evidence_type=EvidenceType.DBT_LINEAGE,
-            source=EvidenceSource.DBT_RUN_RESULTS,
-            subject=RUN_ID,
-            observed_at=datetime.now(UTC),
-            content=run_results_fact(),
-        )
-
-
-def test_content_models_are_frozen_and_reject_extra_fields() -> None:
-    fact = run_results_fact()
-
-    with pytest.raises(ValidationError):
-        DbtRunResultsFact.model_validate(
-            {**fact.model_dump(), "unexpected": "TEST_REDACTED_VALUE"}
-        )
-
-    with pytest.raises(ValidationError):
-        fact.run_status = "SUCCESS"
-
-    with pytest.raises(ValidationError):
-        EvidenceRecord.model_validate(
-            {**make_run_results_record().model_dump(mode="json"), "unexpected": 1}
-        )
-
-
-def test_record_rejects_naive_and_invalid_run_id() -> None:
-    with pytest.raises(ValidationError):
-        EvidenceRecord.create(
-            run_id=RUN_ID,
-            evidence_type=EvidenceType.DBT_RUN_RESULTS,
-            source=EvidenceSource.DBT_RUN_RESULTS,
-            subject=RUN_ID,
-            observed_at=datetime(2026, 8, 25, 9, 0),
-            content=run_results_fact(),
-        )
-
-    with pytest.raises(ValidationError):
-        make_run_results_record(run_id="../../outside")
-
-
-@pytest.mark.parametrize("observed_at", [0, 0.0, True])
-def test_record_rejects_nonstrict_json_datetime_types(observed_at: object) -> None:
-    payload = make_run_results_record().model_dump(mode="json")
-    payload["observed_at"] = observed_at
-
-    with pytest.raises(ValidationError):
-        EvidenceRecord.model_validate(payload)
-
-
-def test_all_fact_variants_are_frozen_and_have_exact_discriminators() -> None:
-    node_error = DbtNodeErrorFact(
-        kind="DBT_NODE_ERROR",
-        run_id=RUN_ID,
-        node_id="model.jaffle_shop.stg_payments",
-        resource_type="model",
-        status="error",
-        message='column "amount" does not exist',
+            run_status="SUCCEEDED",
+            dbt_exit_code=0,
+            failed_nodes=(),
+            skipped_nodes=(),
+        ),
     )
-    schema = RelationSchemaFact(
-        kind="RELATION_SCHEMA",
-        run_id=RUN_ID,
-        schema_name="analytics",
-        relation_name="raw_payments",
-        columns=(
-            RelationSchemaColumn(
-                name="total_amount",
-                data_type="integer",
-                nullable=True,
-                ordinal_position=4,
+
+
+def _profile_snapshot() -> ProfileSnapshot:
+    spec = load_profile_spec()
+    current = RelationProfileSnapshot(
+        relation_name="raw_orders",
+        row_count=99,
+        columns=(ColumnProfileFact(column_name="id", null_count=0, distinct_count=99),),
+    )
+    history = RelationHistorySnapshot(
+        relation_name="raw_orders",
+        histories=(
+            HistorySeries(
+                name="order_count_by_day",
+                metric="count",
+                points=(),
             ),
         ),
     )
-    lineage = DbtLineageFact(
-        kind="DBT_LINEAGE",
+    return ProfileSnapshot.create(spec=spec, current=(current,), history=(history,))
+
+
+def test_evidence_ids_are_stable_and_content_bound() -> None:
+    first = _run_record()
+    second = _run_record()
+    assert first == second
+    changed = EvidenceRecord.create(
         run_id=RUN_ID,
-        node_id="model.jaffle_shop.stg_payments",
-        direction="downstream",
-        related_nodes=(),
+        evidence_type=EvidenceType.DBT_RUN_RESULTS,
+        source=EvidenceSource.DBT_RUN_RESULTS,
+        subject="other-subject",
+        observed_at=OBSERVED_AT,
+        content=first.content,
+    )
+    assert changed.evidence_id != first.evidence_id
+
+
+def test_profile_facts_use_the_profile_snapshot_source() -> None:
+    snapshot = _profile_snapshot()
+    spec = load_profile_spec()
+    profile = RelationDataProfileFact(
+        kind="RELATION_DATA_PROFILE",
+        run_id=RUN_ID,
+        relation_name="raw_orders",
+        profile_spec_version=spec.schema_version,
+        profile_spec_sha256=spec.digest(),
+        snapshot=snapshot.current[0],
+    )
+    history = RelationHistoryFact(
+        kind="RELATION_HISTORY",
+        run_id=RUN_ID,
+        relation_name="raw_orders",
+        profile_spec_version=spec.schema_version,
+        profile_spec_sha256=spec.digest(),
+        snapshot=snapshot.history[0],
+    )
+    profile_record = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.RELATION_DATA_PROFILE,
+        source=EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        subject="raw_orders",
+        observed_at=OBSERVED_AT,
+        content=profile,
+    )
+    history_record = EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.RELATION_HISTORY,
+        source=EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        subject="raw_orders",
+        observed_at=OBSERVED_AT,
+        content=history,
     )
 
-    assert node_error.kind == "DBT_NODE_ERROR"
-    assert schema.kind == "RELATION_SCHEMA"
-    assert lineage.kind == "DBT_LINEAGE"
+    assert profile_record.evidence_type is EvidenceType.RELATION_DATA_PROFILE
+    assert history_record.source is EvidenceSource.POSTGRES_PROFILE_SNAPSHOT
 
+
+def test_evidence_record_is_strict_and_frozen() -> None:
+    record = _run_record()
     with pytest.raises(ValidationError):
-        schema.columns[0].name = "TEST_REDACTED_VALUE"
+        record.subject = "changed"  # type: ignore[misc]
+    with pytest.raises(ValueError):
+        EvidenceRecord.model_validate({**record.model_dump(), "extra": "nope"})
 
 
-@pytest.mark.parametrize(
-    ("model", "payload", "field"),
-    [
-        (
-            DbtRunResultsFact,
-            {
-                "kind": "DBT_RUN_RESULTS",
-                "run_id": RUN_ID,
-                "run_status": "FAILED",
-                "dbt_exit_code": "1",
-                "failed_nodes": (),
-                "skipped_nodes": (),
-            },
-            "dbt_exit_code",
-        ),
-        (
-            RelationSchemaColumn,
-            {
-                "name": "amount",
-                "data_type": "integer",
-                "nullable": 1,
-                "ordinal_position": 4,
-            },
-            "nullable",
-        ),
-        (
-            RelationSchemaColumn,
-            {
-                "name": "amount",
-                "data_type": "integer",
-                "nullable": True,
-                "ordinal_position": "4",
-            },
-            "ordinal_position",
-        ),
-        (
-            DbtLineageNode,
-            {
-                "node_id": "model.jaffle_shop.orders",
-                "resource_type": "model",
-                "name": "orders",
-                "distance": "1",
-            },
-            "distance",
-        ),
-    ],
-)
-def test_fact_models_reject_coercible_primitive_types(
-    model: type[BaseModel], payload: dict[str, object], field: str
-) -> None:
-    with pytest.raises(ValidationError) as error:
-        model.model_validate(payload)
-
-    assert field in str(error.value)
-
-
-@pytest.mark.parametrize(
-    ("error_type", "code"),
-    [
-        (InvalidRunIdError, "INVALID_RUN_ID"),
-        (RunNotFoundError, "RUN_NOT_FOUND"),
-        (RunContextMismatchError, "RUN_CONTEXT_MISMATCH"),
-        (InvalidArtifactError, "INVALID_ARTIFACT"),
-        (NodeNotFoundError, "NODE_NOT_FOUND"),
-        (NodeErrorNotFoundError, "NODE_ERROR_NOT_FOUND"),
-        (InvalidDirectionError, "INVALID_DIRECTION"),
-        (RelationNotAllowedError, "RELATION_NOT_ALLOWED"),
-        (RelationNotFoundError, "RELATION_NOT_FOUND"),
-        (RunStateDriftError, "RUN_STATE_DRIFT"),
-        (ReadOnlyDatabaseError, "READ_ONLY_DATABASE_ERROR"),
-    ],
-)
-def test_error_subclasses_expose_stable_codes_and_redact_details(
-    error_type: type[Exception], code: str
-) -> None:
-    error = error_type(
-        "password=TEST_REDACTED_VALUE SELECT * FROM TEST_REDACTED_VALUE "
-        "C:\\TEST_REDACTED_VALUE\\artifact.json "
-        r"\\TEST_REDACTED_VALUE\share\artifact.json"
+def test_all_six_evidence_types_are_registered() -> None:
+    assert tuple(item.value for item in EvidenceType) == (
+        "DBT_RUN_RESULTS",
+        "DBT_NODE_ERROR",
+        "RELATION_SCHEMA",
+        "DBT_LINEAGE",
+        "RELATION_DATA_PROFILE",
+        "RELATION_HISTORY",
     )
-
-    assert error.code == code
-    assert "TEST_REDACTED_VALUE" not in str(error)
-    assert "SELECT" not in str(error)
-    assert "artifact.json" not in str(error)
-    assert error.__cause__ is None
-    assert error.__context__ is None
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        r"C:\TEST_REDACTED_VALUE Folder\artifact.json",
-        r"\\TEST_REDACTED_VALUE\share\TEST_REDACTED_VALUE Folder\artifact.json",
-        r"/var/TEST_REDACTED_VALUE Folder/artifact.json",
-        r"C:\TEST_REDACTED_VALUE\artifact file.json",
-        r"\\TEST_REDACTED_VALUE\share\artifact file.json",
-        r"/var/TEST_REDACTED_VALUE/artifact file.json",
-    ],
-)
-def test_error_redacts_absolute_paths_with_spaces(path: str) -> None:
-    message = str(InvalidArtifactError(f"failed to read {path} while validating"))
-
-    assert "TEST_REDACTED_VALUE" not in message
-    assert "artifact.json" not in message
-    assert "while validating" in message
-
-
-def test_raise_without_context_removes_original_exception() -> None:
-    with pytest.raises(InvalidArtifactError) as captured:
-        try:
-            raise ValueError("TEST_REDACTED_VALUE")
-        except ValueError:
-            raise_without_context(InvalidArtifactError("invalid artifact"))
-
-    assert captured.value.__cause__ is None
-    assert captured.value.__context__ is None

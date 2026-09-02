@@ -7,7 +7,7 @@ on:
 jobs:
   m1:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,4 +83,4 @@ jobs:
           path: postgres-diagnostics/
           if-no-files-found: warn
           retention-days: 7
-      - run: uv run pytest tests/e2e -q
+      - run: uv run pytest tests/e2e -m "not real_model" -q

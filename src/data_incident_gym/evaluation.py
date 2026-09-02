@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, model_validator
 
 from data_incident_gym.diagnosis import (
-    CaseId,
+    KERNEL_STRATEGIES,
     DiagnosisRunResult,
     DiagnosisStatus,
-    RunId,
     ToolTraceEvent,
 )
 from data_incident_gym.diagnostic_kernel import (
-    ClaimKind,
     EvidenceGapStatus,
     HypothesisVerdict,
     KernelStateTraceEvent,
@@ -22,10 +21,27 @@ from data_incident_gym.diagnostic_kernel import (
 from data_incident_gym.evidence import (
     DbtLineageFact,
     DbtNodeErrorFact,
+    DbtRunResultsFact,
+    EvidenceRecord,
+    RelationDataProfileFact,
+    RelationHistoryFact,
     RelationSchemaFact,
 )
-from data_incident_gym.incidents import GroundTruth
-from data_incident_gym.lab_verifier import LabVerification
+from data_incident_gym.lab_verifier import ScenarioVerification
+from data_incident_gym.profiles import parse_watermark_value
+from data_incident_gym.scenarios import (
+    Answerability,
+    ColumnRenameMutation,
+    ColumnTypeMutation,
+    DeletePaymentRowsMutation,
+    DuplicatePaymentRowsMutation,
+    OrphanPaymentRowsMutation,
+    ScenarioSpec,
+    SetFieldNullMutation,
+    deleted_payment_rows,
+)
+
+EVALUATOR_VERSION = "p1.evaluator.v2"
 
 
 class EvaluationStatus(StrEnum):
@@ -33,41 +49,89 @@ class EvaluationStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class EvaluationApplicability(StrEnum):
+    APPLICABLE = "APPLICABLE"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
 class EvaluationCheckCode(StrEnum):
     ENVIRONMENT_VERIFIED = "ENVIRONMENT_VERIFIED"
-    INVESTIGATION_STATE_VALID = "INVESTIGATION_STATE_VALID"
-    ALTERNATIVE_HYPOTHESIS_REFUTED = "ALTERNATIVE_HYPOTHESIS_REFUTED"
-    CLAIM_EVIDENCE_COVERAGE = "CLAIM_EVIDENCE_COVERAGE"
-    DIAGNOSIS_CONFIRMED = "DIAGNOSIS_CONFIRMED"
-    ROOT_CAUSE_EXACT = "ROOT_CAUSE_EXACT"
+    STATUS_EXACT = "STATUS_EXACT"
+    ROOT_CAUSE_ACCEPTED = "ROOT_CAUSE_ACCEPTED"
     AFFECTED_ASSETS_EXACT = "AFFECTED_ASSETS_EXACT"
     EVIDENCE_IDS_EXIST = "EVIDENCE_IDS_EXIST"
     EVIDENCE_RUN_SCOPE = "EVIDENCE_RUN_SCOPE"
     REQUIRED_EVIDENCE_TYPES_PRESENT = "REQUIRED_EVIDENCE_TYPES_PRESENT"
-    EVIDENCE_CONTENT_COMPATIBLE = "EVIDENCE_CONTENT_COMPATIBLE"
+    CLAIM_EVIDENCE_COMPATIBLE = "CLAIM_EVIDENCE_COMPATIBLE"
+    INSUFFICIENCY_GAP_DECLARED = "INSUFFICIENCY_GAP_DECLARED"
+    POSITIVE_HEALTH_EVIDENCE = "POSITIVE_HEALTH_EVIDENCE"
+    TOOL_ALLOWLIST_EXACT = "TOOL_ALLOWLIST_EXACT"
     TRACE_READ_ONLY_SAFE = "TRACE_READ_ONLY_SAFE"
     RECOVERY_HEALTHY = "RECOVERY_HEALTHY"
+
+
+class ControllerCheckCode(StrEnum):
+    KERNEL_STATE_VALID = "KERNEL_STATE_VALID"
+    KERNEL_HYPOTHESIS_GATE = "KERNEL_HYPOTHESIS_GATE"
+    KERNEL_EVIDENCE_GAP_GATE = "KERNEL_EVIDENCE_GAP_GATE"
 
 
 class EvaluationCheck(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     code: EvaluationCheckCode
+    applicability: EvaluationApplicability
     passed: StrictBool
     expected: tuple[StrictStr, ...]
     actual: tuple[StrictStr, ...]
     reason_code: StrictStr
 
+    @model_validator(mode="after")
+    def validate_applicability(self) -> Self:
+        if self.applicability is EvaluationApplicability.NOT_APPLICABLE:
+            if self.passed is not True:
+                raise ValueError("not-applicable checks must pass")
+            if self.expected != ("NOT_APPLICABLE",) or self.actual != ("NOT_APPLICABLE",):
+                raise ValueError("not-applicable checks must use fixed values")
+            if self.reason_code != "NOT_APPLICABLE":
+                raise ValueError("not-applicable checks must use fixed reason")
+        elif self.reason_code != (
+            f"{self.code.value}_{'PASSED' if self.passed else 'FAILED'}"
+        ):
+            raise ValueError("applicable reason_code must match result")
+        return self
+
+
+class ControllerCheck(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: ControllerCheckCode
+    passed: StrictBool
+    expected: tuple[StrictStr, ...]
+    actual: tuple[StrictStr, ...]
+    reason_code: StrictStr
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> Self:
+        expected = f"{self.code.value}_{'PASSED' if self.passed else 'FAILED'}"
+        if self.reason_code != expected:
+            raise ValueError("controller reason_code must match result")
+        return self
+
 
 class EvaluationResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["m6.evaluation.v1"]
-    incident_case_id: CaseId
-    run_id: RunId
+    schema_version: Literal["p1.evaluation.v1"] = "p1.evaluation.v1"
+    incident_case_id: StrictStr
+    run_id: StrictStr
     status: EvaluationStatus
     checks: tuple[EvaluationCheck, ...]
     failed_check_codes: tuple[EvaluationCheckCode, ...]
+    controller_checks: tuple[ControllerCheck, ...] = ()
+    variant_role: StrictStr | None = None
+    answerability: StrictStr
+    expected_status: StrictStr
 
     @model_validator(mode="after")
     def validate_complete_check_set(self) -> Self:
@@ -75,15 +139,15 @@ class EvaluationResult(BaseModel):
         actual = tuple(check.code for check in self.checks)
         if actual != expected:
             raise ValueError("checks must contain every code exactly once in canonical order")
-        for check in self.checks:
-            suffix = "PASSED" if check.passed else "FAILED"
-            if check.reason_code != f"{check.code.value}_{suffix}":
-                raise ValueError("check reason_code must match result")
-        failed = tuple(check.code for check in self.checks if not check.passed)
+        failed = tuple(
+            check.code
+            for check in self.checks
+            if check.applicability is EvaluationApplicability.APPLICABLE and not check.passed
+        )
         if self.failed_check_codes != failed:
-            raise ValueError("failed_check_codes must match checks")
+            raise ValueError("failed_check_codes must match applicable checks")
         expected_status = EvaluationStatus.PASSED if not failed else EvaluationStatus.FAILED
-        if self.status != expected_status:
+        if self.status is not expected_status:
             raise ValueError("status must match checks")
         return self
 
@@ -94,6 +158,8 @@ ALLOWED_DIAGNOSTIC_TOOLS = frozenset(
         "get_dbt_node_error",
         "get_relation_schema",
         "get_dbt_lineage",
+        "get_relation_data_profile",
+        "get_relation_history",
     }
 )
 TRACE_FORBIDDEN_PATTERN = re.compile(
@@ -104,542 +170,1021 @@ TRACE_FORBIDDEN_PATTERN = re.compile(
 )
 
 
+def _check(
+    code: EvaluationCheckCode,
+    passed: bool,
+    expected: tuple[str, ...],
+    actual: tuple[str, ...],
+    *,
+    applicable: bool = True,
+) -> EvaluationCheck:
+    if not applicable:
+        return EvaluationCheck(
+            code=code,
+            applicability=EvaluationApplicability.NOT_APPLICABLE,
+            passed=True,
+            expected=("NOT_APPLICABLE",),
+            actual=("NOT_APPLICABLE",),
+            reason_code="NOT_APPLICABLE",
+        )
+    return EvaluationCheck(
+        code=code,
+        applicability=EvaluationApplicability.APPLICABLE,
+        passed=passed,
+        expected=expected,
+        actual=actual,
+        reason_code=f"{code.value}_{'PASSED' if passed else 'FAILED'}",
+    )
+
+
+def _record_ids(records: tuple[EvidenceRecord, ...]) -> tuple[str, ...]:
+    return tuple(record.evidence_id for record in records)
+
+
+def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResult) -> bool:
+    inventory = {record.evidence_id: record for record in diagnosis_run.evidence_records}
+    diagnosis = diagnosis_run.diagnosis
+    if diagnosis.status is not DiagnosisStatus.NO_INCIDENT:
+        return False
+    alert_subjects = {
+        observation.subject
+        for observation in scenario.incident_brief.observations
+        if observation.kind == "CURRENT_PERIOD_COUNT"
+    }
+    if not alert_subjects:
+        return False
+    for claim in diagnosis.claims:
+        if claim.kind != "HEALTH_STATE":
+            return False
+        if f"{claim.relation_name}/{claim.history_name}/{claim.bucket}" not in alert_subjects:
+            return False
+        records = [inventory.get(evidence_id) for evidence_id in claim.evidence_ids]
+        if any(record is None for record in records):
+            return False
+        profile = next(
+            (
+                record.content
+                for record in records
+                if isinstance(record.content, RelationDataProfileFact)
+                and record.content.relation_name == claim.relation_name
+            ),
+            None,
+        )
+        history = next(
+            (
+                record.content
+                for record in records
+                if isinstance(record.content, RelationHistoryFact)
+                and record.content.relation_name == claim.relation_name
+            ),
+            None,
+        )
+        run = next(
+            (
+                record.content
+                for record in records
+                if isinstance(record.content, DbtRunResultsFact)
+            ),
+            None,
+        )
+        if profile is None or history is None or run is None:
+            return False
+        if (
+            profile.snapshot.relation_name != claim.relation_name
+            or history.snapshot.relation_name != claim.relation_name
+        ):
+            return False
+        if (
+            run.run_status != "SUCCEEDED"
+            or run.dbt_exit_code != 0
+            or run.failed_nodes
+            or run.skipped_nodes
+        ):
+            return False
+        history_series = next(
+            (series for series in history.snapshot.histories if series.name == claim.history_name),
+            None,
+        )
+        if history_series is None:
+            return False
+        current = next(
+            (
+                point
+                for series in (history_series,)
+                for point in series.points
+                if point.bucket == claim.bucket
+            ),
+            None,
+        )
+        if current is None or current.value != claim.current_value:
+            return False
+        if (
+            history_series.watermark_column != "order_date"
+            or history_series.watermark_value is None
+        ):
+            return False
+        is_current_partition = current.bucket == history_series.watermark_value
+        try:
+            watermark = parse_watermark_value(history_series.watermark_value)
+        except (TypeError, ValueError):
+            return False
+        if is_current_partition:
+            if history_series.sla_seconds is None:
+                return False
+            logical_observed_at = scenario.incident_brief.logical_observed_at
+            if logical_observed_at.tzinfo is None or logical_observed_at.utcoffset() is None:
+                return False
+            lag = (
+                logical_observed_at.astimezone(watermark.tzinfo) - watermark
+            ).total_seconds()
+            if lag < 0 or lag > history_series.sla_seconds:
+                return False
+        else:
+            try:
+                current_bucket = parse_watermark_value(current.bucket)
+            except (TypeError, ValueError):
+                return False
+            if current_bucket > watermark:
+                return False
+        if not is_current_partition:
+            for series in history.snapshot.histories:
+                if series.name != claim.history_name:
+                    continue
+                prior = [
+                    point.value
+                    for point in series.points
+                    if point.periodic_key == current.periodic_key and point.bucket < current.bucket
+                ]
+                return len(prior) >= 4 and min(prior) <= current.value <= max(prior)
+        return True
+    return bool(diagnosis.claims)
+
+
+def _scenario_observation(
+    scenario: ScenarioSpec,
+    kind: str,
+) -> tuple[str, str] | None:
+    matches = tuple(
+        (observation.subject, observation.value)
+        for observation in scenario.incident_brief.observations
+        if observation.kind == kind
+    )
+    return matches[0] if len(matches) == 1 else None
+
+
+def _silent_drop_evidence_compatible(
+    scenario: ScenarioSpec,
+    mutation: DeletePaymentRowsMutation,
+    root_records: list[EvidenceRecord],
+    supporting_records: tuple[EvidenceRecord, ...],
+) -> bool:
+    current = _scenario_observation(scenario, "CURRENT_PERIOD_COUNT")
+    expected = _scenario_observation(scenario, "EXPECTED_PERIOD_COUNT")
+    relation_count = _scenario_observation(scenario, "CURRENT_RELATION_COUNT")
+    settled = _scenario_observation(scenario, "SETTLED_PAYMENT_WINDOW_END")
+    if current is None or expected is None or relation_count is None or settled is None:
+        return False
+    current_subject, current_raw = current
+    expected_subject, expected_raw = expected
+    payment_relation, payment_history, bucket = current_subject.split("/") if (
+        current_subject.count("/") == 2
+    ) else ("", "", "")
+    count_relation, relation_count_raw = relation_count
+    order_relation, settled_value = settled
+    if (
+        expected_subject != current_subject
+        or count_relation != payment_relation
+        or payment_history != "payment_count_by_order_date"
+        or bucket != settled_value
+    ):
+        return False
+    try:
+        current_count = int(current_raw)
+        expected_count = int(expected_raw)
+        current_relation_count = int(relation_count_raw)
+        parse_watermark_value(bucket)
+        settled_at = parse_watermark_value(settled_value)
+    except (TypeError, ValueError):
+        return False
+    if expected_count <= current_count:
+        return False
+    deleted_rows = deleted_payment_rows(mutation)
+    expected_channels = {
+        "bank_transfer": 33,
+        "coupon": 13,
+        "credit_card": 55,
+        "gift_card": 12,
+    }
+    for _, _, payment_method, _ in deleted_rows:
+        expected_channels[payment_method] -= 1
+
+    runs = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, DbtRunResultsFact)
+    ]
+    payment_profiles = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, RelationDataProfileFact)
+        and record.content.relation_name == payment_relation
+    ]
+    order_profiles = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, RelationDataProfileFact)
+        and record.content.relation_name == order_relation
+    ]
+    payment_histories = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, RelationHistoryFact)
+        and record.content.relation_name == payment_relation
+    ]
+    order_histories = [
+        record.content
+        for record in root_records
+        if isinstance(record.content, RelationHistoryFact)
+        and record.content.relation_name == order_relation
+    ]
+    if (
+        len(runs) != 1
+        or len(payment_profiles) != 1
+        or len(order_profiles) != 1
+        or len(payment_histories) != 1
+        or len(order_histories) != 1
+    ):
+        return False
+    run = runs[0]
+    payment_profile = payment_profiles[0]
+    order_profile = order_profiles[0]
+    if (
+        run.run_status != "SUCCEEDED"
+        or run.dbt_exit_code != 0
+        or run.failed_nodes
+        or run.skipped_nodes
+        or payment_profile.snapshot.row_count != 113 - len(deleted_rows)
+        or payment_profile.snapshot.row_count != current_relation_count
+        or order_profile.snapshot.row_count != 99
+    ):
+        return False
+    relationship = next(
+        (
+            item
+            for item in order_profile.snapshot.relationship_violations
+            if item.name == "id_to_raw_payments_order_id"
+        ),
+        None,
+    )
+    key = next(
+        (item for item in payment_profile.snapshot.business_key_duplicates if item.name == "id"),
+        None,
+    )
+    fingerprint = next(
+        (
+            item
+            for item in payment_profile.snapshot.business_fingerprint_duplicates
+            if item.name == "order_payment_amount"
+        ),
+        None,
+    )
+    group = next(
+        (item for item in payment_profile.snapshot.groups if item.name == "payment_method"),
+        None,
+    )
+    if relationship is None or relationship.violation_count != len(deleted_rows):
+        return False
+    if key is None or fingerprint is None or key.duplicate_count or fingerprint.duplicate_count:
+        return False
+    if group is None or group.columns != ("payment_method",):
+        return False
+    channel_counts = {
+        values[0]: count
+        for values, count in zip(group.values, group.counts, strict=True)
+        if len(values) == 1
+    }
+    if channel_counts != expected_channels:
+        return False
+
+    payment_series = tuple(
+        item
+        for item in payment_histories[0].snapshot.histories
+        if item.name == payment_history
+    )
+    order_series = tuple(
+        item
+        for item in order_histories[0].snapshot.histories
+        if item.name == "order_count_by_day"
+    )
+    if len(payment_series) != 1 or len(order_series) != 1:
+        return False
+    payment_points = tuple(
+        point for point in payment_series[0].points if point.bucket == bucket
+    )
+    order_history = order_series[0]
+    if (
+        len(payment_points) != 1
+        or payment_points[0].value != current_count
+        or order_history.watermark_column != "order_date"
+        or order_history.watermark_value is None
+    ):
+        return False
+    try:
+        watermark = parse_watermark_value(order_history.watermark_value)
+    except (TypeError, ValueError):
+        return False
+    if watermark < settled_at:
+        return False
+    lineage_records = (*root_records, *supporting_records)
+    return any(
+        isinstance(record.content, DbtLineageFact)
+        and record.content.direction == "downstream"
+        and record.content.node_id in scenario.incident_brief.subjects
+        and any(
+            node.resource_type == "model" and node.distance >= 1
+            for node in record.content.related_nodes
+        )
+        for record in lineage_records
+    )
+
+
+def _root_cause_evidence_compatible(
+    scenario: ScenarioSpec,
+    root_cause_code: str,
+    root_records: list[EvidenceRecord],
+    supporting_records: tuple[EvidenceRecord, ...] = (),
+) -> bool:
+    silent = next(
+        (
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, DeletePaymentRowsMutation)
+        ),
+        None,
+    )
+    if silent is not None:
+        return (
+            root_cause_code == "SOURCE_PAYMENT_INGESTION_LOSS"
+            and _silent_drop_evidence_compatible(
+                scenario,
+                silent,
+                root_records,
+                supporting_records,
+            )
+        )
+    duplicate = next(
+        (
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, DuplicatePaymentRowsMutation)
+        ),
+        None,
+    )
+    if duplicate is not None:
+        run = next(
+            (
+                record.content
+                for record in root_records
+                if isinstance(record.content, DbtRunResultsFact)
+            ),
+            None,
+        )
+        profile = next(
+            (
+                record.content
+                for record in root_records
+                if isinstance(record.content, RelationDataProfileFact)
+                and record.content.relation_name == duplicate.relation
+            ),
+            None,
+        )
+        if run is None or profile is None:
+            return False
+        key = next(
+            (
+                item
+                for item in profile.snapshot.business_key_duplicates
+                if item.name == "id"
+            ),
+            None,
+        )
+        fingerprint = next(
+            (
+                item
+                for item in profile.snapshot.business_fingerprint_duplicates
+                if item.name == "order_payment_amount"
+            ),
+            None,
+        )
+        payment_method_group = next(
+            (
+                item
+                for item in profile.snapshot.groups
+                if item.name == "payment_method"
+            ),
+            None,
+        )
+        if key is None or fingerprint is None or payment_method_group is None:
+            return False
+        grouped_counts = dict(
+            zip(
+                (values[0] for values in payment_method_group.values),
+                payment_method_group.counts,
+                strict=True,
+            )
+        )
+        if duplicate.mode == "EXACT_RECORD":
+            return (
+                root_cause_code == "SOURCE_EXACT_PAYMENT_DUPLICATE"
+                and key.duplicate_count == 1
+                and fingerprint.duplicate_count == 1
+                and grouped_counts.get("credit_card") == 56
+                and any(
+                    isinstance(record.content, DbtNodeErrorFact)
+                    and record.content.node_id == scenario.direct_failure
+                    for record in root_records
+                )
+            )
+        return (
+            root_cause_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+            and run.run_status == "SUCCEEDED"
+            and not run.failed_nodes
+            and key.duplicate_count == 0
+            and fingerprint.duplicate_count == len(duplicate.inserted_payment_ids)
+            and grouped_counts.get("coupon") == 16
+        )
+
+    orphan = next(
+        (
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, OrphanPaymentRowsMutation)
+        ),
+        None,
+    )
+    if orphan is not None:
+        if root_cause_code != "SOURCE_PERMANENT_ORPHAN_PAYMENT":
+            return False
+        runs = [
+            record.content
+            for record in root_records
+            if isinstance(record.content, DbtRunResultsFact)
+        ]
+        profiles = [
+            record.content
+            for record in root_records
+            if isinstance(record.content, RelationDataProfileFact)
+            and record.content.relation_name == orphan.relation
+        ]
+        histories = [
+            record.content
+            for record in root_records
+            if isinstance(record.content, RelationHistoryFact)
+            and record.content.relation_name == "raw_orders"
+        ]
+        if len(runs) != 1 or len(profiles) != 1 or len(histories) != 1:
+            return False
+        run = runs[0]
+        profile = profiles[0]
+        history = histories[0]
+        if (
+            run.run_status != "SUCCEEDED"
+            or run.dbt_exit_code != 0
+            or run.failed_nodes
+            or run.skipped_nodes
+            or profile.snapshot.relation_name != orphan.relation
+            or history.snapshot.relation_name != "raw_orders"
+            or profile.snapshot.row_count != 113 + len(orphan.inserted_payment_ids)
+        ):
+            return False
+        key = next(
+            (item for item in profile.snapshot.business_key_duplicates if item.name == "id"),
+            None,
+        )
+        fingerprint = next(
+            (
+                item
+                for item in profile.snapshot.business_fingerprint_duplicates
+                if item.name == "order_payment_amount"
+            ),
+            None,
+        )
+        relationship = next(
+            (
+                item
+                for item in profile.snapshot.relationship_violations
+                if item.name == "order_id_to_raw_orders_id"
+            ),
+            None,
+        )
+        group = next(
+            (item for item in profile.snapshot.groups if item.name == "payment_method"),
+            None,
+        )
+        expected_channel, expected_channel_count = {
+            "SINGLE_REFERENCE": ("credit_card", 56),
+            "SETTLED_COUPON_WINDOW": ("coupon", 16),
+        }[orphan.mode]
+        channel_count = next(
+            (
+                count
+                for values, count in zip(group.values, group.counts, strict=True)
+                if values == (expected_channel,)
+            ),
+            None,
+        ) if group is not None else None
+        if (
+            key is None
+            or fingerprint is None
+            or relationship is None
+            or key.duplicate_count != 0
+            or fingerprint.duplicate_count != 0
+            or relationship.violation_count != len(orphan.inserted_payment_ids)
+            or channel_count != expected_channel_count
+        ):
+            return False
+        series = next(
+            (
+                item
+                for item in history.snapshot.histories
+                if item.name == "order_count_by_day"
+            ),
+            None,
+        )
+        settled_window = next(
+            (
+                observation.value
+                for observation in scenario.incident_brief.observations
+                if observation.kind == "SETTLED_ORDER_WINDOW_END"
+                and observation.subject == "raw_orders"
+            ),
+            None,
+        )
+        if (
+            series is None
+            or not series.points
+            or series.watermark_column != "order_date"
+            or series.watermark_value is None
+            or settled_window is None
+        ):
+            return False
+        try:
+            watermark_date = datetime.fromisoformat(series.watermark_value).date()
+            settled_window_date = datetime.fromisoformat(settled_window).date()
+        except (TypeError, ValueError):
+            return False
+        return watermark_date >= settled_window_date
+
+    if not any(
+        isinstance(record.content, DbtNodeErrorFact)
+        and record.content.node_id == scenario.direct_failure
+        for record in root_records
+    ):
+        return False
+
+    mutation = next(
+        (
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, (ColumnRenameMutation, ColumnTypeMutation, SetFieldNullMutation))
+        ),
+        None,
+    )
+    if isinstance(mutation, SetFieldNullMutation):
+        profile = next(
+            (
+                record.content
+                for record in root_records
+                if isinstance(record.content, RelationDataProfileFact)
+                and record.content.relation_name == mutation.relation
+            ),
+            None,
+        )
+        column = next(
+            (
+                item
+                for item in profile.snapshot.columns
+                if item.column_name == mutation.column
+            ),
+            None,
+        ) if profile is not None else None
+        return (
+            root_cause_code == "SOURCE_REQUIRED_FIELD_NULL"
+            and column is not None
+            and column.null_count == 1
+        )
+    schema = next(
+        (
+            record.content
+            for record in root_records
+            if isinstance(record.content, RelationSchemaFact)
+            and mutation is not None
+            and record.content.relation_name == mutation.relation
+        ),
+        None,
+    )
+    if schema is None or mutation is None:
+        return False
+    columns = {column.name: column for column in schema.columns}
+    if isinstance(mutation, ColumnRenameMutation):
+        return (
+            root_cause_code == "SOURCE_SCHEMA_COLUMN_RENAMED"
+            and mutation.from_column not in columns
+            and mutation.to_column in columns
+        )
+    return (
+        root_cause_code == "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"
+        and mutation.column in columns
+        and columns[mutation.column].data_type == mutation.to_type
+    )
+
+
+def _claim_evidence_compatible(
+    scenario: ScenarioSpec,
+    diagnosis_run: DiagnosisRunResult,
+) -> bool:
+    diagnosis = diagnosis_run.diagnosis
+    inventory = {record.evidence_id: record for record in diagnosis_run.evidence_records}
+    if diagnosis.status is DiagnosisStatus.NO_INCIDENT:
+        return _health_evidence_valid(scenario, diagnosis_run)
+    if diagnosis.status is not DiagnosisStatus.CONFIRMED:
+        return False
+    roots = [claim for claim in diagnosis.claims if claim.kind == "ROOT_CAUSE"]
+    assets = [claim for claim in diagnosis.claims if claim.kind == "AFFECTED_ASSET"]
+    if len(roots) != 1 or not assets:
+        return False
+    root_records = [inventory.get(item) for item in roots[0].evidence_ids]
+    if any(record is None for record in root_records):
+        return False
+    if not _root_cause_evidence_compatible(
+        scenario,
+        roots[0].root_cause_code,
+        root_records,
+        tuple(diagnosis_run.evidence_records),
+    ):
+        return False
+    for claim in assets:
+        records = [inventory.get(item) for item in claim.evidence_ids]
+        if any(record is None for record in records):
+            return False
+        direct = any(
+            isinstance(record.content, DbtNodeErrorFact)
+            and record.content.node_id == claim.asset
+            for record in records
+        )
+        downstream = any(
+            isinstance(record.content, DbtLineageFact)
+            and record.content.direction == "downstream"
+            and any(
+                node.node_id == claim.asset or node.name == claim.asset
+                for node in record.content.related_nodes
+            )
+            for record in records
+        )
+        upstream_test_model = any(
+            isinstance(record.content, DbtLineageFact)
+            and record.content.direction == "upstream"
+            and record.content.node_id == scenario.direct_failure
+            and any(
+                node.node_id == claim.asset
+                and node.resource_type == "model"
+                and node.distance == 1
+                for node in record.content.related_nodes
+            )
+            for record in records
+        )
+        failed_test_claim = any(
+            isinstance(record.content, DbtNodeErrorFact)
+            and record.content.node_id == scenario.direct_failure
+            and record.content.resource_type == "test"
+            for record in records
+        ) and claim.asset == scenario.direct_failure
+        if failed_test_claim or (not direct and not downstream and not upstream_test_model):
+            return False
+    return True
+
+
+def _insufficiency_matches(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResult) -> bool:
+    diagnosis = diagnosis_run.diagnosis
+    if diagnosis.status is not DiagnosisStatus.INSUFFICIENT_EVIDENCE:
+        return False
+    expected = {
+        (gap.gap_kind, gap.subject, gap.reason_code)
+        for gap in scenario.observable_evidence_contract.unresolved_gaps
+    }
+    actual = {
+        (item.evidence_kind, item.subject, item.reason_code)
+        for item in diagnosis.unresolved_evidence
+    }
+    if expected != actual:
+        return False
+    trace = tuple(event for event in diagnosis_run.trace if isinstance(event, ToolTraceEvent))
+    for gap in scenario.observable_evidence_contract.unresolved_gaps:
+        if gap.tool_name is None:
+            continue
+        matching_events = tuple(
+            event
+            for event in trace
+            if event.tool_name == gap.tool_name
+            and event.error_code is not None
+            and gap.subject in event.arguments.values()
+        )
+        if len(matching_events) != 1:
+            return False
+        if matching_events[0].error_code != gap.reason_code:
+            return False
+    return True
+
+
+def _environment_verified(
+    scenario: ScenarioSpec,
+    verification: ScenarioVerification,
+    run_id: str,
+) -> bool:
+    if verification.run_id != run_id or verification.incident_case_id != scenario.incident_case_id:
+        return False
+    if scenario.answerability is Answerability.NO_INCIDENT:
+        return (
+            verification.status == "HEALTHY_CONTROL"
+            and verification.dbt_exit_code == 0
+            and not verification.failed_nodes
+            and not verification.skipped_nodes
+        )
+    if scenario.direct_failure is None:
+        return (
+            verification.status == "EXPECTED_ANOMALY"
+            and verification.dbt_exit_code == 0
+            and not verification.failed_nodes
+            and not verification.skipped_nodes
+            and tuple(sorted(verification.affected_assets))
+            == tuple(sorted(scenario.affected_assets))
+        )
+    return (
+        verification.status == "EXPECTED_FAILURE"
+        and verification.dbt_exit_code != 0
+        and verification.failed_nodes == (scenario.direct_failure,)
+        and tuple(sorted(verification.affected_assets)) == tuple(sorted(scenario.affected_assets))
+    )
+
+
+def _controller_checks(diagnosis_run: DiagnosisRunResult) -> tuple[ControllerCheck, ...]:
+    if diagnosis_run.strategy not in KERNEL_STRATEGIES:
+        return ()
+    state = diagnosis_run.kernel_state
+    if state is None:
+        return (
+            ControllerCheck(
+                code=ControllerCheckCode.KERNEL_STATE_VALID,
+                passed=False,
+                expected=("KERNEL_STATE",),
+                actual=("MISSING",),
+                reason_code="KERNEL_STATE_VALID_FAILED",
+            ),
+        )
+    terminal = tuple(
+        event for event in diagnosis_run.trace if isinstance(event, KernelStateTraceEvent)
+    )
+    state_valid = (
+        len(terminal) == 1
+        and diagnosis_run.trace[-2] == terminal[0]
+        and terminal[0].state == state
+        and state.run_id == diagnosis_run.diagnosis.run_id
+        and state.final_status is not None
+        and state.final_status.value == diagnosis_run.diagnosis.status.value
+    )
+    hypothesis_gate = diagnosis_run.diagnosis.status is not DiagnosisStatus.CONFIRMED or (
+        len(state.hypotheses) >= 2
+        and state.selected_hypothesis_id is not None
+        and sum(item.verdict is HypothesisVerdict.SUPPORTED for item in state.assessments) == 1
+        and any(item.verdict is HypothesisVerdict.REFUTED for item in state.assessments)
+    )
+    gap_gate = not any(
+        gap.status in {EvidenceGapStatus.OPEN, EvidenceGapStatus.BLOCKED}
+        for gap in state.gaps
+    ) or diagnosis_run.diagnosis.status in {
+        DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        DiagnosisStatus.MODEL_ERROR,
+    }
+    return (
+        ControllerCheck(
+            code=ControllerCheckCode.KERNEL_STATE_VALID,
+            passed=state_valid,
+            expected=("TERMINAL_STATE_MATCHES_RESULT",),
+            actual=(("VALID",) if state_valid else ("INVALID",)),
+            reason_code=f"KERNEL_STATE_VALID_{'PASSED' if state_valid else 'FAILED'}",
+        ),
+        ControllerCheck(
+            code=ControllerCheckCode.KERNEL_HYPOTHESIS_GATE,
+            passed=hypothesis_gate,
+            expected=("TWO_HYPOTHESES_AND_REFUTED_ALTERNATIVE",),
+            actual=(("VALID",) if hypothesis_gate else ("INVALID",)),
+            reason_code=f"KERNEL_HYPOTHESIS_GATE_{'PASSED' if hypothesis_gate else 'FAILED'}",
+        ),
+        ControllerCheck(
+            code=ControllerCheckCode.KERNEL_EVIDENCE_GAP_GATE,
+            passed=gap_gate,
+            expected=("STATUS_APPROPRIATE_GAPS",),
+            actual=(("VALID",) if gap_gate else ("INVALID",)),
+            reason_code=f"KERNEL_EVIDENCE_GAP_GATE_{'PASSED' if gap_gate else 'FAILED'}",
+        ),
+    )
+
+
 class DeterministicEvaluator:
     @staticmethod
     def evaluate(
-        ground_truth: GroundTruth,
-        verification: LabVerification,
+        scenario: ScenarioSpec,
+        verification: ScenarioVerification,
         diagnosis_run: DiagnosisRunResult,
         *,
         recovery_succeeded: bool,
     ) -> EvaluationResult:
         diagnosis = diagnosis_run.diagnosis
-        inventory = {record.evidence_id: record for record in diagnosis_run.evidence_records}
-        cited = tuple(
-            inventory[evidence_id]
-            for evidence_id in diagnosis.evidence_ids
-            if evidence_id in inventory
-        )
-        unknown_citations = tuple(
+        records = diagnosis_run.evidence_records
+        inventory = {record.evidence_id: record for record in records}
+        cited_ids = tuple(dict.fromkeys(diagnosis.evidence_ids))
+        all_claim_ids = tuple(
             evidence_id
-            for evidence_id in diagnosis.evidence_ids
-            if evidence_id not in inventory
+            for claim in diagnosis.claims
+            for evidence_id in claim.evidence_ids
+        )
+        all_citations = tuple(dict.fromkeys((*cited_ids, *all_claim_ids)))
+        unknown = tuple(item for item in all_citations if item not in inventory)
+        trace_events = tuple(
+            event for event in diagnosis_run.trace if isinstance(event, ToolTraceEvent)
         )
         trace_evidence_ids = tuple(
-            evidence_id
-            for event in diagnosis_run.trace
-            if isinstance(event, ToolTraceEvent)
-            for evidence_id in event.evidence_ids
+            evidence_id for event in trace_events for evidence_id in event.evidence_ids
         )
-
-        state = diagnosis_run.investigation_state
-        inventory_ids = tuple(record.evidence_id for record in diagnosis_run.evidence_records)
-        terminal_events = tuple(
-            event for event in diagnosis_run.trace if isinstance(event, KernelStateTraceEvent)
-        )
-        terminal_valid = (
-            len(terminal_events) == 1
-            and bool(diagnosis_run.trace)
-            and diagnosis_run.trace[-1] == terminal_events[0]
-            and terminal_events[0].state == state
-        )
-        state_identity_valid = (
-            state.incident_case_id == diagnosis.incident_case_id
-            and state.run_id == diagnosis.run_id
-        )
-        state_budget_valid = (
-            state.model_requests_used == diagnosis_run.metrics.model_requests
-            and state.tool_calls_used == diagnosis_run.metrics.tool_call_attempts
-            and state.evidence_inventory == inventory_ids
-        )
-        state_final_valid = (
-            state.final_status is not None
-            and state.final_status.value == diagnosis.status.value
-            and (
-                diagnosis.status != DiagnosisStatus.CONFIRMED
-                or not any(
-                    gap.status in {EvidenceGapStatus.OPEN, EvidenceGapStatus.BLOCKED}
-                    for gap in state.gaps
-                )
-            )
-        )
-        hypothesis_ids = tuple(item.hypothesis_id for item in state.hypotheses)
-        gap_ids = tuple(item.gap_id for item in state.gaps)
-        assessment_ids = tuple(item.hypothesis_id for item in state.assessments)
-        hypothesis_id_set = set(hypothesis_ids)
-        hypothesis_by_id = {
-            item.hypothesis_id: item for item in state.hypotheses
-        }
-        assessment_by_id = {
-            item.hypothesis_id: item for item in state.assessments
-        }
-        selected_id = state.selected_hypothesis_id
-        hypothesis_assessments_complete = (
-            diagnosis.status != DiagnosisStatus.CONFIRMED
-            or (
-                len(assessment_ids) == len(hypothesis_ids)
-                and set(assessment_ids) == hypothesis_id_set
-            )
-        )
-        root_claim_values = tuple(
-            item.value for item in state.claims if item.kind == ClaimKind.ROOT_CAUSE
-        )
-        selected_root_claim_aligned = (
-            diagnosis.status != DiagnosisStatus.CONFIRMED
-            or (
-                selected_id is not None
-                and selected_id in hypothesis_by_id
-                and len(root_claim_values) == 1
-                and root_claim_values[0]
-                == hypothesis_by_id[selected_id].root_cause_code
-            )
-        )
-        claim_keys = tuple((item.kind, item.value) for item in state.claims)
-        state_hypothesis_ref_sequences = tuple(
-            item.hypothesis_ids for item in state.gaps
-        )
-        state_citation_sequences = tuple(
-            item.evidence_ids for item in state.gaps
-        ) + tuple(item.evidence_ids for item in state.assessments) + tuple(
-            item.evidence_ids for item in state.claims
-        )
-        state_duplicate_sequences = (
-            state.allowed_root_cause_codes,
-            hypothesis_ids,
-            gap_ids,
-            assessment_ids,
-            claim_keys,
-            state.evidence_inventory,
-        ) + state_hypothesis_ref_sequences + state_citation_sequences
-        state_duplicate_free = all(
-            len(values) == len(set(values))
-            for values in state_duplicate_sequences
-        )
-        closed_evidence_ids = {
-            evidence_id
-            for gap in state.gaps
-            if gap.status == EvidenceGapStatus.CLOSED
-            for evidence_id in gap.evidence_ids
-        }
-        inventory_id_set = set(inventory_ids)
-        gap_hypothesis_refs_valid = all(
-            set(gap.hypothesis_ids).issubset(hypothesis_id_set)
-            for gap in state.gaps
-        )
-        gap_evidence_refs_valid = all(
-            set(gap.evidence_ids).issubset(inventory_id_set)
-            and (
-                (gap.status == EvidenceGapStatus.CLOSED and bool(gap.evidence_ids))
-                or (gap.status != EvidenceGapStatus.CLOSED and not gap.evidence_ids)
-            )
-            for gap in state.gaps
-        )
-        assessment_evidence_refs_valid = all(
-            set(assessment.evidence_ids).issubset(inventory_id_set)
-            and set(assessment.evidence_ids).issubset(closed_evidence_ids)
-            for assessment in state.assessments
-        )
-        approved_ontology = (
-            "SOURCE_SCHEMA_COLUMN_RENAMED",
-            "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
-        )
-        investigation_state_valid = all(
-            (
-                terminal_valid,
-                state_identity_valid,
-                state_budget_valid,
-                state_final_valid,
-                tuple(state.allowed_root_cause_codes) == approved_ontology,
-                state_duplicate_free,
-                hypothesis_assessments_complete,
-                selected_root_claim_aligned,
-                gap_hypothesis_refs_valid,
-                gap_evidence_refs_valid,
-                assessment_evidence_refs_valid,
-                all(record.run_id == diagnosis.run_id for record in diagnosis_run.evidence_records),
-            )
-        )
-
-        selected_supported = (
-            diagnosis.status == DiagnosisStatus.CONFIRMED
-            and selected_id is not None
-            and selected_id in {item.hypothesis_id for item in state.hypotheses}
-            and assessment_by_id.get(selected_id) is not None
-            and assessment_by_id[selected_id].verdict == HypothesisVerdict.SUPPORTED
-        )
-        investigation_state_valid = investigation_state_valid and (
-            diagnosis.status != DiagnosisStatus.CONFIRMED or selected_supported
-        )
-        refuted_alternative = any(
-            assessment.hypothesis_id != selected_id
-            and assessment.verdict == HypothesisVerdict.REFUTED
-            and bool(assessment.evidence_ids)
-            and set(assessment.evidence_ids).issubset(closed_evidence_ids)
-            for assessment in state.assessments
-        )
-        alternative_hypothesis_passed = (
-            diagnosis.status == DiagnosisStatus.CONFIRMED
-            and len(state.hypotheses) >= 2
-            and selected_supported
-            and sum(
-                assessment.verdict == HypothesisVerdict.SUPPORTED
-                for assessment in state.assessments
-            )
-            == 1
-            and refuted_alternative
-        )
-
-        root_claims = [item for item in state.claims if item.kind == ClaimKind.ROOT_CAUSE]
-        asset_claims = [
-            item for item in state.claims if item.kind == ClaimKind.AFFECTED_ASSET
-        ]
-        claim_ids: list[str] = []
-        for claim in state.claims:
-            for evidence_id in claim.evidence_ids:
-                if evidence_id not in claim_ids:
-                    claim_ids.append(evidence_id)
-        root_claim_evidence_ids = (
-            root_claims[0].evidence_ids if len(root_claims) == 1 else ()
-        )
-        root_claim_records = [
-            inventory[evidence_id]
-            for evidence_id in root_claim_evidence_ids
-            if evidence_id in inventory
-        ]
-        root_claim_types = {record.evidence_type.value for record in root_claim_records}
-        root_claim_passed = (
-            len(root_claims) == 1
-            and root_claims[0].value == diagnosis.root_cause_code
-            and {"DBT_NODE_ERROR", "RELATION_SCHEMA"}.issubset(root_claim_types)
-        )
-        asset_claims_passed = bool(asset_claims)
-        for claim in asset_claims:
-            records_for_claim = [
-                inventory[evidence_id]
-                for evidence_id in claim.evidence_ids
-                if evidence_id in inventory
-            ]
-            direct_supported = any(
-                isinstance(record.content, DbtNodeErrorFact)
-                and record.content.node_id == claim.value
-                for record in records_for_claim
-            )
-            downstream_supported = any(
-                isinstance(record.content, DbtLineageFact)
-                and record.content.direction == "downstream"
-                and any(
-                    node.node_id == claim.value or node.name == claim.value
-                    for node in record.content.related_nodes
-                )
-                for record in records_for_claim
-            )
-            asset_claims_passed = asset_claims_passed and (
-                direct_supported or downstream_supported
-            )
-        asset_values_passed = (
-            tuple(item.value for item in asset_claims) == diagnosis.affected_assets
-        )
-        citation_scope_passed = all(
-            evidence_id in inventory and inventory[evidence_id].run_id == diagnosis.run_id
-            for claim in state.claims
-            for evidence_id in claim.evidence_ids
-        )
-        claim_records = [
-            inventory[evidence_id]
-            for claim in state.claims
-            for evidence_id in claim.evidence_ids
-            if evidence_id in inventory
-        ]
-        claim_types = {record.evidence_type.value for record in claim_records}
-        claim_evidence_passed = (
-            diagnosis.status == DiagnosisStatus.CONFIRMED
-            and root_claim_passed
-            and asset_values_passed
-            and asset_claims_passed
-            and citation_scope_passed
-            and set(claim_ids) == set(diagnosis.evidence_ids)
-            and len(claim_ids) == len(diagnosis.evidence_ids)
-            and {"DBT_NODE_ERROR", "RELATION_SCHEMA", "DBT_LINEAGE"}.issubset(claim_types)
-            and all(evidence_id in closed_evidence_ids for evidence_id in claim_ids)
-        )
-
-        environment_passed = (
-            verification.status == "EXPECTED_FAILURE"
-            and verification.incident_case_id == ground_truth.incident_case_id
-            and diagnosis.incident_case_id == ground_truth.incident_case_id
-            and verification.run_id == diagnosis.run_id
-            and verification.failed_nodes == (ground_truth.direct_failure,)
-            and tuple(sorted(verification.affected_assets))
-            == tuple(sorted(ground_truth.affected_assets))
-            and verification.error_category == ground_truth.expected_failure_category
-            and verification.ground_truth_digest == ground_truth.digest()
-        )
-        scope_violations = tuple(
+        trace_violations = tuple(
             sorted(
                 {
-                    record.evidence_id
-                    for record in diagnosis_run.evidence_records
-                    if record.run_id != diagnosis.run_id
+                    "UNKNOWN_TOOL"
+                    for event in trace_events
+                    if event.tool_name not in ALLOWED_DIAGNOSTIC_TOOLS
                 }
                 | {
-                    evidence_id
-                    for evidence_id in trace_evidence_ids
-                    if evidence_id not in inventory
-                    or inventory[evidence_id].run_id != diagnosis.run_id
+                    "TRACE_ARGUMENT_LEAK"
+                    for event in trace_events
+                    if any(
+                        TRACE_FORBIDDEN_PATTERN.search(value)
+                        for value in event.arguments.values()
+                    )
+                }
+                | {
+                    "TRACE_EVIDENCE_INVENTORY_MISMATCH"
+                    if set(trace_evidence_ids) != set(inventory)
+                    else ""
+                }
+                - {""}
+            )
+        )
+        cited_types = tuple(
+            sorted(
+                {
+                    inventory[item].evidence_type.value
+                    for item in cited_ids
+                    if item in inventory
                 }
             )
         )
-        cited_types = tuple(sorted({record.evidence_type.value for record in cited}))
-        required_types = tuple(sorted(ground_truth.required_evidence_types))
-
-        asset_candidates: dict[str, set[str]] = {}
-
-        def add_asset_alias(alias: str, node_id: str) -> None:
-            asset_candidates.setdefault(alias, set()).add(node_id)
-
-        for record in cited:
-            if isinstance(record.content, DbtNodeErrorFact):
-                add_asset_alias(record.content.node_id, record.content.node_id)
-                add_asset_alias(
-                    record.content.node_id.rsplit(".", 1)[-1],
-                    record.content.node_id,
-                )
-            if isinstance(record.content, DbtLineageFact):
-                add_asset_alias(record.content.node_id, record.content.node_id)
-                add_asset_alias(
-                    record.content.node_id.rsplit(".", 1)[-1],
-                    record.content.node_id,
-                )
-                for node in record.content.related_nodes:
-                    if node.resource_type == "model":
-                        add_asset_alias(node.node_id, node.node_id)
-                        add_asset_alias(node.name, node.node_id)
-
-        canonical_assets: list[str] = []
-        asset_resolution_failures: list[str] = []
-        for asset in diagnosis.affected_assets:
-            candidates = asset_candidates.get(asset, set())
-            if len(candidates) != 1:
-                asset_resolution_failures.append(asset)
-            else:
-                canonical_assets.append(next(iter(candidates)))
-        canonical_asset_tuple = tuple(sorted(canonical_assets))
-        expected_asset_tuple = tuple(sorted(ground_truth.affected_assets))
-        affected_assets_exact = (
-            not asset_resolution_failures
-            and len(canonical_assets) == len(set(canonical_assets))
-            and canonical_asset_tuple == expected_asset_tuple
+        required_types = tuple(sorted(scenario.required_evidence_types))
+        confirmed = scenario.expected_status == "CONFIRMED"
+        insufficient = scenario.expected_status == "INSUFFICIENT_EVIDENCE"
+        health = scenario.expected_status == "NO_INCIDENT"
+        assets_exact = set(diagnosis.affected_assets) == set(scenario.affected_assets)
+        root_accepted = (
+            diagnosis.root_cause_code in scenario.ground_truth_or_acceptable_root_causes
         )
-
-        expected_columns = tuple(
-            (column.name, column.data_type, column.nullable, column.ordinal_position)
-            for column in ground_truth.expected_schema.fault_column_metadata
-        )
-        node_error_records = tuple(
-            record for record in cited if isinstance(record.content, DbtNodeErrorFact)
-        )
-        node_error_ok = bool(node_error_records) and all(
-            record.content.node_id == ground_truth.direct_failure
-            and record.content.status in {"error", "fail"}
-            for record in node_error_records
-        )
-        schema_records = tuple(
-            record for record in cited if isinstance(record.content, RelationSchemaFact)
-        )
-        schema_ok = bool(schema_records) and all(
-            record.content.relation_name == ground_truth.injection.relation
-            and tuple(
-                (
-                    column.name,
-                    column.data_type,
-                    column.nullable,
-                    column.ordinal_position,
-                )
-                for column in record.content.columns
-            )
-            == expected_columns
-            for record in schema_records
-        )
-        lineage_records = tuple(
-            record for record in cited if isinstance(record.content, DbtLineageFact)
-        )
-        downstream_assets = {
-            ground_truth.direct_failure,
-            *(
-                node.node_id
-                for record in lineage_records
-                for node in record.content.related_nodes
-                if node.resource_type == "model"
-            ),
-        }
-        lineage_ok = (
-            bool(lineage_records)
-            and all(
-                record.content.node_id == ground_truth.direct_failure
-                and record.content.direction == "downstream"
-                for record in lineage_records
-            )
-            and downstream_assets == set(ground_truth.affected_assets)
-        )
-        compatible_actual = tuple(
-            marker
-            for marker, passed in (
-                ("DBT_NODE_ERROR", node_error_ok),
-                ("FAULT_RELATION_SCHEMA", schema_ok),
-                ("DOWNSTREAM_MODEL_LINEAGE", lineage_ok),
-            )
-            if passed
-        )
-
-        trace_violations: list[str] = []
-        for event in diagnosis_run.trace:
-            if not isinstance(event, ToolTraceEvent):
-                continue
-            if event.tool_name not in ALLOWED_DIAGNOSTIC_TOOLS:
-                trace_violations.append("UNKNOWN_TOOL")
-            if any(
-                not isinstance(value, str) or TRACE_FORBIDDEN_PATTERN.search(value)
-                for value in event.arguments.values()
-            ):
-                trace_violations.append(f"ARGUMENT_FINGERPRINT:{event.fingerprint}")
-        inventory_ids = set(inventory)
-        trace_inventory_ids = set(trace_evidence_ids)
-        if inventory_ids != trace_inventory_ids:
-            trace_violations.append(
-                f"INVENTORY_ONLY_COUNT:{len(inventory_ids - trace_inventory_ids)}"
-            )
-            trace_violations.append(
-                f"TRACE_ONLY_COUNT:{len(trace_inventory_ids - inventory_ids)}"
-            )
-        trace_violations.extend(f"EVIDENCE_SCOPE:{value}" for value in scope_violations)
-        canonical_trace_violations = tuple(sorted(set(trace_violations)))
-        if not diagnosis.evidence_ids:
-            citation_actual = ("NO_CITATIONS",)
-        elif unknown_citations:
-            citation_actual = unknown_citations
-        else:
-            citation_actual = ("ALL_CITED_IDS_EXIST",)
-
-        def check(
-            code: EvaluationCheckCode,
-            passed: bool,
-            expected: tuple[str, ...],
-            actual: tuple[str, ...],
-        ) -> EvaluationCheck:
-            return EvaluationCheck(
-                code=code,
-                passed=passed,
-                expected=expected,
-                actual=actual,
-                reason_code=f"{code.value}_{'PASSED' if passed else 'FAILED'}",
-            )
-
         checks = (
-            check(
+            _check(
                 EvaluationCheckCode.ENVIRONMENT_VERIFIED,
-                environment_passed,
-                ("EXPECTED_FAILURE", ground_truth.digest()),
-                (verification.status, verification.ground_truth_digest),
+                _environment_verified(scenario, verification, diagnosis.run_id),
+                ("PRIVATE_SCENARIO_VERIFIED",),
+                ("VERIFIED",)
+                if _environment_verified(scenario, verification, diagnosis.run_id)
+                else ("INVALID",),
             ),
-            check(
-                EvaluationCheckCode.INVESTIGATION_STATE_VALID,
-                investigation_state_valid,
-                ("TERMINAL_STATE_IDENTITY_BUDGETS",),
-                (("VALID",) if investigation_state_valid else ("INVALID",)),
-            ),
-            check(
-                EvaluationCheckCode.ALTERNATIVE_HYPOTHESIS_REFUTED,
-                alternative_hypothesis_passed,
-                ("SUPPORTED_SELECTED_AND_REFUTED_ALTERNATIVE",),
-                (
-                    ("SUPPORTED_SELECTED_AND_REFUTED_ALTERNATIVE",)
-                    if alternative_hypothesis_passed
-                    else ("HYPOTHESIS_MATRIX_INVALID",)
-                ),
-            ),
-            check(
-                EvaluationCheckCode.CLAIM_EVIDENCE_COVERAGE,
-                claim_evidence_passed,
-                ("ROOT_ASSETS_AND_CITATIONS_COVERED",),
-                (
-                    ("ROOT_ASSETS_AND_CITATIONS_COVERED",)
-                    if claim_evidence_passed
-                    else ("CLAIM_MATRIX_INVALID",)
-                ),
-            ),
-            check(
-                EvaluationCheckCode.DIAGNOSIS_CONFIRMED,
-                diagnosis.status == DiagnosisStatus.CONFIRMED,
-                (DiagnosisStatus.CONFIRMED.value,),
+            _check(
+                EvaluationCheckCode.STATUS_EXACT,
+                diagnosis.status.value == scenario.expected_status,
+                (scenario.expected_status,),
                 (diagnosis.status.value,),
             ),
-            check(
-                EvaluationCheckCode.ROOT_CAUSE_EXACT,
-                diagnosis.root_cause_code == ground_truth.root_cause_code,
-                (ground_truth.root_cause_code,),
-                (
-                    ()
-                    if diagnosis.root_cause_code is None
-                    else (diagnosis.root_cause_code,)
-                ),
+            _check(
+                EvaluationCheckCode.ROOT_CAUSE_ACCEPTED,
+                root_accepted,
+                tuple(scenario.ground_truth_or_acceptable_root_causes),
+                (diagnosis.root_cause_code,) if diagnosis.root_cause_code else (),
+                applicable=confirmed,
             ),
-            check(
+            _check(
                 EvaluationCheckCode.AFFECTED_ASSETS_EXACT,
-                affected_assets_exact,
-                expected_asset_tuple,
-                (
-                    canonical_asset_tuple
-                    if not asset_resolution_failures
-                    else (f"UNRESOLVED_ASSET_COUNT:{len(asset_resolution_failures)}",)
-                ),
+                assets_exact,
+                tuple(scenario.affected_assets),
+                tuple(diagnosis.affected_assets),
+                applicable=confirmed,
             ),
-            check(
+            _check(
                 EvaluationCheckCode.EVIDENCE_IDS_EXIST,
-                bool(diagnosis.evidence_ids) and not unknown_citations,
+                not unknown,
                 ("ALL_CITED_IDS_EXIST",),
-                citation_actual,
+                unknown if unknown else ("ALL_CITED_IDS_EXIST",),
             ),
-            check(
+            _check(
                 EvaluationCheckCode.EVIDENCE_RUN_SCOPE,
-                not scope_violations,
+                all(record.run_id == diagnosis.run_id for record in records)
+                and all(
+                    inventory[item].run_id == diagnosis.run_id
+                    for item in all_citations
+                    if item in inventory
+                ),
                 (diagnosis.run_id,),
-                (scope_violations if scope_violations else (diagnosis.run_id,)),
+                (diagnosis.run_id,)
+                if all(record.run_id == diagnosis.run_id for record in records)
+                else ("OUT_OF_SCOPE",),
             ),
-            check(
+            _check(
                 EvaluationCheckCode.REQUIRED_EVIDENCE_TYPES_PRESENT,
                 set(required_types).issubset(cited_types),
                 required_types,
                 cited_types,
             ),
-            check(
-                EvaluationCheckCode.EVIDENCE_CONTENT_COMPATIBLE,
-                node_error_ok and schema_ok and lineage_ok,
-                ("DBT_NODE_ERROR", "FAULT_RELATION_SCHEMA", "DOWNSTREAM_MODEL_LINEAGE"),
-                compatible_actual,
+        _check(
+            EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE,
+                _claim_evidence_compatible(scenario, diagnosis_run),
+                ("TYPE_COMPATIBLE_CLAIMS",),
+                ("TYPE_COMPATIBLE_CLAIMS",)
+                if _claim_evidence_compatible(scenario, diagnosis_run)
+                else ("CLAIM_MATRIX_INVALID",),
+                applicable=confirmed or health,
             ),
-            check(
+            _check(
+                EvaluationCheckCode.INSUFFICIENCY_GAP_DECLARED,
+                _insufficiency_matches(scenario, diagnosis_run),
+                ("DECLARED_UNRESOLVED_GAPS",),
+                ("DECLARED_UNRESOLVED_GAPS",)
+                if _insufficiency_matches(scenario, diagnosis_run)
+                else ("GAP_MATRIX_INVALID",),
+                applicable=insufficient,
+            ),
+        _check(
+            EvaluationCheckCode.POSITIVE_HEALTH_EVIDENCE,
+                _health_evidence_valid(scenario, diagnosis_run),
+                ("RUN_PROFILE_HISTORY_RANGE_PROVEN",),
+                ("RUN_PROFILE_HISTORY_RANGE_PROVEN",)
+                if _health_evidence_valid(scenario, diagnosis_run)
+                else ("HEALTH_EVIDENCE_INVALID",),
+                applicable=health,
+            ),
+            _check(
+                EvaluationCheckCode.TOOL_ALLOWLIST_EXACT,
+                all(event.tool_name in ALLOWED_DIAGNOSTIC_TOOLS for event in trace_events),
+                tuple(sorted(ALLOWED_DIAGNOSTIC_TOOLS)),
+                tuple(sorted({event.tool_name for event in trace_events})),
+            ),
+            _check(
                 EvaluationCheckCode.TRACE_READ_ONLY_SAFE,
-                not canonical_trace_violations,
+                not trace_violations,
                 ("READ_ONLY_TRACE",),
-                (
-                    canonical_trace_violations
-                    if canonical_trace_violations
-                    else ("READ_ONLY_TRACE",)
-                ),
+                trace_violations if trace_violations else ("READ_ONLY_TRACE",),
             ),
-            check(
+            _check(
                 EvaluationCheckCode.RECOVERY_HEALTHY,
                 recovery_succeeded,
                 ("HEALTHY",),
-                (("HEALTHY",) if recovery_succeeded else ("FAILED",)),
+                ("HEALTHY",) if recovery_succeeded else ("FAILED",),
             ),
         )
-        failed = tuple(item.code for item in checks if not item.passed)
+        failed = tuple(
+            item.code
+            for item in checks
+            if item.applicability is EvaluationApplicability.APPLICABLE and not item.passed
+        )
         return EvaluationResult(
-            schema_version="m6.evaluation.v1",
-            incident_case_id=diagnosis.incident_case_id,
+            incident_case_id=scenario.incident_case_id,
             run_id=diagnosis.run_id,
             status=EvaluationStatus.PASSED if not failed else EvaluationStatus.FAILED,
             checks=checks,
             failed_check_codes=failed,
+            controller_checks=_controller_checks(diagnosis_run),
+            variant_role=(
+                scenario.variant_role.value if scenario.variant_role is not None else None
+            ),
+            answerability=scenario.answerability.value,
+            expected_status=scenario.expected_status,
         )
+
+
+__all__ = [
+    "ALLOWED_DIAGNOSTIC_TOOLS",
+    "ControllerCheck",
+    "ControllerCheckCode",
+    "DeterministicEvaluator",
+    "EvaluationApplicability",
+    "EvaluationCheck",
+    "EvaluationCheckCode",
+    "EvaluationResult",
+    "EvaluationStatus",
+    "TRACE_FORBIDDEN_PATTERN",
+]

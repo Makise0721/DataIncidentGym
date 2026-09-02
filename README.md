@@ -4,16 +4,32 @@ DataIncidentGym 是一个可复现的数据事故诊断实验场：它在真实 
 
 ## 当前状态
 
-项目已实现 M1–M6，形成“健康基线 → 故障注入 → 证据调查 → 结构化诊断 → 确定性评测 → 六文件报告 → 健康恢复”的完整闭环。
+项目当前包含 M7 的确定性基建、M8 必填字段空值故障族、M9 重复支付故障族、M10 孤立支付故障族和 M11 静默支付丢失/订单 SLA 场景，形成“健康基线 → 隔离场景 → 证据调查 → 结构化诊断 → 确定性评测 → 六文件报告 → 健康恢复”的闭环。P1 题库和确定性主矩阵已完成到 17/17、34/34；`p1-formal-v1` 已执行唯一一次，但因 harness 缺陷永久封存为 `INVALID_HARNESS`，不产生有效的 P1 真实模型 benchmark 结论，也不允许重跑或重新冻结。M7 的模型质量观察仍是历史结果 1/8，不是 P1 benchmark；post-M12 修复记录见 [M12 harness postmortem](docs/m12-harness-postmortem.md)。
 
-当前固定支持两个案例：
+当前固定支持十七个 P1 场景和一个 P0 回归场景：
 
-| case_id | 故障 | root_cause_code |
-| --- | --- | --- |
-| `schema_rename_payment_amount` | `raw_payments.amount` 改名为 `total_amount` | `SOURCE_SCHEMA_COLUMN_RENAMED` |
-| `schema_type_change_payment_amount` | `raw_payments.amount` 从 `integer` 改为 `text` | `SOURCE_SCHEMA_COLUMN_TYPE_CHANGED` |
+| case_id | variant_role | 观测场景 | expected_status |
+| --- | --- | --- | --- |
+| `schema_type_change_payment_amount` | `DEV_CONFIRMABLE` | `raw_payments.amount` 从 `integer` 改为 `text` | `CONFIRMED` |
+| `schema_type_change_order_customer_a` | `TEST_CONFIRMABLE` | `raw_orders.user_id` 从 `integer` 改为 `text`，另有 nullable distractor | `CONFIRMED` |
+| `schema_type_change_order_customer_b` | `TEST_INSUFFICIENT` | 与 A 相同故障，但关键 schema 观测不可见 | `INSUFFICIENT_EVIDENCE` |
+| `order_volume_pattern_a` | `NO_INCIDENT_CONTROL` | 无注入；当前周一计数在健康历史范围内 | `NO_INCIDENT` |
+| `required_null_payment_id` | `DEV_CONFIRMABLE` | `raw_payments.id` 在选定支付记录上被置为 `NULL` | `CONFIRMED` |
+| `required_null_order_customer_a` | `TEST_CONFIRMABLE` | `raw_orders.user_id` 被置为 `NULL`，另有 `raw_customers.last_name` 干扰项 | `CONFIRMED` |
+| `required_null_order_customer_b` | `TEST_INSUFFICIENT` | 与 A 相同故障，但 `raw_orders` 必填字段 profile 不可见 | `INSUFFICIENT_EVIDENCE` |
+| `duplicate_payment_record` | `DEV_CONFIRMABLE` | `raw_payments` 出现完全重复支付记录，唯一性测试失败 | `CONFIRMED` |
+| `duplicate_payment_coupon_a` | `TEST_CONFIRMABLE` | coupon 渠道出现业务指纹重复，但 dbt 构建成功 | `CONFIRMED` |
+| `duplicate_payment_coupon_b` | `TEST_INSUFFICIENT` | 与 A 相同故障，但支付画像和事件身份证据不可见 | `INSUFFICIENT_EVIDENCE` |
+| `orphan_payment_record` | `DEV_CONFIRMABLE` | settled 窗口中的支付引用不存在的订单，历史 watermark 已越过窗口 | `CONFIRMED` |
+| `orphan_payment_coupon_a` | `TEST_CONFIRMABLE` | 与 B 相同 coupon 孤立数据和 nullable 干扰项，订单历史可见 | `CONFIRMED` |
+| `orphan_payment_coupon_b` | `TEST_INSUFFICIENT` | 与 A 相同故障，但订单历史和 ingestion watermark 不可见 | `INSUFFICIENT_EVIDENCE` |
+| `silent_payment_drop_record` | `DEV_CONFIRMABLE` | settled 支付批次静默少于订单侧已确认的支付事件 | `CONFIRMED` |
+| `silent_payment_drop_partition_a` | `TEST_CONFIRMABLE` | 与 B 相同静默丢失故障，订单/支付历史和 watermark 可见 | `CONFIRMED` |
+| `silent_payment_drop_partition_b` | `TEST_INSUFFICIENT` | 与 A 相同故障，但三项关键历史/身份事实不可见 | `INSUFFICIENT_EVIDENCE` |
+| `order_volume_within_sla` | `NO_INCIDENT_CONTROL` | 当前订单分区处于声明的历史范围和 24 小时 SLA 内 | `NO_INCIDENT` |
+| `schema_rename_payment_amount` | P0 regression | `raw_payments.amount` 改名为 `total_amount` | `CONFIRMED` |
 
-M6 引入 Diagnostic Kernel v1，显式维护候选假设、证据缺口、主张与证据绑定及剩余预算。Kernel 只验证、拒绝和投影模型声明；Ground Truth 仅由独立 evaluator 读取。
+M7 建立、M8 延续共享的策略中立诊断结果与评测契约。Diagnostic Kernel v3 显式维护候选假设、证据缺口、主张与证据绑定及剩余预算；Static Skill 使用同一套六工具和终态契约，但不创建 Kernel 状态。私有 ScenarioSpec/verification 仅由实验编排和 evaluator 读取，模型只接收公开 IncidentBrief、dbt artifact、profile snapshot 和六个只读工具。
 
 ## 前置条件
 
@@ -57,6 +73,15 @@ uv run data-incident-gym doctor
 
 `doctor` 会执行模型最小能力探针，成功只表示环境与工具调用能力就绪，不代表完整评测通过。
 
+`p1-formal-v1` 的 Manifest 和正式产物属于已封存的历史批次；以下命令仅用于理解历史流程，不得再次 freeze 或 run：
+
+```powershell
+uv run data-incident-gym benchmark freeze --manifest-id p1-formal-v1 --implementation-revision <40-hex-revision>
+uv run data-incident-gym benchmark verify --manifest config/benchmark/p1-formal-v1.json
+```
+
+正式 `benchmark run` 已在 M12 执行唯一一次。harness 修复不追溯旧批次，真实模型测试保持默认 deselected；新的正式模型批次必须经过独立需求和授权。
+
 ## 运行
 
 构建健康基线：
@@ -70,16 +95,18 @@ uv run data-incident-gym pipeline build
 ```powershell
 uv run data-incident-gym eval run schema_rename_payment_amount
 uv run data-incident-gym eval run schema_type_change_payment_amount
+uv run data-incident-gym eval run schema_type_change_order_customer_a --strategy static-skill
+uv run data-incident-gym eval run order_volume_pattern_a --strategy diagnostic-kernel
 ```
 
 `eval run` 会依次执行初始 reset、故障注入、预期失败构建、Agent 诊断、确定性评测、artifact 写入和最终 reset。单独排障时也可以拆开执行：
 
 ```powershell
-$caseId = 'schema_rename_payment_amount'
+$caseId = 'schema_type_change_payment_amount'
 uv run data-incident-gym pipeline build
 uv run data-incident-gym lab inject $caseId
 uv run data-incident-gym lab build $caseId
-uv run data-incident-gym diagnose $caseId
+uv run data-incident-gym diagnose $caseId --strategy diagnostic-kernel
 uv run data-incident-gym lab reset $caseId
 ```
 
@@ -96,14 +123,14 @@ evaluation.json
 report.md
 ```
 
-`artifacts/` 与 `.dig/` 默认不提交 Git。报告只展示结构化诊断、调查状态和安全的确定性评测结果，不保存模型隐藏推理、原始 provider 回复、凭据或 Ground Truth。
+`artifacts/` 与 `.dig/` 默认不提交 Git。报告只展示结构化诊断、调查状态和安全的确定性评测结果，不保存模型隐藏推理、原始 provider 回复、凭据或 Ground Truth。健康基线还会生成受固定 `ProfileSpec` 约束的聚合 `profile_snapshot.json`；它不包含原始行访问能力或场景答案。
 
 ## 安全边界
 
-- Agent 只有 `get_dbt_run_results`、`get_dbt_node_error`、`get_relation_schema`、`get_dbt_lineage` 四个只读工具。
+- Agent 只有 `get_dbt_run_results`、`get_dbt_node_error`、`get_relation_schema`、`get_dbt_lineage`、`get_relation_data_profile`、`get_relation_history` 六个只读工具。
 - PostgreSQL Schema 查询使用独立的 `dig_reader` 只读角色。
 - 不提供 Shell、任意文件、任意 SQL、数据库写入、源码修改或自动修复能力。
-- 每次诊断最多 8 次模型请求、8 次工具调用，运行上限 300 秒。
+- 每次诊断最多 8 次模型请求、8 次工具调用、2 次结构化输出重试，运行上限 300 秒。
 - 只有 evaluator 读取 Ground Truth；Kernel、Agent、工具层、trace 和报告生成均不读取 Ground Truth。
 - 依赖准备完成后，基线、故障实验、证据读取和确定性评测可离线运行；`diagnose`、`eval run` 和 `doctor` 的模型探针需要访问配置的模型 endpoint。
 
@@ -121,12 +148,12 @@ uv lock --check
 git diff --check
 ```
 
-`integration` 和普通 `e2e` 需要 Docker Desktop 与 PostgreSQL。真实模型验收必须显式启用，会产生外部模型请求：
+`integration` 和普通 `e2e` 需要 Docker Desktop 与 PostgreSQL。真实模型测试默认跳过；M7 开发 smoke 的最新模型质量观察为历史结果 1/8，M8、M9、M10 和 M11 均未运行正式真实模型 benchmark。M9 的 semantic duplicate、M10 的 orphan 和 M11 的 silent-drop 变体刻意覆盖 dbt 成功但数据异常的路径；已知 Windows 长循环原生 dbt/Python 崩溃仍记为环境未验证。任何开发 smoke 都需要单独授权，且不允许重试或替换样本、不计入正式 94-run benchmark。真实模型验收必须显式启用，会产生外部模型请求：
 
 ```powershell
 $env:DIG_RUN_REAL_MODEL_TESTS = '1'
 try {
-    uv run pytest tests/e2e/test_real_model_evaluation.py -q -s
+    uv run pytest tests/e2e/test_real_model_m7_smoke.py -m real_model -q -s
 }
 finally {
     Remove-Item Env:DIG_RUN_REAL_MODEL_TESTS -ErrorAction SilentlyContinue

@@ -1,0 +1,112 @@
+{
+  "schema_version": "profile_spec.v1",
+  "max_group_rows": 128,
+  "max_history_points": 90,
+  "relations": [
+    {
+      "relation_name": "raw_customers",
+      "columns": [
+        {"name": "id"},
+        {"name": "first_name"},
+        {"name": "last_name"}
+      ],
+      "business_keys": [
+        {"name": "id", "columns": ["id"]}
+      ],
+      "business_fingerprints": [],
+      "relationships": [],
+      "groups": [],
+      "histories": []
+    },
+    {
+      "relation_name": "raw_orders",
+      "columns": [
+        {"name": "id"},
+        {"name": "user_id"},
+        {"name": "order_date"},
+        {"name": "status"}
+      ],
+      "business_keys": [
+        {"name": "id", "columns": ["id"]}
+      ],
+      "business_fingerprints": [],
+      "relationships": [
+        {
+          "name": "user_id_to_raw_customers_id",
+          "local_columns": ["user_id"],
+          "referenced_relation": "raw_customers",
+          "referenced_columns": ["id"]
+        },
+        {
+          "name": "id_to_raw_payments_order_id",
+          "local_columns": ["id"],
+          "referenced_relation": "raw_payments",
+          "referenced_columns": ["order_id"]
+        }
+      ],
+      "groups": [],
+      "histories": [
+        {
+          "name": "order_count_by_day",
+          "metric": "count",
+          "time_column": "order_date",
+          "periodicity": "DAY_OF_WEEK",
+          "max_points": 90,
+          "join_path": null,
+          "watermark_column": "order_date",
+          "sla_seconds": 86400
+        }
+      ]
+    },
+    {
+      "relation_name": "raw_payments",
+      "columns": [
+        {"name": "id"},
+        {"name": "order_id"},
+        {"name": "payment_method"},
+        {"name": "amount"}
+      ],
+      "business_keys": [
+        {"name": "id", "columns": ["id"]}
+      ],
+      "business_fingerprints": [
+        {
+          "name": "order_payment_amount",
+          "columns": ["order_id", "payment_method", "amount"]
+        }
+      ],
+      "relationships": [
+        {
+          "name": "order_id_to_raw_orders_id",
+          "local_columns": ["order_id"],
+          "referenced_relation": "raw_orders",
+          "referenced_columns": ["id"]
+        }
+      ],
+      "groups": [
+        {
+          "name": "payment_method",
+          "columns": ["payment_method"],
+          "max_rows": 128
+        }
+      ],
+      "histories": [
+        {
+          "name": "payment_count_by_order_date",
+          "metric": "count",
+          "time_column": "order_date",
+          "periodicity": "DAY",
+          "max_points": 90,
+          "join_path": {
+            "relation": "raw_payments",
+            "local_columns": ["order_id"],
+            "referenced_relation": "raw_orders",
+            "referenced_columns": ["id"]
+          },
+          "watermark_column": null,
+          "sla_seconds": null
+        }
+      ]
+    }
+  ]
+}

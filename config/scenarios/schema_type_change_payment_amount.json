@@ -1,0 +1,50 @@
+{
+  "schema_version": "scenario.v1",
+  "incident_case_id": "schema_type_change_payment_amount",
+  "suite": "P1",
+  "fault_family": "SCHEMA_TYPE_CHANGE",
+  "variant_role": "DEV_CONFIRMABLE",
+  "answerability": "CONFIRMABLE",
+  "seed": {
+    "schema_version": "seed.v1",
+    "fixture_path": "third_party/jaffle_shop",
+    "fixture_commit": "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb",
+    "seed_names": ["raw_customers", "raw_orders", "raw_payments"],
+    "refresh": "FULL_REFRESH"
+  },
+  "incident_brief": {
+    "schema_version": "incident_brief.v1",
+    "signal_code": "DBT_BUILD_FAILED",
+    "summary": "A dbt model build failed while processing payment data.",
+    "subjects": ["model.jaffle_shop.stg_payments"],
+    "logical_observed_at": "2018-04-09T12:00:00Z",
+    "observations": [
+      {"kind": "DBT_MODEL_FAILURE", "subject": "model.jaffle_shop.stg_payments", "value": "error"}
+    ]
+  },
+  "reset_and_injection_contract": {
+    "schema_version": "reset_injection.v1",
+    "mutations": [
+      {"kind": "COLUMN_TYPE_CHANGE", "relation": "raw_payments", "column": "amount", "from_type": "integer", "to_type": "text"}
+    ],
+    "restore_strategy": "FULL_REFRESH_BASELINE"
+  },
+  "ground_truth_or_acceptable_root_causes": ["SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"],
+  "direct_failure": "model.jaffle_shop.stg_payments",
+  "affected_assets": [
+    "model.jaffle_shop.stg_payments",
+    "model.jaffle_shop.orders",
+    "model.jaffle_shop.customers"
+  ],
+  "observable_evidence_contract": {
+    "schema_version": "observable_evidence.v1",
+    "schema_relations": ["raw_payments"],
+    "profile_relations": ["raw_payments"],
+    "history_relations": ["raw_orders"],
+    "unresolved_gaps": []
+  },
+  "required_evidence_types": ["DBT_RUN_RESULTS", "DBT_NODE_ERROR", "DBT_LINEAGE", "RELATION_SCHEMA"],
+  "forbidden_leakage": ["SCENARIO_SPEC", "GROUND_TRUTH", "VARIANT_ROLE", "ANSWERABILITY", "EXPECTED_STATUS", "PRIVATE_PATH"],
+  "distractors": [],
+  "expected_status": "CONFIRMED"
+}

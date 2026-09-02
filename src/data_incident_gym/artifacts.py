@@ -7,9 +7,8 @@ import subprocess
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from enum import StrEnum
-from importlib import resources
 from pathlib import Path
-from typing import Annotated, Any, Literal, NoReturn, Self
+from typing import Annotated, Any, Literal, NoReturn
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -27,23 +26,22 @@ from pydantic import (
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import (
-    CaseId,
+    KERNEL_STRATEGIES,
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
-    RunId,
+    DiagnosticStrategy,
+    KernelStateTraceEvent,
+    PolicyIdentity,
     TraceEvent,
 )
 from data_incident_gym.diagnostic_agent import (
-    SYSTEM_PROMPT_SHA256,
-    SYSTEM_PROMPT_VERSION,
+    MODEL_REQUEST_LIMIT,
+    OUTPUT_RETRY_LIMIT,
+    TIMEOUT_SECONDS,
+    TOOL_CALL_LIMIT,
 )
-from data_incident_gym.diagnostic_kernel import KernelStateTraceEvent
-from data_incident_gym.evaluation import (
-    EvaluationCheckCode,
-    EvaluationResult,
-    EvaluationStatus,
-)
+from data_incident_gym.evaluation import EvaluationResult, EvaluationStatus
 from data_incident_gym.evidence import EvidenceRecord
 
 ARTIFACT_FILENAMES = (
@@ -67,9 +65,7 @@ def _strict_aware_datetime(value: object) -> datetime:
             value = datetime.fromisoformat(value)
         except ValueError as error:
             raise ValueError("timestamp must be an ISO datetime") from error
-    if type(value) is not datetime:
-        raise ValueError("timestamp must be a datetime")
-    if value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
     if value.utcoffset() != timedelta(0):
         raise ValueError("timestamp must be UTC")
@@ -102,7 +98,7 @@ class BudgetSummary(BaseModel):
 class TraceEnvelope(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["m6.trace.v1"]
+    schema_version: Literal["p1.trace.v1"]
     sequence: Annotated[StrictInt, Field(ge=1)]
     event: TraceEvent
 
@@ -110,13 +106,13 @@ class TraceEnvelope(BaseModel):
 class EvidenceArtifact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["m6.evidence.v1"]
-    incident_case_id: CaseId
-    run_id: RunId
+    schema_version: Literal["p1.evidence.v1"]
+    incident_case_id: StrictStr
+    run_id: StrictStr
     records: tuple[EvidenceRecord, ...]
 
     @model_validator(mode="after")
-    def validate_record_scope(self) -> Self:
+    def validate_record_scope(self) -> EvidenceArtifact:
         if any(record.run_id != self.run_id for record in self.records):
             raise ValueError("evidence records must match artifact run")
         return self
@@ -125,17 +121,27 @@ class EvidenceArtifact(BaseModel):
 class RunMetadata(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["m6.metadata.v1"]
-    incident_case_id: CaseId
-    run_id: RunId
+    schema_version: Literal["p1.metadata.v1"]
+    incident_case_id: StrictStr
+    run_id: StrictStr
+    strategy: DiagnosticStrategy
     code_revision: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{40}$")]
     workspace_dirty: StrictBool
     provider: StrictStr
     model: StrictStr
     model_base_url: StrictStr
     budget: BudgetSummary
-    prompt_version: Literal["m6.diagnosis.v1"]
-    prompt_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+    base_prompt_version: StrictStr
+    base_prompt_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+    strategy_prompt_version: StrictStr
+    strategy_prompt_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+    controller_protocol_version: StrictStr
+    controller_protocol_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+    tool_schema_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
+    benchmark_manifest_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None
+    variant_role: StrictStr | None
+    answerability: StrictStr
+    expected_status: StrictStr
     started_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]
     finished_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]
     elapsed_ms: Annotated[StrictInt, Field(ge=0)]
@@ -145,47 +151,45 @@ class RunMetadata(BaseModel):
     artifact_files: tuple[StrictStr, ...]
 
     @model_validator(mode="after")
-    def validate_metadata_contract(self) -> Self:
+    def validate_contract(self) -> RunMetadata:
         if self.finished_at < self.started_at:
             raise ValueError("finished_at must not precede started_at")
-        if self.artifact_files != ARTIFACT_FILENAMES:
-            raise ValueError("artifact_files must match the canonical six files")
         expected_elapsed = int((self.finished_at - self.started_at).total_seconds() * 1000)
         if self.elapsed_ms != expected_elapsed:
             raise ValueError("elapsed_ms must match timestamps")
+        if self.artifact_files != ARTIFACT_FILENAMES:
+            raise ValueError("artifact_files must match the canonical six files")
         return self
 
 
 class ArtifactRun(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    incident_case_id: CaseId
-    run_id: RunId
+    incident_case_id: StrictStr
+    run_id: StrictStr
     started_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]
     finished_at: Annotated[datetime, BeforeValidator(_strict_aware_datetime)]
     recovery_status: RecoveryStatus
     model_base_url: StrictStr
+    benchmark_manifest_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
     diagnosis_run: DiagnosisRunResult
     evaluation: EvaluationResult
 
     @model_validator(mode="after")
-    def validate_cross_file_identity(self) -> Self:
-        diagnosis = self.diagnosis_run.diagnosis
-        parsed_base_url = urlsplit(self.model_base_url)
+    def validate_cross_file_identity(self) -> ArtifactRun:
+        parsed = urlsplit(self.model_base_url)
         if (
-            parsed_base_url.scheme not in {"http", "https"}
-            or not parsed_base_url.hostname
-            or parsed_base_url.username is not None
-            or parsed_base_url.password is not None
-            or parsed_base_url.query
-            or parsed_base_url.fragment
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
         ):
             raise ValueError("model_base_url must be a safe HTTP(S) URL")
         if self.finished_at < self.started_at:
             raise ValueError("finished_at must not precede started_at")
-        if diagnosis.incident_case_id != self.incident_case_id:
-            raise ValueError("diagnosis case must match artifact run")
-        if diagnosis.run_id != self.run_id:
+        if self.diagnosis_run.diagnosis.run_id != self.run_id:
             raise ValueError("diagnosis run_id must match artifact run")
         if self.evaluation.incident_case_id != self.incident_case_id:
             raise ValueError("evaluation case must match artifact run")
@@ -194,9 +198,9 @@ class ArtifactRun(BaseModel):
         recovery_check = next(
             check
             for check in self.evaluation.checks
-            if check.code == EvaluationCheckCode.RECOVERY_HEALTHY
+            if check.code.value == "RECOVERY_HEALTHY"
         )
-        if recovery_check.passed != (self.recovery_status == RecoveryStatus.HEALTHY):
+        if recovery_check.passed != (self.recovery_status is RecoveryStatus.HEALTHY):
             raise ValueError("recovery status must match evaluation")
         return self
 
@@ -233,24 +237,24 @@ class ArtifactWriter:
     def write(self, run: ArtifactRun) -> Path:
         artifact_root: Path | None = None
         temporary: Path | None = None
-        temporary_owned = False
+        owned = False
         try:
             artifact_root = self._validated_artifact_root()
             final = artifact_root / run.run_id
             self._reject_existing_or_symlink(final, artifact_root)
             temporary = artifact_root / f".{run.run_id}.{uuid4().hex}.tmp"
             temporary.mkdir(exist_ok=False)
-            temporary_owned = True
+            owned = True
             payloads = self._build_payloads(run)
             self._write_payloads(temporary, payloads)
             self._validate_complete_bundle(temporary, run, payloads)
             self._reject_existing_or_symlink(final, artifact_root)
             temporary.rename(final)
+            return final
         except Exception:
-            if temporary_owned and artifact_root is not None and temporary is not None:
+            if owned and artifact_root is not None and temporary is not None:
                 self._remove_owned_temporary_directory(artifact_root, temporary)
             self._raise_write_error()
-        return final
 
     def _validated_artifact_root(self) -> Path:
         project_root = self._project_root.resolve(strict=True)
@@ -262,10 +266,10 @@ class ArtifactWriter:
         artifact_root.mkdir(parents=True, exist_ok=True)
         if artifact_root.is_symlink() or not artifact_root.is_dir():
             raise ValueError("artifact root must be a directory")
-        resolved_root = artifact_root.resolve(strict=True)
-        if resolved_root.parent != project_root:
+        resolved = artifact_root.resolve(strict=True)
+        if resolved.parent != project_root:
             raise ValueError("artifact root escaped project root")
-        return resolved_root
+        return resolved
 
     @staticmethod
     def _reject_existing_or_symlink(final: Path, artifact_root: Path) -> None:
@@ -296,30 +300,40 @@ class ArtifactWriter:
 
     def _build_metadata(self, run: ArtifactRun) -> RunMetadata:
         revision, workspace_dirty = self._git_state()
-        metrics = run.diagnosis_run.metrics
-        safe_provider = _safe_runtime_label(metrics.provider)
-        safe_model = _safe_runtime_label(metrics.model)
-        safe_metrics = metrics.model_copy(
-            update={"provider": safe_provider, "model": safe_model}
-        )
+        diagnosis_run = run.diagnosis_run
+        identity: PolicyIdentity = diagnosis_run.policy_identity
+        metrics = diagnosis_run.metrics
+        provider = _safe_runtime_label(metrics.provider)
+        model = _safe_runtime_label(metrics.model)
+        safe_metrics = metrics.model_copy(update={"provider": provider, "model": model})
         elapsed_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
         return RunMetadata(
-            schema_version="m6.metadata.v1",
+            schema_version="p1.metadata.v1",
             incident_case_id=run.incident_case_id,
             run_id=run.run_id,
+            strategy=diagnosis_run.strategy,
             code_revision=revision,
             workspace_dirty=workspace_dirty,
-            provider=safe_provider,
-            model=safe_model,
+            provider=provider,
+            model=model,
             model_base_url=run.model_base_url,
             budget=BudgetSummary(
-                model_request_limit=8,
-                tool_call_limit=8,
-                output_retry_limit=2,
-                timeout_seconds=300,
+                model_request_limit=MODEL_REQUEST_LIMIT,
+                tool_call_limit=TOOL_CALL_LIMIT,
+                output_retry_limit=OUTPUT_RETRY_LIMIT,
+                timeout_seconds=TIMEOUT_SECONDS,
             ),
-            prompt_version=SYSTEM_PROMPT_VERSION,
-            prompt_sha256=SYSTEM_PROMPT_SHA256,
+            base_prompt_version=identity.base_prompt_version,
+            base_prompt_sha256=identity.base_prompt_sha256,
+            strategy_prompt_version=identity.strategy_prompt_version,
+            strategy_prompt_sha256=identity.strategy_prompt_sha256,
+            controller_protocol_version=identity.controller_protocol_version,
+            controller_protocol_sha256=identity.controller_protocol_sha256,
+            tool_schema_sha256=identity.tool_schema_sha256,
+            benchmark_manifest_sha256=run.benchmark_manifest_sha256,
+            variant_role=run.evaluation.variant_role,
+            answerability=run.evaluation.answerability,
+            expected_status=run.evaluation.expected_status,
             started_at=run.started_at,
             finished_at=run.finished_at,
             elapsed_ms=elapsed_ms,
@@ -333,7 +347,7 @@ class ArtifactWriter:
         metadata = self._build_metadata(run)
         trace = "".join(
             TraceEnvelope(
-                schema_version="m6.trace.v1",
+                schema_version="p1.trace.v1",
                 sequence=index,
                 event=event,
             ).model_dump_json()
@@ -344,7 +358,7 @@ class ArtifactWriter:
             "metadata.json": metadata.model_dump_json(indent=2) + "\n",
             "trace.jsonl": trace,
             "evidence.json": EvidenceArtifact(
-                schema_version="m6.evidence.v1",
+                schema_version="p1.evidence.v1",
                 incident_case_id=run.incident_case_id,
                 run_id=run.run_id,
                 records=run.diagnosis_run.evidence_records,
@@ -360,16 +374,13 @@ class ArtifactWriter:
         if tuple(payloads) != ARTIFACT_FILENAMES:
             raise ValueError("payloads must contain the canonical six files")
         for filename, payload in payloads.items():
-            path = temporary / filename
-            with path.open("x", encoding="utf-8", newline="") as stream:
+            with (temporary / filename).open("x", encoding="utf-8", newline="") as stream:
                 stream.write(payload)
 
     def _render_report(self, run: ArtifactRun, metadata: RunMetadata) -> str:
         source = (
-            resources.files("data_incident_gym")
-            .joinpath("templates", "report.md.j2")
-            .read_text(encoding="utf-8")
-        )
+            Path(__file__).parent / "templates" / "report.md.j2"
+        ).read_text(encoding="utf-8")
         template = Environment(
             undefined=StrictUndefined,
             autoescape=True,
@@ -383,14 +394,15 @@ class ArtifactWriter:
             for evidence_id in run.diagnosis_run.diagnosis.evidence_ids
             if evidence_id in evidence_by_id
         )
-        investigation_state = run.diagnosis_run.investigation_state
+        kernel_state = run.diagnosis_run.kernel_state
         verdict_by_id = {
             assessment.hypothesis_id: assessment.verdict.value
-            for assessment in investigation_state.assessments
+            for assessment in (kernel_state.assessments if kernel_state is not None else ())
         }
         rendered = template.render(
             incident_case_id=run.incident_case_id,
             run_id=run.run_id,
+            strategy=run.diagnosis_run.strategy,
             model=metadata.model,
             provider=metadata.provider,
             model_base_url=metadata.model_base_url,
@@ -400,7 +412,7 @@ class ArtifactWriter:
             cited_evidence=cited_evidence,
             metrics=run.diagnosis_run.metrics,
             recovery_status=run.recovery_status,
-            investigation_state=investigation_state,
+            kernel_state=kernel_state,
             verdict_by_id=verdict_by_id,
         )
         return rendered.rstrip("\n") + "\n"
@@ -416,18 +428,19 @@ class ArtifactWriter:
             raise ValueError("artifact bundle must contain exactly six files")
         temporary_root = temporary.resolve(strict=True)
         for path in entries:
-            if path.is_symlink() or not path.is_file():
+            invalid_path = (
+                path.is_symlink()
+                or not path.is_file()
+                or path.resolve(strict=True).parent != temporary_root
+            )
+            if invalid_path:
                 raise ValueError("artifact bundle contains an invalid path")
-            if path.resolve(strict=True).parent != temporary_root:
-                raise ValueError("artifact bundle path escaped temporary directory")
-
         texts = {
             filename: (temporary / filename).read_text(encoding="utf-8")
             for filename in ARTIFACT_FILENAMES
         }
         if texts != payloads:
             raise ValueError("artifact bundle changed during validation")
-
         metadata = RunMetadata.model_validate(_load_json(texts["metadata.json"]))
         trace_envelopes = tuple(
             TraceEnvelope.model_validate(_load_json(line))
@@ -437,25 +450,40 @@ class ArtifactWriter:
         evidence = EvidenceArtifact.model_validate(_load_json(texts["evidence.json"]))
         diagnosis = Diagnosis.model_validate(_load_json(texts["diagnosis.json"]))
         evaluation = EvaluationResult.model_validate(_load_json(texts["evaluation.json"]))
-
-        if metadata.incident_case_id != run.incident_case_id or metadata.run_id != run.run_id:
+        if (
+            metadata.incident_case_id != run.incident_case_id
+            or metadata.run_id != run.run_id
+            or metadata.strategy is not run.diagnosis_run.strategy
+        ):
             raise ValueError("metadata identity does not match artifact run")
         if evidence.incident_case_id != run.incident_case_id or evidence.run_id != run.run_id:
             raise ValueError("evidence identity does not match artifact run")
-        if diagnosis != run.diagnosis_run.diagnosis:
-            raise ValueError("diagnosis changed during artifact validation")
-        if evaluation != run.evaluation:
-            raise ValueError("evaluation changed during artifact validation")
+        if diagnosis != run.diagnosis_run.diagnosis or evaluation != run.evaluation:
+            raise ValueError("structured artifact changed during validation")
         if evidence.records != run.diagnosis_run.evidence_records:
             raise ValueError("evidence changed during artifact validation")
-        if tuple(item.event for item in trace_envelopes) != run.diagnosis_run.trace:
+        persisted_trace = tuple(
+            item.event.model_dump(mode="json") for item in trace_envelopes
+        )
+        expected_trace = tuple(
+            event.model_dump(mode="json") for event in run.diagnosis_run.trace
+        )
+        if persisted_trace != expected_trace:
             raise ValueError("trace changed during artifact validation")
-        if not trace_envelopes or not isinstance(
-            trace_envelopes[-1].event, KernelStateTraceEvent
-        ):
-            raise ValueError("trace must end with Kernel state")
-        if trace_envelopes[-1].event.state != run.diagnosis_run.investigation_state:
-            raise ValueError("Kernel state changed during artifact validation")
+        if not trace_envelopes or trace_envelopes[-1].event.event_type != "DIAGNOSIS_TERMINAL":
+            raise ValueError("trace must end with diagnosis terminal")
+        kernel_events = tuple(
+            item.event for item in trace_envelopes if isinstance(item.event, KernelStateTraceEvent)
+        )
+        if run.diagnosis_run.strategy in KERNEL_STRATEGIES:
+            if (
+                len(trace_envelopes) < 2
+                or len(kernel_events) != 1
+                or trace_envelopes[-2].event != kernel_events[0]
+            ):
+                raise ValueError("Kernel trace must end with Kernel state before terminal")
+        elif kernel_events or run.diagnosis_run.kernel_state is not None:
+            raise ValueError("Static trace cannot contain Kernel state")
         if tuple(item.sequence for item in trace_envelopes) != tuple(
             range(1, len(run.diagnosis_run.trace) + 1)
         ):
@@ -464,10 +492,7 @@ class ArtifactWriter:
             raise ValueError("report must end with one newline")
 
     @staticmethod
-    def _remove_owned_temporary_directory(
-        artifact_root: Path,
-        temporary: Path,
-    ) -> None:
+    def _remove_owned_temporary_directory(artifact_root: Path, temporary: Path) -> None:
         try:
             if (
                 temporary.is_symlink()
@@ -482,7 +507,17 @@ class ArtifactWriter:
 
     @staticmethod
     def _raise_write_error() -> NoReturn:
-        error = ArtifactWriteError()
-        error.__cause__ = None
-        error.__context__ = None
-        raise error from None
+        raise ArtifactWriteError() from None
+
+
+__all__ = [
+    "ARTIFACT_FILENAMES",
+    "ArtifactRun",
+    "ArtifactWriteError",
+    "ArtifactWriter",
+    "BudgetSummary",
+    "EvidenceArtifact",
+    "RecoveryStatus",
+    "RunMetadata",
+    "TraceEnvelope",
+]

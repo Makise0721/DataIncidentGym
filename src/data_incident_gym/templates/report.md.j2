@@ -1,9 +1,10 @@
-# DataIncidentGym M6 诊断报告
+# DataIncidentGym M7 诊断报告
 
 ## 运行信息
 
 - 案例：{{ incident_case_id }}
 - 运行：{{ run_id }}
+- 策略：{{ strategy.value }}
 - 模型：{{ provider }} / {{ model }}
 - 模型地址：{{ model_base_url }}
 - 代码版本：{{ code_revision }}
@@ -15,17 +16,15 @@
 
 ## 评测检查
 
-| 检查 | 结果 | 原因码 |
-| --- | --- | --- |
+| 检查 | 适用性 | 结果 | 原因码 |
+| --- | --- | --- | --- |
 {% for check in evaluation.checks -%}
-| {{ check.code.value }} | {{ "通过" if check.passed else "失败" }} | {{ check.reason_code }} |
+| {{ check.code.value }} | {{ check.applicability.value }} | {{ "通过" if check.passed else "失败" }} | {{ check.reason_code | e }} |
 {% endfor %}
 
 ## Diagnosis
 
 - 状态：{{ diagnosis.status.value }}
-- 案例：{{ diagnosis.incident_case_id }}
-- 运行：{{ diagnosis.run_id }}
 - 根因代码：{{ diagnosis.root_cause_code or "NONE" }}
 - 影响资产：{{ diagnosis.affected_assets | join(", ") }}
 - 证据 ID：{{ diagnosis.evidence_ids | join(", ") }}
@@ -33,50 +32,66 @@
 
 ### 摘要
 
-<pre class="diagnosis-summary">{{ diagnosis.summary }}</pre>
+<pre class="diagnosis-summary">{{ diagnosis.summary | e }}</pre>
 
 ### 建议动作
 
-<pre class="recommended-actions">{% for action in diagnosis.recommended_actions %}{{ action }}{% if not loop.last %}
+<pre class="recommended-actions">{% for action in diagnosis.recommended_actions %}{{ action | e }}{% if not loop.last %}
 {% endif %}{% endfor %}</pre>
 
-## 调查状态
+{% if diagnosis.status.value == "NO_INCIDENT" %}
+### 健康证据
+
+本次判定为无事故；健康结论必须由成功运行、当前聚合快照和历史范围共同支持。
+{% elif diagnosis.status.value == "INSUFFICIENT_EVIDENCE" %}
+### 阻塞证据缺口
+
+| 证据类型 | subject | 原因 |
+| --- | --- | --- |
+{% for gap in diagnosis.unresolved_evidence -%}
+| {{ gap.evidence_kind | e }} | {{ gap.subject | e }} | {{ gap.reason_code | e }} |
+{% endfor %}
+{% endif %}
+
+{% if kernel_state is not none %}
+## Kernel 调查状态
 
 | 假设 | 根因编码 | 判定 |
 | --- | --- | --- |
-{% for hypothesis in investigation_state.hypotheses -%}
+{% for hypothesis in kernel_state.hypotheses -%}
 | {{ hypothesis.hypothesis_id | e }} | {{ hypothesis.root_cause_code | e }} | {{ verdict_by_id.get(hypothesis.hypothesis_id, "UNASSESSED") | e }} |
 {% endfor %}
 
-## 证据缺口
+### Kernel 证据缺口
 
-| 缺口 | 类型 | 状态 | 证据数 | 原因码 |
-| --- | --- | --- | --- | --- |
-{% for gap in investigation_state.gaps -%}
-| {{ gap.gap_id | e }} | {{ gap.gap_kind.value | e }} | {{ gap.status.value | e }} | {{ gap.evidence_ids | length }} | {{ (gap.error_code or "NONE") | e }} |
+| 缺口 | subject | 类型 | 状态 | 证据数 | 原因码 |
+| --- | --- | --- | --- | --- | --- |
+{% for gap in kernel_state.gaps -%}
+| {{ gap.gap_id | e }} | {{ gap.subject | e }} | {{ gap.gap_kind.value | e }} | {{ gap.status.value | e }} | {{ gap.evidence_ids | length }} | {{ (gap.error_code or "NONE") | e }} |
 {% endfor %}
+
+### Kernel 预算与最终门禁
+
+- 模型请求：{{ kernel_state.model_requests_used }} / {{ kernel_state.model_request_limit }}，剩余 {{ kernel_state.model_requests_remaining }}
+- 工具调用：{{ kernel_state.tool_calls_used }} / {{ kernel_state.tool_call_limit }}，剩余 {{ kernel_state.tool_calls_remaining }}
+- 最终状态：{{ (kernel_state.final_status.value if kernel_state.final_status else "NONE") | e }}
+- 最终门禁原因：{{ (kernel_state.gate_reason or "NONE") | e }}
+{% endif %}
 
 ## 主张与证据
 
 | 主张类型 | 值 | EvidenceRecord |
 | --- | --- | --- |
-{% for claim in investigation_state.claims -%}
-| {{ claim.kind.value | e }} | {{ claim.value | e }} | {{ claim.evidence_ids | join(", ") | e }} |
+{% for claim in diagnosis.claims -%}
+| {{ claim.kind | e }} | {% if claim.kind == "ROOT_CAUSE" %}{{ claim.root_cause_code | e }}{% elif claim.kind == "AFFECTED_ASSET" %}{{ claim.asset | e }}{% else %}{{ claim.relation_name | e }} / {{ claim.history_name | e }} / {{ claim.bucket | e }} = {{ claim.current_value }}{% endif %} | {{ claim.evidence_ids | join(", ") | e }} |
 {% endfor %}
-
-## 预算与最终门禁
-
-- 模型请求：{{ investigation_state.model_requests_used }} / {{ investigation_state.model_request_limit }}，剩余 {{ investigation_state.model_requests_remaining }}
-- 工具调用：{{ investigation_state.tool_calls_used }} / {{ investigation_state.tool_call_limit }}，剩余 {{ investigation_state.tool_calls_remaining }}
-- 最终状态：{{ (investigation_state.final_status.value if investigation_state.final_status else "NONE") | e }}
-- 最终门禁原因：{{ (investigation_state.gate_reason or "NONE") | e }}
 
 ## 引用证据
 
 | ID | 类型 | 来源 | subject |
 | --- | --- | --- | --- |
 {% for record in cited_evidence -%}
-| {{ record.evidence_id }} | {{ record.evidence_type.value }} | {{ record.source.value }} | {{ record.subject }} |
+| {{ record.evidence_id }} | {{ record.evidence_type.value }} | {{ record.source.value }} | {{ record.subject | e }} |
 {% endfor %}
 
 ## 诊断指标
@@ -88,4 +103,4 @@
 - 成功工具调用：{{ metrics.successful_tool_calls }}
 - 耗时（毫秒）：{{ metrics.elapsed_ms }}
 
-本报告只展示结构化诊断和确定性评测结果，不包含模型隐藏推理、prompt completion、原始工具日志或 provider 异常。单案例只证明 P0 工程闭环。
+本报告只展示结构化诊断和确定性评测结果，不包含模型隐藏推理、prompt completion、原始工具日志或 provider 异常。单案例只证明 M7 工程闭环。

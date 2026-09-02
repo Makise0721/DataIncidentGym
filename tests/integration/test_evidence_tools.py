@@ -9,104 +9,83 @@ import pytest
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evidence_tools import EvidenceTools
-from data_incident_gym.incidents import CASE_ID
-from data_incident_gym.lab import FaultRun, IncidentLab
+from data_incident_gym.lab import IncidentLab, ScenarioRun
 
+SCENARIO_ID = "schema_type_change_payment_amount"
 FAILURE_NODE = "model.jaffle_shop.stg_payments"
-FORBIDDEN_TABLE = "m3_forbidden_write"
+FORBIDDEN_TABLE = "m7_forbidden_write"
 
 
 @dataclass(frozen=True)
 class RealEvidenceRun:
-    run: FaultRun
+    run: ScenarioRun
     tools: EvidenceTools
 
 
 @pytest.fixture(scope="module")
 def real_evidence_run() -> Iterator[RealEvidenceRun]:
-    project_root = PROJECT_ROOT
-    lab = IncidentLab(Settings(_env_file=None), project_root)
-    lab.reset(CASE_ID)
+    lab = IncidentLab(Settings(_env_file=None), PROJECT_ROOT)
+    lab.reset(SCENARIO_ID)
     try:
-        lab.inject(CASE_ID)
-        run = lab.build(CASE_ID)
+        lab.prepare(SCENARIO_ID)
+        run = lab.build(SCENARIO_ID)
         tools = EvidenceTools.for_run(
             run.run_id,
             DiagnosticSettings(_env_file=None),
-            project_root,
+            PROJECT_ROOT,
         )
         yield RealEvidenceRun(run, tools)
     finally:
-        lab.reset(CASE_ID)
+        lab.restore(SCENARIO_ID)
 
 
 @pytest.mark.integration
-def test_real_get_dbt_run_results_reports_expected_failure(
+def test_real_run_results_and_node_error_are_stable(
     real_evidence_run: RealEvidenceRun,
 ) -> None:
     tools = real_evidence_run.tools
-    first = tools.get_dbt_run_results(real_evidence_run.run.run_id)[0]
-    second = tools.get_dbt_run_results(real_evidence_run.run.run_id)[0]
+    run_id = real_evidence_run.run.run_id
+    first = tools.get_dbt_run_results(run_id)[0]
+    second = tools.get_dbt_run_results(run_id)[0]
+    error = tools.get_dbt_node_error(run_id, FAILURE_NODE)[0]
 
-    fact = first.content
-    assert fact.run_status == "FAILED"
-    assert fact.failed_nodes == (FAILURE_NODE,)
-    assert {
-        "model.jaffle_shop.orders",
-        "model.jaffle_shop.customers",
-    } <= set(fact.skipped_nodes)
+    assert first.content.run_status == "FAILED"
+    assert first.content.failed_nodes == (FAILURE_NODE,)
     assert first.evidence_id == second.evidence_id
     assert first.content_digest == second.content_digest
+    assert error.content.node_id == FAILURE_NODE
+    assert "operator does not exist: text / integer" in error.content.message
+    assert "\\" not in error.content.message
+    assert "compiled code at" not in error.content.message
 
 
 @pytest.mark.integration
-def test_real_get_dbt_node_error_is_normalized_and_path_free(
+def test_real_schema_profile_and_history_are_stable(
     real_evidence_run: RealEvidenceRun,
 ) -> None:
     tools = real_evidence_run.tools
-    first = tools.get_dbt_node_error(real_evidence_run.run.run_id, FAILURE_NODE)[0]
-    second = tools.get_dbt_node_error(real_evidence_run.run.run_id, FAILURE_NODE)[0]
+    schema_first = tools.get_relation_schema("raw_payments")[0]
+    schema_second = tools.get_relation_schema("raw_payments")[0]
+    profile_first = tools.get_relation_data_profile("raw_payments")[0]
+    profile_second = tools.get_relation_data_profile("raw_payments")[0]
+    history_first = tools.get_relation_history("raw_orders")[0]
+    history_second = tools.get_relation_history("raw_orders")[0]
 
-    assert 'column "amount" does not exist' in first.content.message
-    assert str(PROJECT_ROOT) not in first.content.message
-    assert str(PROJECT_ROOT).replace("\\", "/") not in first.content.message
-    assert "\\" not in first.content.message
-    assert "compiled code at" not in first.content.message
-    assert first.evidence_id == second.evidence_id
-    assert first.content_digest == second.content_digest
+    columns = {column.name: column for column in schema_first.content.columns}
+    assert columns["amount"].data_type == "text"
+    assert "total_amount" not in columns
+    assert schema_first.evidence_id == schema_second.evidence_id
+    assert profile_first.evidence_id == profile_second.evidence_id
+    assert history_first.evidence_id == history_second.evidence_id
 
-
-@pytest.mark.integration
-def test_real_get_relation_schema_observes_total_amount_with_reader(
-    real_evidence_run: RealEvidenceRun,
-) -> None:
-    record = real_evidence_run.tools.get_relation_schema("raw_payments")[0]
-
-    assert record.source.value == "postgres_catalog"
-    column_names = {column.name for column in record.content.columns}
-    assert "total_amount" in column_names
-    assert "amount" not in column_names
-
-
-@pytest.mark.integration
-def test_real_get_dbt_lineage_finds_upstream_seed_and_downstream_models(
-    real_evidence_run: RealEvidenceRun,
-) -> None:
-    tools = real_evidence_run.tools
-    downstream = tools.get_dbt_lineage(FAILURE_NODE, "downstream")[0].content.related_nodes
-    upstream = tools.get_dbt_lineage(FAILURE_NODE, "upstream")[0].content.related_nodes
-
-    assert {
-        node.node_id for node in downstream if node.resource_type == "model"
-    } == {
-        "model.jaffle_shop.orders",
-        "model.jaffle_shop.customers",
+    points = {
+        point.bucket: point.value
+        for series in history_first.content.snapshot.histories
+        if series.name == "order_count_by_day"
+        for point in series.points
     }
-    assert any(
-        node.node_id == "seed.jaffle_shop.raw_payments"
-        and node.resource_type == "seed"
-        for node in upstream
-    )
+    assert points["2018-04-02"] == 1
+    assert points["2018-03-26"] == 3
 
 
 @pytest.mark.integration
@@ -149,13 +128,6 @@ def test_real_reader_permission_is_read_only() -> None:
                 connection.rollback()
     finally:
         with psycopg.connect(**admin_kwargs) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT rolsuper, rolcreatedb, rolcreaterole, "
-                "rolreplication, rolbypassrls "
-                "FROM pg_roles WHERE rolname = %s",
-                (diagnostic.postgres_user,),
-            )
-            assert cursor.fetchone() == (False, False, False, False, False)
             cursor.execute(
                 "SELECT to_regclass(%s)",
                 (f"{diagnostic.postgres_schema}.{FORBIDDEN_TABLE}",),

@@ -1,0 +1,94 @@
+{
+  "schema_version": "scenario.v1",
+  "incident_case_id": "orphan_payment_coupon_a",
+  "suite": "P1",
+  "fault_family": "PAYMENT_ORPHAN",
+  "variant_role": "TEST_CONFIRMABLE",
+  "answerability": "CONFIRMABLE",
+  "seed": {
+    "schema_version": "seed.v1",
+    "fixture_path": "third_party/jaffle_shop",
+    "fixture_commit": "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb",
+    "seed_names": ["raw_customers", "raw_orders", "raw_payments"],
+    "refresh": "FULL_REFRESH"
+  },
+  "incident_brief": {
+    "schema_version": "incident_brief.v1",
+    "signal_code": "PAYMENT_ORPHAN_ALERT",
+    "summary": "A coupon payment-to-order integrity alert was raised in the settled order window.",
+    "subjects": ["seed.jaffle_shop.raw_payments", "raw_payments", "raw_orders"],
+    "logical_observed_at": "2018-04-09T12:00:00Z",
+    "observations": [
+      {
+        "kind": "PAYMENT_ORPHAN_ALERT",
+        "subject": "raw_payments",
+        "value": "coupon"
+      },
+      {
+        "kind": "SETTLED_ORDER_WINDOW_END",
+        "subject": "raw_orders",
+        "value": "2018-04-03"
+      }
+    ]
+  },
+  "reset_and_injection_contract": {
+    "schema_version": "reset_injection.v1",
+    "mutations": [
+      {
+        "kind": "ORPHAN_PAYMENT_ROWS",
+        "purpose": "FAULT",
+        "relation": "raw_payments",
+        "mode": "SETTLED_COUPON_WINDOW",
+        "inserted_payment_ids": [114, 115, 116],
+        "missing_order_ids": [1000, 1001, 1002]
+      },
+      {
+        "kind": "ADD_NULLABLE_COLUMN",
+        "relation": "raw_payments",
+        "column": "source_batch_note",
+        "data_type": "text",
+        "nullable": true
+      }
+    ],
+    "restore_strategy": "FULL_REFRESH_BASELINE"
+  },
+  "ground_truth_or_acceptable_root_causes": ["SOURCE_PERMANENT_ORPHAN_PAYMENT"],
+  "direct_failure": null,
+  "affected_assets": [
+    "model.jaffle_shop.customers",
+    "model.jaffle_shop.orders",
+    "model.jaffle_shop.stg_payments"
+  ],
+  "observable_evidence_contract": {
+    "schema_version": "observable_evidence.v1",
+    "schema_relations": ["raw_payments"],
+    "profile_relations": ["raw_payments"],
+    "history_relations": ["raw_orders"],
+    "unresolved_gaps": []
+  },
+  "required_evidence_types": [
+    "DBT_RUN_RESULTS",
+    "DBT_LINEAGE",
+    "RELATION_SCHEMA",
+    "RELATION_DATA_PROFILE",
+    "RELATION_HISTORY"
+  ],
+  "forbidden_leakage": [
+    "SCENARIO_SPEC",
+    "GROUND_TRUTH",
+    "VARIANT_ROLE",
+    "ANSWERABILITY",
+    "EXPECTED_STATUS",
+    "PRIVATE_PATH"
+  ],
+  "distractors": [
+    {
+      "kind": "NULLABLE_COLUMN_SCHEMA_DRIFT",
+      "relation": "raw_payments",
+      "column": "source_batch_note",
+      "data_type": "text",
+      "nullable": true
+    }
+  ],
+  "expected_status": "CONFIRMED"
+}

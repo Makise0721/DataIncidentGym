@@ -1,1356 +1,377 @@
 from __future__ import annotations
 
+import inspect
 import json
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.exceptions import IncompleteToolCall, ModelAPIError
-from pydantic_ai.messages import (
-    ModelMessage,
-    ModelResponse,
-    RetryPromptPart,
-    TextPart,
-    ToolCallPart,
-    ToolReturnPart,
-)
+from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.providers.openai import OpenAIProvider
 
+from data_incident_gym.diagnosis import (
+    KERNEL_STRATEGIES,
+    MODEL_STRATEGIES,
+    Diagnosis,
+    DiagnosticStrategy,
+)
 from data_incident_gym.diagnostic_agent import (
-    SYSTEM_PROMPT,
-    SYSTEM_PROMPT_SHA256,
-    SYSTEM_PROMPT_VERSION,
+    BASE_PROMPT,
+    CONTROLLER_PROTOCOL_VERSION,
+    KERNEL_PROMPT,
+    KERNEL_PROMPT_VERSION,
+    NO_TOOL_PROMPT,
+    NO_TOOL_PROMPT_VERSION,
+    P1_ROOT_CAUSE_CODES,
+    STATIC_PROMPT,
+    STATIC_PROMPT_VERSION,
+    TOOL_NAMES,
+    DiagnosisBudget,
     DiagnosisRunner,
     ModelIdentity,
+    load_strategy_prompt,
 )
-from data_incident_gym.diagnostic_config import DiagnosticSettings
-from data_incident_gym.evidence import (
-    DbtLineageFact,
-    DbtLineageNode,
-    DbtNodeErrorFact,
-    DbtRunResultsFact,
-    EvidenceRecord,
-    EvidenceSource,
-    EvidenceToolError,
-    EvidenceType,
-    RelationSchemaColumn,
-    RelationSchemaFact,
-)
+from data_incident_gym.run_context import IncidentBrief
 
 RUN_ID = "a" * 32
-CASE_ID = "synthetic_case"
-FAILED_NODE = "model.synthetic.stg_payments"
-UPSTREAM_NODE = "seed.synthetic.raw_payments"
 
 
-def _write_metadata(project_root: Path) -> None:
+def _write_public_run(project_root: Path) -> None:
     run_root = project_root / ".dig" / "lab" / "runs" / RUN_ID
-    run_root.mkdir(parents=True, exist_ok=True)
-    run_root.joinpath("metadata.json").write_text(
+    run_root.mkdir(parents=True)
+    (run_root / "runtime.json").write_text(
         json.dumps(
             {
-                "schema_version": "m2.run.v1",
+                "schema_version": "p1.runtime.v1",
                 "run_id": RUN_ID,
-                "incident_case_id": CASE_ID,
                 "dbt_exit_code": 1,
-                "ground_truth_digest": "a" * 64,
                 "artifacts": {
                     "manifest": "dbt/target/manifest.json",
                     "run_results": "dbt/target/run_results.json",
                     "dbt_log": "dbt/logs/dbt.log",
                     "schema": "schema.json",
+                    "profile_snapshot": "profile_snapshot.json",
+                    "incident_brief": "incident_brief.json",
                 },
+                "observable_relations": {"schema": [], "profile": [], "history": []},
+                "profile_spec_sha256": "b" * 64,
             }
         ),
         encoding="utf-8",
     )
-
-
-def _run_results_record(*, run_id: str = RUN_ID) -> EvidenceRecord:
-    return EvidenceRecord.create(
-        run_id=run_id,
-        evidence_type=EvidenceType.DBT_RUN_RESULTS,
-        source=EvidenceSource.DBT_RUN_RESULTS,
-        subject=run_id,
-        observed_at=datetime(2026, 8, 25, 9, tzinfo=UTC),
-        content=DbtRunResultsFact(
-            kind="DBT_RUN_RESULTS",
-            run_id=run_id,
-            run_status="FAILED",
-            dbt_exit_code=1,
-            failed_nodes=(FAILED_NODE,),
-            skipped_nodes=("model.synthetic.orders", "model.synthetic.customers"),
-        ),
+    (run_root / "incident_brief.json").write_text(
+        IncidentBrief(
+            schema_version="incident_brief.v1",
+            signal_code="DBT_BUILD_FAILED",
+            summary="A build failed.",
+            subjects=("model.jaffle_shop.stg_payments",),
+            logical_observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+            observations=(),
+        ).model_dump_json(),
+        encoding="utf-8",
     )
 
 
-def _node_error_record() -> EvidenceRecord:
-    return EvidenceRecord.create(
-        run_id=RUN_ID,
-        evidence_type=EvidenceType.DBT_NODE_ERROR,
-        source=EvidenceSource.DBT_RUN_RESULTS,
-        subject=FAILED_NODE,
-        observed_at=datetime(2026, 8, 25, 9, 1, tzinfo=UTC),
-        content=DbtNodeErrorFact(
-            kind="DBT_NODE_ERROR",
-            run_id=RUN_ID,
-            node_id=FAILED_NODE,
-            resource_type="model",
-            status="error",
-            message='column "amount" does not exist',
-        ),
+def _settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        model_base_url="http://127.0.0.1:11434/v1",
+        model_name="synthetic-model",
+        model_api_key=SimpleNamespace(get_secret_value=lambda: "synthetic-key"),
     )
 
 
-def _lineage_record(direction: str) -> EvidenceRecord:
-    related_nodes = (
-        (
-            DbtLineageNode(
-                node_id=UPSTREAM_NODE,
-                resource_type="seed",
-                name="raw_payments",
-                distance=1,
-            ),
+def test_shared_tool_surface_and_budget_are_policy_neutral(tmp_path: Path) -> None:
+    _write_public_run(tmp_path)
+    model = FunctionModel(lambda _messages, _info: None)
+    static = DiagnosisRunner.for_run(
+        RUN_ID,
+        _settings(),
+        DiagnosticStrategy.STATIC_SKILL,
+        tmp_path,
+        model=model,
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+    )
+    kernel = DiagnosisRunner.for_run(
+        RUN_ID,
+        _settings(),
+        DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+        tmp_path,
+        model=model,
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+    )
+
+    assert TOOL_NAMES == (
+        "get_dbt_run_results",
+        "get_dbt_node_error",
+        "get_relation_schema",
+        "get_dbt_lineage",
+        "get_relation_data_profile",
+        "get_relation_history",
+    )
+    assert static.tool_schema_sha256 == kernel.tool_schema_sha256
+    assert static.budget == kernel.budget == DiagnosisBudget(8, 8, 2, 300)
+    assert static.policy_identity.strategy_prompt_sha256 != (
+        kernel.policy_identity.strategy_prompt_sha256
+    )
+    assert tuple(inspect.signature(static.diagnose).parameters) == ()
+
+
+def test_auxiliary_model_strategies_use_only_their_frozen_surfaces(tmp_path: Path) -> None:
+    _write_public_run(tmp_path)
+    model = FunctionModel(lambda _messages, _info: None)
+    runners = {
+        strategy: DiagnosisRunner.for_run(
+            RUN_ID,
+            _settings(),
+            strategy,
+            tmp_path,
+            model=model,
+            tools=SimpleNamespace(),
+            model_identity=ModelIdentity("synthetic", "synthetic-model"),
         )
-        if direction == "upstream"
-        else (
-            DbtLineageNode(
-                node_id="model.synthetic.orders",
-                resource_type="model",
-                name="orders",
-                distance=1,
-            ),
-            DbtLineageNode(
-                node_id="model.synthetic.customers",
-                resource_type="model",
-                name="customers",
-                distance=1,
-            ),
-        )
-    )
-    return EvidenceRecord.create(
-        run_id=RUN_ID,
-        evidence_type=EvidenceType.DBT_LINEAGE,
-        source=EvidenceSource.DBT_MANIFEST,
-        subject=FAILED_NODE,
-        observed_at=datetime(
-            2026, 8, 25, 9, 2 if direction == "upstream" else 9, tzinfo=UTC
-        ),
-        content=DbtLineageFact(
-            kind="DBT_LINEAGE",
-            run_id=RUN_ID,
-            node_id=FAILED_NODE,
-            direction=direction,  # type: ignore[arg-type]
-            related_nodes=related_nodes,
-        ),
-    )
-
-
-def _schema_record() -> EvidenceRecord:
-    return EvidenceRecord.create(
-        run_id=RUN_ID,
-        evidence_type=EvidenceType.RELATION_SCHEMA,
-        source=EvidenceSource.POSTGRES_CATALOG,
-        subject="analytics.raw_payments",
-        observed_at=datetime(2026, 8, 25, 9, 3, tzinfo=UTC),
-        content=RelationSchemaFact(
-            kind="RELATION_SCHEMA",
-            run_id=RUN_ID,
-            schema_name="analytics",
-            relation_name="raw_payments",
-            columns=(
-                RelationSchemaColumn(
-                    name="id", data_type="integer", nullable=True, ordinal_position=1
-                ),
-                RelationSchemaColumn(
-                    name="order_id", data_type="integer", nullable=True, ordinal_position=2
-                ),
-                RelationSchemaColumn(
-                    name="payment_method", data_type="text", nullable=True, ordinal_position=3
-                ),
-                RelationSchemaColumn(
-                    name="amount", data_type="integer", nullable=True, ordinal_position=4
-                ),
-            ),
-        ),
-    )
-
-
-def _records() -> tuple[EvidenceRecord, ...]:
-    return (
-        _run_results_record(),
-        _node_error_record(),
-        _lineage_record("upstream"),
-        _schema_record(),
-        _lineage_record("downstream"),
-    )
-
-
-class SyntheticEvidenceTools:
-    def __init__(self, responses: dict[str, object] | None = None) -> None:
-        self.calls: list[tuple[str, tuple[str, ...]]] = []
-        records = _records()
-        self.responses: dict[str, object] = {
-            "get_dbt_run_results": (records[0],),
-            f"get_dbt_node_error:{FAILED_NODE}": (records[1],),
-            f"get_dbt_lineage:{FAILED_NODE}:upstream": (records[2],),
-            "get_relation_schema:raw_payments": (records[3],),
-            f"get_dbt_lineage:{FAILED_NODE}:downstream": (records[4],),
-        }
-        if responses:
-            self.responses.update(responses)
-
-    def _response(self, key: str) -> tuple[EvidenceRecord, ...]:
-        response = self.responses.get(key, ())
-        if isinstance(response, Exception):
-            raise response
-        return response  # type: ignore[return-value]
-
-    def get_dbt_run_results(self, run_id: str) -> tuple[EvidenceRecord, ...]:
-        self.calls.append(("get_dbt_run_results", (run_id,)))
-        return self._response("get_dbt_run_results")
-
-    def get_dbt_node_error(self, run_id: str, node_id: str) -> tuple[EvidenceRecord, ...]:
-        self.calls.append(("get_dbt_node_error", (run_id, node_id)))
-        return self._response(f"get_dbt_node_error:{node_id}")
-
-    def get_relation_schema(self, relation_name: str) -> tuple[EvidenceRecord, ...]:
-        self.calls.append(("get_relation_schema", (relation_name,)))
-        return self._response(f"get_relation_schema:{relation_name}")
-
-    def get_dbt_lineage(self, node_id: str, direction: str) -> tuple[EvidenceRecord, ...]:
-        self.calls.append(("get_dbt_lineage", (node_id, direction)))
-        return self._response(f"get_dbt_lineage:{node_id}:{direction}")
-
-
-def _insufficient_payload() -> dict[str, object]:
-    return {
-        "status": "INSUFFICIENT_EVIDENCE",
-        "incident_case_id": CASE_ID,
-        "run_id": RUN_ID,
-        "selected_hypothesis_id": None,
-        "assessments": (),
-        "claims": (),
-        "summary": "The available evidence is insufficient for confirmation.",
-        "recommended_actions": ("Collect additional evidence.",),
-        "confidence": 0.2,
+        for strategy in MODEL_STRATEGIES
     }
 
-
-def _confirmed_payload(
-    *,
-    root_code: str = "SOURCE_SCHEMA_COLUMN_RENAMED",
-    run_id: str = RUN_ID,
-) -> dict[str, object]:
-    by_type = {record.evidence_type.value: record for record in _records()}
-    node_error = by_type["DBT_NODE_ERROR"]
-    schema = by_type["RELATION_SCHEMA"]
-    lineage = next(
-        record
-        for record in _records()
-        if record.evidence_type is EvidenceType.DBT_LINEAGE
-        and record.content.direction == "downstream"
+    assert tuple(runners) == MODEL_STRATEGIES
+    assert (
+        tuple(item["name"] for item in runners[DiagnosticStrategy.NO_TOOL]._tool_schema_payload)
+        == ()
     )
-    selected = "h_rename" if root_code == "SOURCE_SCHEMA_COLUMN_RENAMED" else "h_type"
-    alternative = "h_type" if selected == "h_rename" else "h_rename"
-    return {
-        "status": "CONFIRMED",
-        "incident_case_id": CASE_ID,
-        "run_id": run_id,
-        "selected_hypothesis_id": selected,
-        "assessments": (
-            {
-                "hypothesis_id": selected,
-                "verdict": "SUPPORTED",
-                "evidence_ids": (node_error.evidence_id, schema.evidence_id),
-            },
-            {
-                "hypothesis_id": alternative,
-                "verdict": "REFUTED",
-                "evidence_ids": (schema.evidence_id,),
-            },
-        ),
-        "claims": (
-            {
-                "kind": "ROOT_CAUSE",
-                "value": root_code,
-                "evidence_ids": (node_error.evidence_id, schema.evidence_id),
-            },
-            {
-                "kind": "AFFECTED_ASSET",
-                "value": FAILED_NODE,
-                "evidence_ids": (node_error.evidence_id,),
-            },
-            {
-                "kind": "AFFECTED_ASSET",
-                "value": "orders",
-                "evidence_ids": (lineage.evidence_id,),
-            },
-            {
-                "kind": "AFFECTED_ASSET",
-                "value": "customers",
-                "evidence_ids": (lineage.evidence_id,),
-            },
-        ),
-        "summary": "The typed evidence supports the selected source schema cause.",
-        "recommended_actions": ("Restore the source contract.",),
-        "confidence": 0.9,
-    }
-
-
-def _mismatched_root_claim_payload() -> dict[str, object]:
-    payload = _confirmed_payload()
-    claims = list(payload["claims"])  # type: ignore[arg-type]
-    claims[0] = {**claims[0], "value": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"}
-    payload["claims"] = tuple(claims)
-    return payload
-
-
-def _unsupported_selected_hypothesis_payload() -> dict[str, object]:
-    payload = _confirmed_payload()
-    assessments = list(payload["assessments"])  # type: ignore[arg-type]
-    assessments[0] = {**assessments[0], "verdict": "REFUTED"}
-    payload["assessments"] = tuple(assessments)
-    return payload
-
-
-def _unknown_claim_evidence_payload() -> dict[str, object]:
-    payload = _confirmed_payload()
-    claims = list(payload["claims"])  # type: ignore[arg-type]
-    claims[0] = {
-        **claims[0],
-        "evidence_ids": ("ev_" + "f" * 64,),
-    }
-    payload["claims"] = tuple(claims)
-    return payload
-
-
-def _output_call(agent_info: AgentInfo, payload: dict[str, object]) -> ModelResponse:
-    return ModelResponse(
-        parts=[
-            ToolCallPart(
-                agent_info.output_tools[0].name,
-                payload,
-                tool_call_id="synthetic-output",
-            )
-        ]
+    assert tuple(
+        item["name"] for item in runners[DiagnosticStrategy.KERNEL_NO_LINEAGE]._tool_schema_payload
+    ) == tuple(name for name in TOOL_NAMES if name != "get_dbt_lineage")
+    assert tuple(
+        item["name"] for item in runners[DiagnosticStrategy.KERNEL_NO_SCHEMA]._tool_schema_payload
+    ) == tuple(name for name in TOOL_NAMES if name != "get_relation_schema")
+    assert all(runners[strategy]._tool_schema_payload for strategy in KERNEL_STRATEGIES)
+    assert load_strategy_prompt(DiagnosticStrategy.NO_TOOL) == NO_TOOL_PROMPT
+    assert runners[DiagnosticStrategy.NO_TOOL].policy_identity.strategy_prompt_version == (
+        NO_TOOL_PROMPT_VERSION
     )
 
 
-def _intent(gap_id: str, gap_kind: str, **values: object) -> dict[str, object]:
-    hypothesis_ids = tuple(values.pop("hypothesis_ids", ()))
-    new_hypotheses = tuple(values.pop("new_hypotheses", ()))
-    return {
-        "gap_id": gap_id,
-        "gap_kind": gap_kind,
-        "hypothesis_ids": list(hypothesis_ids),
-        "new_hypothesis_ids": [item["hypothesis_id"] for item in new_hypotheses],  # type: ignore[index]
-        "new_hypothesis_root_cause_codes": [
-            item["root_cause_code"] for item in new_hypotheses  # type: ignore[index]
-        ],
-        **values,
-    }
+def test_static_prompt_is_generic_and_kernel_intent_is_not_a_business_argument() -> None:
+    assert load_strategy_prompt(DiagnosticStrategy.STATIC_SKILL) == STATIC_PROMPT
+    assert load_strategy_prompt(DiagnosticStrategy.DIAGNOSTIC_KERNEL) == KERNEL_PROMPT
+    assert "InvestigationState" not in STATIC_PROMPT
+    assert "EvidenceGap" not in STATIC_PROMPT
+    assert "schema_type_change" not in STATIC_PROMPT
+    assert "incident_case_id" not in STATIC_PROMPT
+    assert "gap_id" not in json.dumps(
+        {name: {"run_id": "x"} for name in TOOL_NAMES},
+        sort_keys=True,
+    )
+    assert BASE_PROMPT.strip()
 
 
-def _full_tool_calls() -> list[tuple[str, dict[str, object]]]:
-    return [
-        (
-            "get_dbt_run_results",
-            {
-                "run_id": RUN_ID,
-                **_intent("g_failure", "LOCATE_FAILURE"),
-            },
-        ),
-        (
-            "get_dbt_node_error",
-            {
-                "run_id": RUN_ID,
-                "node_id": FAILED_NODE,
-                **_intent("g_explain", "EXPLAIN_FAILURE"),
-            },
-        ),
-        (
-            "get_dbt_lineage",
-            {
-                "node_id": FAILED_NODE,
-                "direction": "upstream",
-                **_intent("g_source", "DISCOVER_SOURCE_RELATION"),
-            },
-        ),
-        (
-            "get_relation_schema",
-            {
-                "relation_name": "raw_payments",
-                **_intent(
-                    "g_schema",
-                    "DISCRIMINATE_SCHEMA",
-                    hypothesis_ids=("h_rename", "h_type"),
-                    new_hypotheses=(
-                        {
-                            "hypothesis_id": "h_rename",
-                            "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
-                        },
-                        {
-                            "hypothesis_id": "h_type",
-                            "root_cause_code": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
-                        },
-                    ),
-                ),
-            },
-        ),
-        (
-            "get_dbt_lineage",
-            {
-                "node_id": FAILED_NODE,
-                "direction": "downstream",
-                **_intent("g_impact", "MAP_IMPACT"),
-            },
-        ),
-    ]
+def test_static_prompt_exposes_the_shared_m7_claim_contract() -> None:
+    for root_cause_code in (
+        "SOURCE_SCHEMA_COLUMN_RENAMED",
+        "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        "TRANSFORMATION_COLUMN_CAST_CHANGED",
+    ):
+        assert root_cause_code in STATIC_PROMPT
+    assert "direct failed node" in STATIC_PROMPT
+    assert "downstream model assets" in STATIC_PROMPT
+    assert (
+        "upstream source relations are causal inputs, not affected assets" in STATIC_PROMPT.lower()
+    )
 
 
-def _full_scripted_model(
-    payload: dict[str, object] | None = None,
-) -> FunctionModel:
-    calls = _full_tool_calls()
-    final_payload = payload or _confirmed_payload()
+def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> None:
+    expected = (
+        "SOURCE_SCHEMA_COLUMN_RENAMED",
+        "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+        "TRANSFORMATION_COLUMN_CAST_CHANGED",
+        "SOURCE_REQUIRED_FIELD_NULL",
+        "TRANSFORMATION_REQUIRED_FIELD_NULL",
+        "SOURCE_EXACT_PAYMENT_DUPLICATE",
+        "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+        "LEGITIMATE_SPLIT_PAYMENT",
+        "SOURCE_PERMANENT_ORPHAN_PAYMENT",
+        "NORMAL_LATE_ARRIVING_ORDER",
+        "SOURCE_PAYMENT_INGESTION_LOSS",
+        "NORMAL_BUSINESS_PAYMENT_DECLINE",
+    )
 
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        tool_returns = sum(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        )
-        if tool_returns < len(calls):
-            tool_name, arguments = calls[tool_returns]
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name,
-                        arguments,
-                        tool_call_id=f"call-{tool_returns}",
-                    )
-                ]
-            )
-        return _output_call(agent_info, final_payload)
-
-    return FunctionModel(scripted)
+    assert expected == P1_ROOT_CAUSE_CODES
+    assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
+        "p1.kernel.v5",
+        "p1.static.v5",
+        "p1.controller.v4",
+    )
+    for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
+        assert all(code in prompt for code in expected)
+        assert "distance-1 upstream model" in prompt
+        assert "source profile" in prompt.lower()
 
 
-def _runner(
+def test_both_prompts_expose_successful_payment_anomaly_semantics() -> None:
+    for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
+        assert "successful dbt run" in prompt
+        assert "SOURCE_EXACT_PAYMENT_DUPLICATE" in prompt
+        assert "SOURCE_SEMANTIC_PAYMENT_DUPLICATE" in prompt
+        assert "LEGITIMATE_SPLIT_PAYMENT" in prompt
+        assert "PAYMENT_EVENT_IDENTITY" in prompt
+        assert "SOURCE_PERMANENT_ORPHAN_PAYMENT" in prompt
+        assert "NORMAL_LATE_ARRIVING_ORDER" in prompt
+        assert "orphan_payment_record" not in prompt
+        assert "orphan_payment_coupon_a" not in prompt
+        assert "orphan_payment_coupon_b" not in prompt
+
+
+def test_both_prompts_require_history_boundary_for_permanent_orphans() -> None:
+    required = (
+        "A current payment-to-order relationship violation proves an orphan state",
+        "Confirm a permanent orphan only when order history and its watermark",
+        "normal-late-arrival alternatives",
+    )
+    for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
+        assert all(fragment in prompt for fragment in required)
+
+
+def test_kernel_prompt_exposes_the_exact_intent_transport_contract() -> None:
+    assert '"schema_version":"p1.kernel_intent.v1"' in KERNEL_PROMPT
+    assert '"new_hypotheses":[]' in KERNEL_PROMPT
+    assert "LOCATE_FAILURE -> get_dbt_run_results" in KERNEL_PROMPT
+    assert "EXPLAIN_FAILURE -> get_dbt_node_error" in KERNEL_PROMPT
+    assert "DISCOVER_SOURCE_RELATION -> get_dbt_lineage upstream" in KERNEL_PROMPT
+    assert "DISCRIMINATE_SCHEMA -> get_relation_schema" in KERNEL_PROMPT
+    assert "MAP_IMPACT -> get_dbt_lineage downstream" in KERNEL_PROMPT
+    assert "PROFILE_RELATION -> get_relation_data_profile" in KERNEL_PROMPT
+    assert "COMPARE_HISTORY -> get_relation_history" in KERNEL_PROMPT
+    assert '"root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"' in KERNEL_PROMPT
+
+
+class _FailingAgent:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    @contextmanager
+    def parallel_tool_call_execution_mode(self, _: str):
+        yield
+
+    async def run(self, *_: object, **__: object) -> None:
+        raise self._error
+
+
+def _static_runner(
     tmp_path: Path,
-    model: object,
-    tools: object,
-    *,
-    model_identity: ModelIdentity | None = None,
+    model: FunctionModel | None = None,
 ) -> DiagnosisRunner:
-    _write_metadata(tmp_path)
-    if model_identity is None:
-        model_identity = ModelIdentity("pydantic-function", "scripted-kernel-model")
+    _write_public_run(tmp_path)
     return DiagnosisRunner.for_run(
         RUN_ID,
-        DiagnosticSettings(_env_file=None),
-        project_root=tmp_path,
-        model=model,  # type: ignore[arg-type]
-        tools=tools,  # type: ignore[arg-type]
-        model_identity=model_identity,
-    )
-
-
-def test_prompt_exports_m6_gap_driven_contract() -> None:
-    normalized_prompt = " ".join(SYSTEM_PROMPT.split())
-    assert SYSTEM_PROMPT_VERSION == "m6.diagnosis.v1"
-    assert SYSTEM_PROMPT_SHA256
-    assert "InvestigationIntent" in SYSTEM_PROMPT
-    assert "SOURCE_SCHEMA_COLUMN_RENAMED" in SYSTEM_PROMPT
-    assert "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED" in SYSTEM_PROMPT
-    assert "at least two candidate hypotheses" in SYSTEM_PROMPT
-    assert "Begin with get_dbt_run_results" in normalized_prompt
-    assert "new_hypothesis_ids and new_hypothesis_root_cause_codes set to []" in normalized_prompt
-    assert "Only get_relation_schema may register hypotheses" in normalized_prompt
-    assert "Use a fresh gap_id for every tool call" in normalized_prompt
-    assert "Root-cause claims must cite both" in normalized_prompt
-    assert "downstream lineage record" in normalized_prompt
-    assert (
-        "selected_hypothesis_id -> corresponding "
-        "hypothesis.root_cause_code -> ROOT_CAUSE claim.value"
-        in normalized_prompt
-    )
-    assert "related_nodes[].name" in normalized_prompt
-    assert "never use related_nodes[].node_id" in normalized_prompt
-    assert "Ground Truth" not in SYSTEM_PROMPT
-    assert "schema_rename_payment_amount" not in SYSTEM_PROMPT
-    assert "schema_type_change_payment_amount" not in SYSTEM_PROMPT
-
-
-def test_injected_model_requires_truthful_runtime_identity(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="model_identity"):
-        DiagnosisRunner.for_run(
-            RUN_ID,
-            DiagnosticSettings(_env_file=None),
-            tmp_path,
-            model=FunctionModel(
-                lambda messages, agent_info: _output_call(
-                    agent_info, _insufficient_payload()
-                )
-            ),
-            tools=SyntheticEvidenceTools(),
-        )
-
-
-def test_default_adapter_is_openai_chat_completions_without_a_request(tmp_path: Path) -> None:
-    _write_metadata(tmp_path)
-    runner = DiagnosisRunner.for_run(
-        RUN_ID,
-        DiagnosticSettings(_env_file=None),
-        project_root=tmp_path,
-        tools=SyntheticEvidenceTools(),
-    )
-    assert isinstance(runner._model, OpenAIChatModel)
-    assert isinstance(runner._model.provider, OpenAIProvider)
-    assert runner._model.model_name == "mimo-v2.5"
-    assert str(runner._model.provider.client.base_url) == "https://api.xiaomimimo.com/v1/"
-
-
-@pytest.mark.asyncio
-async def test_runner_registers_four_tools_and_returns_model_claims(tmp_path: Path) -> None:
-    tools = SyntheticEvidenceTools()
-    registration_model = TestModel(call_tools=[], custom_output_args=_insufficient_payload())
-    registration_runner = _runner(tmp_path, registration_model, tools)
-    await registration_runner.diagnose(CASE_ID)
-    expected = {
-        "get_dbt_run_results",
-        "get_dbt_node_error",
-        "get_relation_schema",
-        "get_dbt_lineage",
-    }
-    assert {
-        item.name for item in registration_model.last_model_request_parameters.function_tools
-    } == expected
-    assert registration_model.last_model_request_parameters.native_tools == []
-    run_results_tool = next(
-        item
-        for item in registration_model.last_model_request_parameters.function_tools
-        if item.name == "get_dbt_run_results"
-    )
-    tool_schema = run_results_tool.parameters_json_schema
-    assert set(tool_schema["properties"]) == {
-        "run_id",
-        "gap_id",
-        "gap_kind",
-        "hypothesis_ids",
-        "new_hypothesis_ids",
-        "new_hypothesis_root_cause_codes",
-    }
-    assert all(
-        tool_schema["properties"][name]["type"] == "array"
-        for name in (
-            "hypothesis_ids",
-            "new_hypothesis_ids",
-            "new_hypothesis_root_cause_codes",
-        )
-    )
-    assert "intent" not in tool_schema["properties"]
-    relation_tool = next(
-        item
-        for item in registration_model.last_model_request_parameters.function_tools
-        if item.name == "get_relation_schema"
-    )
-    relation_description = relation_tool.parameters_json_schema["properties"][
-        "relation_name"
-    ]["description"]
-    assert "related_nodes[].name" in relation_description
-    assert "related_nodes[].node_id" in relation_description
-    output_tool = registration_model.last_model_request_parameters.output_tools[0]
-    output_schema = output_tool.parameters_json_schema
-    selected_description = output_schema["properties"]["selected_hypothesis_id"][
-        "description"
-    ]
-    claim_value_description = output_schema["$defs"]["ClaimEvidence"]["properties"][
-        "value"
-    ]["description"]
-    assert "root_cause_code" in selected_description
-    assert "ROOT_CAUSE claim.value" in selected_description
-    assert "selected_hypothesis_id" in claim_value_description
-    assert "root_cause_code" in claim_value_description
-
-    model = _full_scripted_model(_confirmed_payload(root_code="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"))
-    result = await _runner(tmp_path, model, tools).diagnose(CASE_ID)
-    assert result.diagnosis.root_cause_code == "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"
-    assert result.diagnosis.affected_assets == (FAILED_NODE, "orders", "customers")
-    assert result.investigation_state.final_status.value == "CONFIRMED"
-    assert result.trace[-1].event_type == "KERNEL_STATE"
-    assert [name for name, _ in tools.calls] == [
-        "get_dbt_run_results",
-        "get_dbt_node_error",
-        "get_dbt_lineage",
-        "get_relation_schema",
-        "get_dbt_lineage",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_exact_duplicate_call_is_blocked_before_second_m3_execution(tmp_path: Path) -> None:
-    tools = SyntheticEvidenceTools()
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        tool_returns = sum(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        )
-        if tool_returns == 0:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "get_dbt_run_results",
-                        _full_tool_calls()[0][1],
-                        tool_call_id="one",
-                    )
-                ]
-            )
-        if tool_returns == 1:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "get_dbt_run_results",
-                        {
-                            "run_id": RUN_ID,
-                            **_intent("g_duplicate", "LOCATE_FAILURE"),
-                        },
-                        tool_call_id="duplicate",
-                    )
-                ]
-            )
-        return _output_call(agent_info, _insufficient_payload())
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-    assert [name for name, _ in tools.calls] == ["get_dbt_run_results"]
-    tool_events = [event for event in result.trace if event.event_type == "TOOL_CALL"]
-    assert any(event.error_code == "DUPLICATE_TOOL_CALL" for event in tool_events)
-    assert result.investigation_state.tool_calls_used == 2
-    assert result.investigation_state.final_status.value == "INSUFFICIENT_EVIDENCE"
-
-
-@pytest.mark.asyncio
-async def test_output_validation_retries_then_model_error(tmp_path: Path) -> None:
-    model_requests = 0
-    retry_contents: list[str] = []
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        nonlocal model_requests
-        model_requests += 1
-        retry_contents.extend(
-            str(part.content)
-            for message in messages
-            for part in message.parts
-            if isinstance(part, RetryPromptPart)
-        )
-        return _output_call(agent_info, _confirmed_payload(run_id="b" * 32))
-
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
-    ).diagnose(CASE_ID)
-    assert model_requests == 3
-    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
-    assert [
-        event.reason_code
-        for event in result.trace
-        if event.event_type == "EVIDENCE_GATE"
-    ] == ["DECISION_SCOPE_MISMATCH"] * 3 + ["MODEL_PROTOCOL_ERROR"]
-    protocol_event = next(
-        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
-    )
-    assert protocol_event.category == "DECISION_CONTRACT_REJECTED"
-    assert protocol_event.stage == "OUTPUT_VALIDATION"
-    assert protocol_event.tool_name
-    assert any("DECISION_SCOPE_MISMATCH" in content for content in retry_contents)
-
-
-@pytest.mark.asyncio
-async def test_root_claim_retry_explains_hypothesis_code_mapping_and_recovers(
-    tmp_path: Path,
-) -> None:
-    tools = SyntheticEvidenceTools()
-    calls = _full_tool_calls()
-    mismatched_payload = _mismatched_root_claim_payload()
-    retry_contents: list[str] = []
-    model_requests = 0
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        nonlocal model_requests
-        model_requests += 1
-        retry_contents.extend(
-            str(part.content)
-            for message in messages
-            for part in message.parts
-            if isinstance(part, RetryPromptPart)
-        )
-        tool_returns = sum(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        )
-        if tool_returns < len(calls):
-            tool_name, arguments = calls[tool_returns]
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name,
-                        arguments,
-                        tool_call_id=f"call-{tool_returns}",
-                    )
-                ]
-            )
-        payload = _confirmed_payload() if retry_contents else mismatched_payload
-        return _output_call(agent_info, payload)
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-
-    assert model_requests == 7
-    assert result.diagnosis.status.value == "CONFIRMED"
-    assert any("ROOT_CLAIM_MISMATCH" in content for content in retry_contents)
-    assert any(
-        "Set the ROOT_CAUSE claim value exactly to the root_cause_code registered for"
-        in content
-        for content in retry_contents
-    )
-    assert any(
-        "Do not use a hypothesis ID, summary, or generic label." in content
-        for content in retry_contents
+        _settings(),
+        DiagnosticStrategy.STATIC_SKILL,
+        tmp_path,
+        model=model or FunctionModel(lambda _messages, _info: None),
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
     )
 
 
 @pytest.mark.asyncio
-async def test_selected_hypothesis_retry_explains_support_requirement_and_recovers(
-    tmp_path: Path,
-) -> None:
-    tools = SyntheticEvidenceTools()
-    calls = _full_tool_calls()
-    retry_contents: list[str] = []
-    model_requests = 0
+async def test_static_model_schema_excludes_controller_generated_error(tmp_path: Path) -> None:
+    observed_schema: dict[str, object] = {}
 
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        nonlocal model_requests
-        model_requests += 1
-        retry_contents.extend(
-            str(part.content)
-            for message in messages
-            for part in message.parts
-            if isinstance(part, RetryPromptPart)
-        )
-        tool_returns = sum(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        )
-        if tool_returns < len(calls):
-            tool_name, arguments = calls[tool_returns]
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name,
-                        arguments,
-                        tool_call_id=f"call-{tool_returns}",
-                    )
-                ]
-            )
-        payload = (
-            _confirmed_payload()
-            if retry_contents
-            else _unsupported_selected_hypothesis_payload()
-        )
-        return _output_call(agent_info, payload)
+    def capture_schema(_messages: object, agent_info: AgentInfo):
+        observed_schema.update(agent_info.output_tools[0].parameters_json_schema)
+        raise UsageLimitExceeded("stop after schema capture")
 
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
+    result = await _static_runner(tmp_path, FunctionModel(capture_schema)).diagnose()
 
-    assert model_requests == 7
-    assert result.diagnosis.status.value == "CONFIRMED"
-    assert any("SELECTED_HYPOTHESIS_NOT_SUPPORTED" in content for content in retry_contents)
-    assert any(
-        "selected_hypothesis_id" in content and "SUPPORTED" in content
-        for content in retry_contents
-    )
+    assert result.diagnosis.summary == "MODEL_REQUEST_LIMIT"
+    assert '"MODEL_ERROR"' not in json.dumps(observed_schema, sort_keys=True)
 
 
 @pytest.mark.asyncio
-async def test_unknown_claim_evidence_retry_explains_provenance_and_recovers(
-    tmp_path: Path,
-) -> None:
-    tools = SyntheticEvidenceTools()
-    calls = _full_tool_calls()
-    retry_contents: list[str] = []
-    model_requests = 0
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        nonlocal model_requests
-        model_requests += 1
-        retry_contents.extend(
-            str(part.content)
-            for message in messages
-            for part in message.parts
-            if isinstance(part, RetryPromptPart)
-        )
-        tool_returns = sum(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        )
-        if tool_returns < len(calls):
-            tool_name, arguments = calls[tool_returns]
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name,
-                        arguments,
-                        tool_call_id=f"call-{tool_returns}",
-                    )
-                ]
-            )
-        payload = _confirmed_payload() if retry_contents else _unknown_claim_evidence_payload()
-        return _output_call(agent_info, payload)
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-
-    assert model_requests == 7
-    assert result.diagnosis.status.value == "CONFIRMED"
-    assert any("CLAIM_EVIDENCE_UNKNOWN" in content for content in retry_contents)
-    assert any(
-        "only evidence IDs returned by successful evidence tools" in content
-        for content in retry_contents
-    )
-    assert "ev_" + "f" * 64 not in result.model_dump_json()
-
-
-@pytest.mark.asyncio
-async def test_relation_name_retry_explains_node_id_name_confusion(
-    tmp_path: Path,
-) -> None:
-    tools = SyntheticEvidenceTools()
-    calls = _full_tool_calls()
-    schema_name_guidance: list[str] = []
-    model_requests = 0
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        nonlocal model_requests
-        model_requests += 1
-        tool_returns = sum(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        )
-        if tool_returns < 3:
-            tool_name, arguments = calls[tool_returns]
-        elif tool_returns == 3:
-            tool_name, arguments = calls[3]
-            arguments = {**arguments, "relation_name": UPSTREAM_NODE}
-        elif tool_returns == 4:
-            schema_name_guidance.extend(
-                str(part.content)
-                for message in messages
-                for part in message.parts
-                if isinstance(part, ToolReturnPart)
-            )
-            tool_name, arguments = calls[3]
-        elif tool_returns == 5:
-            tool_name, arguments = calls[4]
-        else:
-            return _output_call(agent_info, _confirmed_payload())
+async def test_static_decision_is_projected_to_public_diagnosis(tmp_path: Path) -> None:
+    def return_decision(_messages: object, agent_info: AgentInfo) -> ModelResponse:
         return ModelResponse(
             parts=[
-                ToolCallPart(
-                    tool_name,
-                    arguments,
-                    tool_call_id=f"call-{model_requests}",
-                )
-            ]
-        )
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-
-    assert model_requests == 7
-    assert result.diagnosis.status.value == "CONFIRMED"
-    assert [name for name, _ in tools.calls] == [
-        "get_dbt_run_results",
-        "get_dbt_node_error",
-        "get_dbt_lineage",
-        "get_relation_schema",
-        "get_dbt_lineage",
-    ]
-    assert any("RELATION_ARGUMENT_NOT_PROVEN" in content for content in schema_name_guidance)
-    assert any("related_nodes[].name" in content for content in schema_name_guidance)
-    assert any("never use related_nodes[].node_id" in content for content in schema_name_guidance)
-
-
-@pytest.mark.asyncio
-async def test_invalid_tool_arguments_are_classified_before_tool_entry(
-    tmp_path: Path,
-) -> None:
-    tools = SyntheticEvidenceTools()
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        return ModelResponse(
-            parts=[
-                ToolCallPart(
-                    "get_dbt_run_results",
-                    {"run_id": RUN_ID, "gap_id": "invalid"},
-                    tool_call_id="invalid-tool-arguments",
-                )
-            ]
-        )
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-    protocol_event = next(
-        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
-    )
-    assert protocol_event.category == "TOOL_ARGUMENT_REJECTED"
-    assert protocol_event.stage == "TOOL_ARGUMENT_VALIDATION"
-    assert protocol_event.tool_name == "get_dbt_run_results"
-    assert tools.calls == []
-    assert result.investigation_state.tool_calls_used == 0
-    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
-    assert "invalid-tool-arguments" not in result.model_dump_json()
-
-
-@pytest.mark.asyncio
-async def test_flat_list_intent_transport_reaches_tool_entry(tmp_path: Path) -> None:
-    tools = SyntheticEvidenceTools()
-    transport_intent = {
-        "gap_id": "g_failure",
-        "gap_kind": "LOCATE_FAILURE",
-    }
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        if not any(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        ):
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "get_dbt_run_results",
-                        {"run_id": RUN_ID, **transport_intent},
-                        tool_call_id="flat-intent",
-                    )
-                ]
-            )
-        return _output_call(agent_info, _insufficient_payload())
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-    assert [name for name, _ in tools.calls] == ["get_dbt_run_results"]
-    assert result.investigation_state.gaps[0].gap_id == "g_failure"
-    assert result.investigation_state.gaps[0].status.value == "CLOSED"
-
-
-@pytest.mark.asyncio
-async def test_mixed_function_and_output_calls_classify_output_path(
-    tmp_path: Path,
-) -> None:
-    tools = SyntheticEvidenceTools()
-    calls = _full_tool_calls()[:3]
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        tool_returns = sum(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        )
-        tool_name, arguments = calls[tool_returns]
-        return ModelResponse(
-            parts=[
-                ToolCallPart(tool_name, arguments, tool_call_id=f"function-{tool_returns}"),
                 ToolCallPart(
                     agent_info.output_tools[0].name,
-                    {"status": "NOT_A_KERNEL_DECISION"},
-                    tool_call_id=f"output-{tool_returns}",
-                ),
+                    {
+                        "status": "INSUFFICIENT_EVIDENCE",
+                        "run_id": RUN_ID,
+                        "root_cause_code": None,
+                        "summary": "More evidence is required.",
+                        "affected_assets": [],
+                        "evidence_ids": [],
+                        "claims": [],
+                        "unresolved_evidence": [
+                            {
+                                "evidence_kind": "RELATION_SCHEMA",
+                                "subject": "raw_orders",
+                                "reason_code": "NOT_OBSERVABLE",
+                            }
+                        ],
+                        "recommended_actions": ["Collect relation schema evidence."],
+                        "confidence": 0.2,
+                    },
+                    tool_call_id="final",
+                )
             ]
         )
 
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-    protocol_event = next(
-        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
-    )
-    assert protocol_event.category == "OUTPUT_SCHEMA_REJECTED"
-    assert protocol_event.stage == "OUTPUT_SCHEMA_VALIDATION"
-    assert protocol_event.tool_name
-    assert len(tools.calls) == 3
-    assert result.investigation_state.tool_calls_used == 3
+    result = await _static_runner(tmp_path, FunctionModel(return_decision)).diagnose()
+
+    persisted = Diagnosis.model_validate(result.diagnosis.model_dump(mode="json"))
+    assert persisted == result.diagnosis
 
 
 @pytest.mark.asyncio
-async def test_plain_text_is_classified_as_output_schema_rejection(
-    tmp_path: Path,
-) -> None:
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        return ModelResponse(parts=[TextPart("plain output secret=TEST_REDACTED_VALUE")])
+async def test_timeout_maps_to_safe_terminal_model_error(tmp_path: Path, monkeypatch) -> None:
+    runner = _static_runner(tmp_path)
+    monkeypatch.setattr(runner, "_agent", lambda _: _FailingAgent(TimeoutError("secret=never")))
 
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
-    ).diagnose(CASE_ID)
-    protocol_event = next(
-        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
-    )
-    assert protocol_event.category == "OUTPUT_SCHEMA_REJECTED"
-    assert protocol_event.stage == "OUTPUT_SCHEMA_VALIDATION"
-    assert protocol_event.tool_name is None
-    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
-    assert "plain output secret=TEST_REDACTED_VALUE" not in result.model_dump_json()
+    result = await runner.diagnose()
 
-
-@pytest.mark.asyncio
-async def test_invalid_kernel_decision_is_classified_as_output_schema_rejection(
-    tmp_path: Path,
-) -> None:
-    output_tool_name: str | None = None
-    model_requests = 0
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        nonlocal model_requests, output_tool_name
-        model_requests += 1
-        output_tool_name = agent_info.output_tools[0].name
-        return _output_call(agent_info, {"status": "NOT_A_KERNEL_DECISION"})
-
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
-    ).diagnose(CASE_ID)
-    protocol_event = next(
-        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
-    )
-    assert protocol_event.category == "OUTPUT_SCHEMA_REJECTED"
-    assert protocol_event.stage == "OUTPUT_SCHEMA_VALIDATION"
-    assert protocol_event.tool_name == output_tool_name
-    assert model_requests == 3
-    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
-
-
-@pytest.mark.asyncio
-async def test_premature_finalization_requires_investigation_gap(tmp_path: Path) -> None:
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        return _output_call(agent_info, _insufficient_payload())
-
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
-    ).diagnose(CASE_ID)
-    protocol_event = next(
-        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
-    )
-    assert protocol_event.category == "PREMATURE_FINALIZATION"
-    assert protocol_event.stage == "OUTPUT_VALIDATION"
-    assert protocol_event.tool_name
     assert result.diagnosis.status.value == "MODEL_ERROR"
-    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
-
-
-@pytest.mark.asyncio
-async def test_provider_protocol_failure_is_classified_without_raw_error(
-    tmp_path: Path,
-) -> None:
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        raise ModelAPIError("scripted-model", "provider raw secret=TEST_REDACTED_VALUE")
-
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
-    ).diagnose(CASE_ID)
-    protocol_event = next(
-        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
-    )
-    assert protocol_event.category == "PROVIDER_PROTOCOL_FAILURE"
-    assert protocol_event.stage == "PROVIDER_RESPONSE"
-    assert protocol_event.tool_name is None
-    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
-    assert "provider raw secret=TEST_REDACTED_VALUE" not in result.model_dump_json()
-
-
-@pytest.mark.asyncio
-async def test_incomplete_provider_response_is_classified_without_raw_error(
-    tmp_path: Path,
-) -> None:
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        raise IncompleteToolCall(
-            "provider raw secret=TEST_REDACTED_VALUE",
-            body="raw provider body=TEST_REDACTED_VALUE",
-        )
-
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
-    ).diagnose(CASE_ID)
-    protocol_event = next(
-        event for event in result.trace if event.event_type == "MODEL_PROTOCOL"
-    )
-    assert protocol_event.category == "PROVIDER_PROTOCOL_FAILURE"
-    assert protocol_event.stage == "PROVIDER_RESPONSE"
-    assert protocol_event.tool_name is None
-    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
-    serialized = result.model_dump_json()
-    assert "provider raw secret=TEST_REDACTED_VALUE" not in serialized
-    assert "raw provider body=TEST_REDACTED_VALUE" not in serialized
-
-
-@pytest.mark.asyncio
-async def test_model_returned_insufficient_preserves_empty_claims(tmp_path: Path) -> None:
-    tools = SyntheticEvidenceTools()
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        if not any(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        ):
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "get_dbt_run_results",
-                        _full_tool_calls()[0][1],
-                        tool_call_id="run-results",
-                    )
-                ]
-            )
-        return _output_call(agent_info, _insufficient_payload())
-
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), tools
-    ).diagnose(CASE_ID)
-    assert result.diagnosis.status.value == "INSUFFICIENT_EVIDENCE"
-    assert result.diagnosis.root_cause_code is None
-    assert result.diagnosis.affected_assets == ()
-    assert result.diagnosis.evidence_ids == ()
-    assert len(result.investigation_state.gaps) == 1
-    assert result.investigation_state.gaps[0].status.value == "CLOSED"
-
-
-@pytest.mark.asyncio
-async def test_timeout_returns_fixed_model_error_with_terminal_state(tmp_path: Path) -> None:
-    model_requests = 0
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        nonlocal model_requests
-        model_requests += 1
-        raise TimeoutError("synthetic timeout secret=TEST_REDACTED_VALUE")
-
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
-    ).diagnose(CASE_ID)
     assert result.diagnosis.summary == "MODEL_TIMEOUT"
-    assert model_requests == 1
-    assert result.trace[-1].event_type == "KERNEL_STATE"
-    assert result.investigation_state.final_status.value == "MODEL_ERROR"
-    assert "TEST_REDACTED_VALUE" not in result.model_dump_json()
+    assert result.trace[-1].event_type == "DIAGNOSIS_TERMINAL"
+    assert "secret=never" not in result.model_dump_json()
 
 
 @pytest.mark.asyncio
-async def test_evidence_tool_error_exposes_only_stable_code_and_blocks_gap(
+async def test_protocol_failure_maps_to_safe_terminal_model_error(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    tools = SyntheticEvidenceTools(
-        {"get_dbt_run_results": EvidenceToolError("password=TEST_REDACTED_VALUE")}
+    runner = _static_runner(tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_agent",
+        lambda _: _FailingAgent(ValueError("provider body secret=never")),
     )
-    seen_tool_returns: list[object] = []
 
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        seen_tool_returns.extend(
-            part.content
-            for message in messages
-            for part in message.parts
-            if isinstance(part, ToolReturnPart)
-        )
-        if not seen_tool_returns:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "get_dbt_run_results",
-                        _full_tool_calls()[0][1],
-                        tool_call_id="run",
-                    )
-                ]
-            )
-        return _output_call(agent_info, _insufficient_payload())
+    result = await runner.diagnose()
 
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-    assert seen_tool_returns[0] == "EVIDENCE_TOOL_ERROR"
-    event = next(event for event in result.trace if event.event_type == "TOOL_CALL")
-    assert event.error_code == "EVIDENCE_TOOL_ERROR"
-    assert result.investigation_state.gaps[0].status.value == "BLOCKED"
-    assert "TEST_REDACTED_VALUE" not in result.model_dump_json()
+    assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
+    assert result.trace[-1].event_type == "DIAGNOSIS_TERMINAL"
+    assert "provider body secret=never" not in result.model_dump_json()
 
 
 @pytest.mark.asyncio
-async def test_blocked_gap_rejects_confirmation_but_allows_insufficient_evidence(
+async def test_tool_budget_exhaustion_is_not_reported_as_request_limit(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    calls = _full_tool_calls()
-    tools = SyntheticEvidenceTools(
-        {
-            f"get_dbt_lineage:{FAILED_NODE}:downstream": EvidenceToolError(
-                "synthetic database failure"
-            )
-        }
-    )
-    retry_contents: list[str] = []
-    model_requests = 0
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        nonlocal model_requests
-        model_requests += 1
-        retry_contents.extend(
-            str(part.content)
-            for message in messages
-            for part in message.parts
-            if isinstance(part, RetryPromptPart)
-        )
-        tool_returns = sum(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        )
-        if tool_returns < len(calls):
-            tool_name, arguments = calls[tool_returns]
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        tool_name,
-                        arguments,
-                        tool_call_id=f"call-{tool_returns}",
-                    )
-                ]
-            )
-        if any(
-            "If any gap is BLOCKED, return INSUFFICIENT_EVIDENCE with empty claims."
-            in content
-            for content in retry_contents
-        ):
-            return _output_call(agent_info, _insufficient_payload())
-        return _output_call(agent_info, _confirmed_payload())
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-
-    assert model_requests == 7
-    assert result.diagnosis.status.value == "INSUFFICIENT_EVIDENCE"
-    assert any(
-        gap.status.value == "BLOCKED" for gap in result.investigation_state.gaps
-    )
-    assert any("EVIDENCE_GAP_OPEN" in content for content in retry_contents)
-    assert any(
-        "If any gap is BLOCKED, return INSUFFICIENT_EVIDENCE with empty claims."
-        in content
-        for content in retry_contents
-    )
-    assert any(
-        "Otherwise close every OPEN gap before CONFIRMED." in content
-        for content in retry_contents
+    runner = _static_runner(tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "_agent",
+        lambda _: _FailingAgent(
+            UsageLimitExceeded("The next tool call would exceed the tool_calls_limit of 8")
+        ),
     )
 
+    result = await runner.diagnose()
 
-@pytest.mark.asyncio
-async def test_functionmodel_output_path_is_structured_and_safe(tmp_path: Path) -> None:
-    result = await _runner(
-        tmp_path,
-        _full_scripted_model(_insufficient_payload()),
-        SyntheticEvidenceTools(),
-    ).diagnose(CASE_ID)
-    assert result.diagnosis.status.value == "INSUFFICIENT_EVIDENCE"
-    assert result.trace[-1].event_type == "KERNEL_STATE"
-
-
-@pytest.mark.asyncio
-async def test_cross_run_evidence_is_blocked_without_entering_inventory(tmp_path: Path) -> None:
-    other_run = "b" * 32
-    tools = SyntheticEvidenceTools(
-        {"get_dbt_run_results": (_run_results_record(run_id=other_run),)}
-    )
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        if not any(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        ):
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "get_dbt_run_results",
-                        _full_tool_calls()[0][1],
-                        tool_call_id="run",
-                    )
-                ]
-            )
-        return _output_call(agent_info, _insufficient_payload())
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-    assert result.evidence_records == ()
-    assert result.investigation_state.gaps[0].error_code == "RUN_CONTEXT_MISMATCH"
-    assert result.investigation_state.evidence_inventory == ()
-
-
-@pytest.mark.asyncio
-async def test_trace_redacts_prompt_completion_credentials_path_and_sql(tmp_path: Path) -> None:
-    sensitive = (
-        "postgresql://synthetic:TEST_REDACTED_VALUE@host "
-        "C:\\synthetic-secret\\probe.txt SELECT synthetic_sql"
-    )
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        if not any(
-            isinstance(part, ToolReturnPart)
-            for message in messages
-            for part in message.parts
-        ):
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "get_relation_schema",
-                        {
-                            "relation_name": sensitive,
-                            **_intent("g_schema", "DISCRIMINATE_SCHEMA"),
-                        },
-                        tool_call_id="sensitive",
-                    )
-                ]
-            )
-        return _output_call(agent_info, _insufficient_payload())
-
-    result = await _runner(
-        tmp_path, FunctionModel(scripted), SyntheticEvidenceTools()
-    ).diagnose(CASE_ID)
-    serialized = result.model_dump_json()
-    assert "TEST_REDACTED_VALUE" not in serialized
-    assert "postgresql://synthetic" not in serialized
-    assert "C:\\synthetic-secret\\probe.txt" not in serialized
-    assert "SELECT synthetic_sql" not in serialized
-    assert "Investigate incident case" not in serialized
-    assert "hidden reasoning" not in serialized
-
-
-@pytest.mark.asyncio
-async def test_tool_calls_are_executed_sequentially_in_model_emission_order(
-    tmp_path: Path,
-) -> None:
-    tools = SyntheticEvidenceTools()
-
-    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-        if not any(isinstance(message, ModelResponse) for message in messages):
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(name, arguments, tool_call_id=f"call-{index}")
-                    for index, (name, arguments) in enumerate(_full_tool_calls())
-                ]
-            )
-        return _output_call(agent_info, _confirmed_payload())
-
-    result = await _runner(tmp_path, FunctionModel(scripted), tools).diagnose(CASE_ID)
-    assert [name for name, _ in tools.calls] == [
-        "get_dbt_run_results",
-        "get_dbt_node_error",
-        "get_dbt_lineage",
-        "get_relation_schema",
-        "get_dbt_lineage",
-    ]
-    assert all(
-        isinstance(event.elapsed_ms, int) and event.elapsed_ms >= 0
-        for event in result.trace
-        if event.event_type == "TOOL_CALL"
-    )
+    assert result.diagnosis.summary == "MODEL_TOOL_CALL_LIMIT"

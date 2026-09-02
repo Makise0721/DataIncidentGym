@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -5,51 +8,61 @@ from pathlib import Path
 import pytest
 
 from data_incident_gym.config import Settings
-from data_incident_gym.incidents import SUPPORTED_CASE_IDS
 from data_incident_gym.lab import IncidentLab
+
+P0_SCENARIO_ID = "schema_rename_payment_amount"
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize("case_id", SUPPORTED_CASE_IDS, ids=SUPPORTED_CASE_IDS)
-def test_incident_is_reproducible_across_ten_runs(
-    project_root: Path,
-    case_id: str,
-) -> None:
+def test_p0_rename_regression_reproduces_across_ten_runs(project_root: Path) -> None:
     lab = IncidentLab(Settings(_env_file=None), project_root)
-    initial = lab.reset(case_id)
-    stable_results: list[str] = []
+    initial = lab.reset(P0_SCENARIO_ID)
+    projections: list[str] = []
     run_dirs: list[Path] = []
 
     try:
-        for run_number in range(1, 11):
-            reset = lab.reset(case_id)
-            injection = lab.inject(case_id)
-            run = lab.build(case_id)
-            projection = {
-                "case_id": case_id,
-                "failed_nodes": run.verification.failed_nodes,
-                "affected_assets": run.verification.affected_assets,
-                "error_category": run.verification.error_category,
-                "schema_fingerprint": run.verification.schema_fingerprint,
-                "ground_truth_digest": run.verification.ground_truth_digest,
-            }
-            stable_results.append(json.dumps(projection, sort_keys=True))
-            run_dirs.append(run.artifact_dir)
-            print(
-                f"incident run {run_number}/10: "
-                f"run_id={run.run_id} projection={projection}"
+        for cycle in range(1, 11):
+            reset = lab.reset(P0_SCENARIO_ID)
+            prepared = lab.prepare(P0_SCENARIO_ID)
+            run = lab.build(P0_SCENARIO_ID)
+            verification = lab.verifier.load_verification(run.run_id)
+            projections.append(
+                json.dumps(
+                    {
+                        "status": verification.status.value,
+                        "dbt_exit_code": verification.dbt_exit_code,
+                        "failed_nodes": verification.failed_nodes,
+                        "affected_assets": verification.affected_assets,
+                        "schema_fingerprint": verification.schema_fingerprint,
+                        "schema_digest": _digest(run.artifact_dir / "schema.json"),
+                        "profile_digest": _digest(run.artifact_dir / "profile_snapshot.json"),
+                    },
+                    sort_keys=True,
+                )
             )
+            run_dirs.append(run.artifact_dir)
+            print(f"P0 rename cycle {cycle}/10: run_id={run.run_id}")
             assert reset.fingerprint == initial.fingerprint
-            assert injection.fingerprint != initial.fingerprint
+            assert prepared.fingerprint != initial.fingerprint
+            assert run.dbt_exit_code != 0
     finally:
-        recovered = lab.reset(case_id)
+        recovered = lab.restore(P0_SCENARIO_ID)
 
-    assert len(set(stable_results)) == 1
+    assert len(set(projections)) == 1
     assert len({path.name for path in run_dirs}) == 10
-    assert all(path.is_dir() for path in run_dirs)
     assert recovered.fingerprint == initial.fingerprint
     submodule = subprocess.run(
-        ["git", "-C", str(project_root / "third_party/jaffle_shop"), "status", "--short"],
+        [
+            "git",
+            "-C",
+            str(project_root / "third_party/jaffle_shop"),
+            "status",
+            "--short",
+        ],
         check=True,
         capture_output=True,
         text=True,

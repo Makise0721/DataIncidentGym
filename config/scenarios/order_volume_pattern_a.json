@@ -1,0 +1,45 @@
+{
+  "schema_version": "scenario.v1",
+  "incident_case_id": "order_volume_pattern_a",
+  "suite": "P1",
+  "fault_family": "ORDER_VOLUME_PATTERN",
+  "variant_role": "NO_INCIDENT_CONTROL",
+  "answerability": "NO_INCIDENT",
+  "seed": {
+    "schema_version": "seed.v1",
+    "fixture_path": "third_party/jaffle_shop",
+    "fixture_commit": "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb",
+    "seed_names": ["raw_customers", "raw_orders", "raw_payments"],
+    "refresh": "FULL_REFRESH"
+  },
+  "incident_brief": {
+    "schema_version": "incident_brief.v1",
+    "signal_code": "ORDER_VOLUME_ALERT",
+    "summary": "The Monday order volume alert is below the immediately prior Monday.",
+    "subjects": ["raw_orders", "order_count_by_day"],
+    "logical_observed_at": "2018-04-02T12:00:00Z",
+    "observations": [
+      {"kind": "CURRENT_PERIOD_COUNT", "subject": "raw_orders/order_count_by_day/2018-04-02", "value": "1"},
+      {"kind": "PRIOR_PERIOD_COUNT", "subject": "raw_orders/order_count_by_day/2018-03-26", "value": "3"}
+    ]
+  },
+  "reset_and_injection_contract": {
+    "schema_version": "reset_injection.v1",
+    "mutations": [{"kind": "NO_MUTATION"}],
+    "restore_strategy": "FULL_REFRESH_BASELINE"
+  },
+  "ground_truth_or_acceptable_root_causes": [],
+  "direct_failure": null,
+  "affected_assets": [],
+  "observable_evidence_contract": {
+    "schema_version": "observable_evidence.v1",
+    "schema_relations": [],
+    "profile_relations": ["raw_orders"],
+    "history_relations": ["raw_orders"],
+    "unresolved_gaps": []
+  },
+  "required_evidence_types": ["DBT_RUN_RESULTS", "RELATION_DATA_PROFILE", "RELATION_HISTORY"],
+  "forbidden_leakage": ["SCENARIO_SPEC", "GROUND_TRUTH", "VARIANT_ROLE", "ANSWERABILITY", "EXPECTED_STATUS", "PRIVATE_PATH"],
+  "distractors": [],
+  "expected_status": "NO_INCIDENT"
+}

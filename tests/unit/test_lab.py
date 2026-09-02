@@ -1,755 +1,743 @@
-import json
-import traceback
+from __future__ import annotations
+
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from psycopg import sql
 
-from data_incident_gym.baseline import (
-    BaselineError,
-    BaselineSummary,
-    ColumnSummary,
-    RelationSummary,
-    make_baseline_summary,
-)
-from data_incident_gym.config import Settings
-from data_incident_gym.incidents import (
-    CASE_ID,
-    TYPE_CHANGE_CASE_ID,
-    load_ground_truth,
-)
+from data_incident_gym.baseline import EXPECTED_RELATION_COUNTS, ColumnSummary, RelationSummary
+from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.lab import (
-    FaultVerificationError,
     IncidentExecutionError,
     IncidentLab,
     InvalidIncidentState,
+    ScenarioRun,
 )
-from data_incident_gym.lab_verifier import LabVerificationError
-
-
-def _relation(*names: str) -> RelationSummary:
-    return RelationSummary(
-        name="raw_payments",
-        row_count=113,
-        columns=tuple(
-            ColumnSummary(name, "integer" if name != "payment_method" else "text", True, index)
-            for index, name in enumerate(names, start=1)
-        ),
-    )
-
-
-def _typed_relation(amount_type: str) -> RelationSummary:
-    return RelationSummary(
-        name="raw_payments",
-        row_count=113,
-        columns=(
-            ColumnSummary("id", "integer", True, 1),
-            ColumnSummary("order_id", "integer", True, 2),
-            ColumnSummary("payment_method", "text", True, 3),
-            ColumnSummary("amount", amount_type, True, 4),
-        ),
-    )
-
-
-HEALTHY = _relation("id", "order_id", "payment_method", "amount")
-INJECTED = _relation("id", "order_id", "payment_method", "total_amount")
-DRIFTED = _relation("id", "order_id", "payment_method", "other_amount")
-TYPE_HEALTHY = _typed_relation("integer")
-TYPE_INJECTED = _typed_relation("text")
-
-
-class FakeBaseline:
-    def __init__(self, summary: BaselineSummary) -> None:
-        self.summary = summary
-        self.calls: list[str] = []
-
-    def start_postgres(self) -> None:
-        self.calls.append("start_postgres")
-
-    def build(self) -> BaselineSummary:
-        self.calls.append("build")
-        return self.summary
-
-
-def _prepare_ground_truth(tmp_path: Path, case_id: str = CASE_ID) -> None:
-    truth = load_ground_truth(case_id)
-    path = tmp_path / "config/incidents" / f"{case_id}.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(truth.to_json(), encoding="utf-8")
-
-
-def _lab(
-    tmp_path: Path,
-    case_id: str = CASE_ID,
-) -> tuple[IncidentLab, FakeBaseline]:
-    _prepare_ground_truth(tmp_path, case_id)
-    summary = make_baseline_summary("analytics", (HEALTHY,))
-    baseline = FakeBaseline(summary)
-    lab = IncidentLab(
-        Settings(_env_file=None),
-        tmp_path,
-        baseline_builder=baseline,
-    )
-    return lab, baseline
-
-
-@pytest.mark.parametrize("current", [None, HEALTHY])
-def test_reset_builds_healthy_from_missing_or_healthy_state(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    current: RelationSummary | None,
-) -> None:
-    lab, baseline = _lab(tmp_path)
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: current)
-
-    result = lab.reset(CASE_ID)
-
-    assert baseline.calls == ["start_postgres", "build"]
-    assert result.state == "HEALTHY"
-    assert len(result.fingerprint) == 64
-
-
-def test_reset_reverses_known_fault_then_builds_healthy(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    lab, baseline = _lab(tmp_path)
-    renames: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
-    monkeypatch.setattr(
-        lab,
-        "_rename_column",
-        lambda relation, source, target: renames.append((relation, source, target)),
-    )
-
-    result = lab.reset(CASE_ID)
-
-    assert baseline.calls == ["start_postgres", "build"]
-    assert renames == [("raw_payments", "total_amount", "amount")]
-    assert result.state == "HEALTHY"
-    assert len(result.fingerprint) == 64
-
-
-def test_reset_rejects_unknown_drift_without_build(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    lab, baseline = _lab(tmp_path)
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: DRIFTED)
-
-    with pytest.raises(InvalidIncidentState, match="未知 Schema 状态"):
-        lab.reset(CASE_ID)
-
-    assert baseline.calls == ["start_postgres"]
-
-
-def test_reset_clears_old_active_run_before_health_recovery_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    lab, _ = _lab(tmp_path)
-    pointer = tmp_path / ".dig/lab/active_fault_run.json"
-    temporary = tmp_path / ".dig/lab/active_fault_run.json.tmp"
-    pointer.parent.mkdir(parents=True)
-    pointer.write_text("stale", encoding="utf-8")
-    temporary.write_text("stale temp", encoding="utf-8")
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: None)
-    monkeypatch.setattr(
-        lab,
-        "_build_healthy_baseline",
-        lambda: (_ for _ in ()).throw(IncidentExecutionError("health recovery failed")),
-    )
-
-    with pytest.raises(IncidentExecutionError, match="health recovery failed"):
-        lab.reset(CASE_ID)
-
-    assert not pointer.exists()
-    assert not temporary.exists()
-
-
-def test_reset_cleanup_failure_blocks_database_state_change(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    lab, _ = _lab(tmp_path)
-    calls: list[str] = []
-    monkeypatch.setattr(
-        lab,
-        "_clear_active_run",
-        lambda: (_ for _ in ()).throw(IncidentExecutionError("cleanup failed")),
-    )
-    monkeypatch.setattr(lab, "_start_postgres", lambda: calls.append("start_postgres"))
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: calls.append("inspect"))
-
-    with pytest.raises(IncidentExecutionError, match="cleanup failed"):
-        lab.reset(CASE_ID)
-
-    assert calls == []
-
-
-def test_inject_requires_healthy_state_and_verifies_postcondition(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    lab, baseline = _lab(tmp_path)
-    states = iter((HEALTHY, INJECTED))
-    renames: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: next(states))
-    monkeypatch.setattr(
-        lab,
-        "_rename_column",
-        lambda relation, source, target: renames.append((relation, source, target)),
-    )
-
-    result = lab.inject(CASE_ID)
-
-    assert baseline.calls == ["start_postgres"]
-    assert renames == [("raw_payments", "amount", "total_amount")]
-    assert result.state == "INJECTED"
-    assert len(result.fingerprint) == 64
-
-
-@pytest.mark.parametrize("state", [INJECTED, DRIFTED, None])
-def test_inject_rejects_nonhealthy_state(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    state: RelationSummary | None,
-) -> None:
-    lab, _ = _lab(tmp_path)
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: state)
-
-    with pytest.raises(InvalidIncidentState):
-        lab.inject(CASE_ID)
-
-
-@pytest.mark.parametrize(
-    "changed",
-    [
-        {"data_type": "bigint"},
-        {"nullable": False},
-        {"ordinal_position": 5},
-    ],
+from data_incident_gym.lab_verifier import ScenarioVerificationStatus
+from data_incident_gym.scenarios import (
+    DeletePaymentRowsMutation,
+    DuplicatePaymentRowsMutation,
+    OrphanPaymentRowsMutation,
+    SetFieldNullMutation,
+    deleted_payment_rows,
+    duplicate_payment_rows,
+    load_scenario_spec,
+    orphan_payment_rows,
 )
-def test_schema_state_rejects_metadata_drift(
-    tmp_path: Path,
-    changed: dict[str, object],
-) -> None:
-    lab, _ = _lab(tmp_path)
-    columns = list(HEALTHY.columns)
-    original = columns[0]
-    columns[0] = type(original)(
-        name=original.name,
-        data_type=changed.get("data_type", original.data_type),
-        nullable=changed.get("nullable", original.nullable),
-        ordinal_position=changed.get("ordinal_position", original.ordinal_position),
-    )
-
-    drifted = RelationSummary("raw_payments", 113, tuple(columns))
-
-    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
 
 
-def test_schema_state_rejects_relation_name_drift(tmp_path: Path) -> None:
-    lab, _ = _lab(tmp_path)
-    drifted = RelationSummary("other_relation", 113, HEALTHY.columns)
-
-    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
-
-
-def test_schema_state_rejects_row_count_drift(tmp_path: Path) -> None:
-    lab, _ = _lab(tmp_path)
-    drifted = RelationSummary("raw_payments", 114, HEALTHY.columns)
-
-    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
-
-
-@pytest.mark.parametrize(
-    ("row_count", "nullable", "ordinal_position"),
-    [(113.0, True, 1), (113, 1, 1), (113, True, 1.0)],
-)
-def test_schema_state_rejects_implicit_type_coercion(
-    tmp_path: Path,
-    row_count: object,
-    nullable: object,
-    ordinal_position: object,
-) -> None:
-    lab, _ = _lab(tmp_path)
-    columns = list(HEALTHY.columns)
-    original = columns[0]
-    columns[0] = ColumnSummary(
-        original.name,
-        original.data_type,
-        nullable,
-        ordinal_position,
-    )
-    drifted = RelationSummary("raw_payments", row_count, tuple(columns))
-
-    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
-
-
-@pytest.mark.parametrize(
-    "changed",
-    [
-        {"data_type": "bigint"},
-        {"nullable": False},
-        {"ordinal_position": 5},
-    ],
-)
-def test_injected_schema_state_rejects_metadata_drift(
-    tmp_path: Path,
-    changed: dict[str, object],
-) -> None:
-    lab, _ = _lab(tmp_path)
-    columns = list(INJECTED.columns)
-    original = columns[0]
-    columns[0] = type(original)(
-        name=original.name,
-        data_type=changed.get("data_type", original.data_type),
-        nullable=changed.get("nullable", original.nullable),
-        ordinal_position=changed.get("ordinal_position", original.ordinal_position),
-    )
-
-    drifted = RelationSummary("raw_payments", 113, tuple(columns))
-
-    assert lab._classify_state(drifted, load_ground_truth(CASE_ID, tmp_path)) == "DRIFTED"
-
-
-def _recording_connection(executed: list[object]) -> object:
-    class Cursor:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-        def execute(self, query: object) -> None:
-            executed.append(query)
-
-    class Transaction:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    class Connection:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-        def cursor(self) -> Cursor:
-            return Cursor()
-
-        def transaction(self) -> Transaction:
-            return Transaction()
-
-    return Connection()
-
-
-def test_rename_uses_fixed_quoted_identifiers(tmp_path: Path) -> None:
-    executed: list[object] = []
-
-    lab = IncidentLab(
+def _lab(tmp_path: Path) -> IncidentLab:
+    return IncidentLab(
         Settings(_env_file=None),
         tmp_path,
         baseline_builder=SimpleNamespace(),
-        db_connect=lambda **_: _recording_connection(executed),
-    )
-
-    lab._rename_column("raw_payments", "amount", "total_amount")
-
-    assert len(executed) == 1
-    assert isinstance(executed[0], sql.Composed)
-    assert executed[0].as_string(None) == (
-        'ALTER TABLE "analytics"."raw_payments" '
-        'RENAME COLUMN "amount" TO "total_amount"'
+        dbt_runner=SimpleNamespace(),
+        verifier=SimpleNamespace(),
+        run_id_factory=lambda: "a" * 32,
     )
 
 
-def test_type_change_uses_fixed_allowlisted_sql(tmp_path: Path) -> None:
-    executed: list[object] = []
-    lab = IncidentLab(
-        Settings(_env_file=None),
-        tmp_path,
-        baseline_builder=SimpleNamespace(),
-        db_connect=lambda **_: _recording_connection(executed),
-    )
+class _FakeCursor:
+    def __init__(
+        self,
+        calls: list[tuple[str, tuple[object, ...]]],
+        *,
+        rows: list[tuple[object, ...]] | None = None,
+        one: tuple[object, ...] | None = None,
+        rowcount: int = 1,
+    ) -> None:
+        self.calls = calls
+        self.rows = rows or []
+        self.one = one
+        self.rowcount = rowcount
 
-    lab._change_column_type("raw_payments", "amount", "integer", "text")
+    def __enter__(self) -> _FakeCursor:
+        return self
 
-    assert len(executed) == 1
-    assert isinstance(executed[0], sql.Composed)
-    assert executed[0].as_string(None) == (
-        'ALTER TABLE "analytics"."raw_payments" '
-        'ALTER COLUMN "amount" TYPE text USING "amount"::text'
-    )
+    def __exit__(self, *_: object) -> None:
+        return None
 
+    def execute(self, statement: object, params: tuple[object, ...] = ()) -> None:
+        self.calls.append((str(statement), params))
 
-def test_type_change_rejects_nonallowlisted_type(tmp_path: Path) -> None:
-    lab = IncidentLab(
-        Settings(_env_file=None),
-        tmp_path,
-        baseline_builder=SimpleNamespace(),
-    )
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self.rows
 
-    with pytest.raises(InvalidIncidentState, match="未授权"):
-        lab._change_column_type("raw_payments", "amount", "integer", "jsonb")
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self.one
 
 
-def test_type_case_injects_and_reset_applies_inverse_mutation(
-    monkeypatch: pytest.MonkeyPatch,
+class _FakeTransaction:
+    def __init__(self) -> None:
+        self.saw_exception = False
+
+    def __enter__(self) -> _FakeTransaction:
+        return self
+
+    def __exit__(self, exc_type, *_: object) -> None:
+        self.saw_exception = exc_type is not None
+
+
+class _FakeConnection:
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self.cursor_instance = cursor
+        self.transaction_instance = _FakeTransaction()
+
+    def __enter__(self) -> _FakeConnection:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def cursor(self) -> _FakeCursor:
+        return self.cursor_instance
+
+    def transaction(self) -> _FakeTransaction:
+        return self.transaction_instance
+
+
+def test_lab_loads_only_the_committed_scenario_catalog(tmp_path: Path) -> None:
+    del tmp_path
+    scenario = _lab(PROJECT_ROOT)._load_case("schema_type_change_order_customer_a")
+
+    assert scenario.variant_role.value == "TEST_CONFIRMABLE"
+    assert scenario.direct_failure == "model.jaffle_shop.customers"
+    assert scenario.affected_assets == ("model.jaffle_shop.customers",)
+
+
+def test_lab_applies_type_change_and_distractor_mutations_in_declared_order(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    lab, baseline = _lab(tmp_path, TYPE_CHANGE_CASE_ID)
-    states = iter((TYPE_HEALTHY, TYPE_INJECTED))
-    changes: list[tuple[str, str, str, str]] = []
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: next(states))
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("schema_type_change_order_customer_a")
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(lab, "_drop_dependency", lambda relation: calls.append(("drop", relation)))
     monkeypatch.setattr(
         lab,
         "_change_column_type",
-        lambda relation, column, source, target: changes.append(
-            (relation, column, source, target)
+        lambda mutation: calls.append(("type", mutation.column)),
+    )
+    monkeypatch.setattr(
+        lab,
+        "_add_nullable_column",
+        lambda mutation: calls.append(("distractor", mutation.column)),
+    )
+
+    lab._apply_mutations(scenario)
+
+    assert calls == [
+        ("drop", "raw_orders"),
+        ("type", "user_id"),
+        ("distractor", "source_batch_note"),
+    ]
+
+
+def test_lab_restores_declared_mutations_in_reverse_order(tmp_path: Path, monkeypatch) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("schema_type_change_order_customer_a")
+    calls: list[tuple[str, str]] = []
+    injected_relations = {
+        "raw_orders": RelationSummary(
+            "raw_orders",
+            99,
+            (ColumnSummary("user_id", "text", True, 2),),
         ),
+        "raw_payments": RelationSummary(
+            "raw_payments",
+            113,
+            (ColumnSummary("source_batch_note", "text", True, 5),),
+        ),
+    }
+    monkeypatch.setattr(
+        lab,
+        "_healthy_relation",
+        lambda relation: injected_relations[relation],
     )
-    monkeypatch.setattr(lab, "_drop_type_change_dependency", lambda: None)
-
-    assert lab.inject(TYPE_CHANGE_CASE_ID).state == "INJECTED"
-    assert changes == [("raw_payments", "amount", "integer", "text")]
-    assert baseline.calls == ["start_postgres"]
-
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: TYPE_INJECTED)
-    changes.clear()
-    assert lab.reset(TYPE_CHANGE_CASE_ID).state == "HEALTHY"
-    assert changes == [("raw_payments", "amount", "text", "integer")]
-
-
-def test_schema_read_error_redacts_password_and_exception_chain(tmp_path: Path) -> None:
-    _prepare_ground_truth(tmp_path)
-
-    def connect(**_: object) -> None:
-        raise RuntimeError("failed with TEST_REDACTED_VALUE")
-
-    lab = IncidentLab(
-        Settings(_env_file=None, postgres_password="TEST_REDACTED_VALUE"),
-        tmp_path,
-        baseline_builder=SimpleNamespace(start_postgres=lambda: None),
-        db_connect=connect,
+    monkeypatch.setattr(lab, "_drop_dependency", lambda relation: calls.append(("drop", relation)))
+    monkeypatch.setattr(
+        lab,
+        "_change_column_type",
+        lambda mutation, *, restore: calls.append(("type", f"{mutation.column}:{restore}")),
+    )
+    monkeypatch.setattr(
+        lab,
+        "_drop_nullable_column",
+        lambda mutation: calls.append(("distractor", mutation.column)),
     )
 
-    with pytest.raises(IncidentExecutionError) as error:
-        lab.inject(CASE_ID)
+    lab._restore_mutations(scenario)
 
-    assert "TEST_REDACTED_VALUE" not in str(error.value)
-    assert "***" in str(error.value)
-    assert error.value.__cause__ is None
-    assert error.value.__context__ is None
-    assert "TEST_REDACTED_VALUE" not in "".join(traceback.format_exception(error.value))
+    assert calls == [
+        ("distractor", "source_batch_note"),
+        ("drop", "raw_orders"),
+        ("type", "user_id:True"),
+    ]
 
 
-def test_rename_error_redacts_password_and_exception_chain(tmp_path: Path) -> None:
-    secret = "TEST_REDACTED_VALUE"
-
-    class Cursor:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-        def execute(self, _: object) -> None:
-            raise RuntimeError(f"rename failed with {secret}")
-
-    class Transaction:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    class Connection:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-        def transaction(self) -> Transaction:
-            return Transaction()
-
-        def cursor(self) -> Cursor:
-            return Cursor()
-
-    lab = IncidentLab(
-        Settings(_env_file=None, postgres_password=secret),
-        tmp_path,
-        baseline_builder=SimpleNamespace(),
-        db_connect=lambda **_: Connection(),
+def test_scenario_run_is_the_single_public_run_shape() -> None:
+    run = ScenarioRun(
+        run_id="a" * 32,
+        artifact_dir=Path(".dig/lab/runs") / ("a" * 32),
+        verification_status=ScenarioVerificationStatus.HEALTHY_CONTROL,
+        dbt_exit_code=0,
     )
 
-    with pytest.raises(IncidentExecutionError) as error:
-        lab._rename_column("raw_payments", "amount", "total_amount")
-
-    assert "故障字段改名失败" in str(error.value)
-    assert secret not in str(error.value)
-    assert "***" in str(error.value)
-    assert error.value.__cause__ is None
-    assert error.value.__context__ is None
-    assert secret not in "".join(traceback.format_exception(error.value))
+    assert run.verification_status is ScenarioVerificationStatus.HEALTHY_CONTROL
+    assert run.dbt_exit_code == 0
 
 
-def test_baseline_error_redacts_password_and_exception_chain(tmp_path: Path) -> None:
-    _prepare_ground_truth(tmp_path)
-    secret = "TEST_REDACTED_VALUE"
+def test_no_mutation_preparation_uses_the_full_baseline_projection(monkeypatch) -> None:
+    lab = _lab(PROJECT_ROOT)
+    scenario = load_scenario_spec("order_volume_pattern_a")
+    inspected: list[tuple[str, ...]] = []
+    monkeypatch.setattr(lab, "_load_case", lambda _: scenario)
+    monkeypatch.setattr(lab, "_start_postgres", lambda: None)
+    monkeypatch.setattr(lab, "_clear_active_run", lambda: None)
+    monkeypatch.setattr(
+        lab,
+        "_inspect_relations",
+        lambda names: inspected.append(tuple(names)) or (),
+    )
+    monkeypatch.setattr(lab, "_fingerprint", lambda *_: "a" * 64)
 
-    def start_postgres() -> None:
-        raise BaselineError(f"runner failed with {secret}")
+    result = lab.prepare("order_volume_pattern_a")
 
-    lab = IncidentLab(
-        Settings(_env_file=None, postgres_password=secret),
-        tmp_path,
-        baseline_builder=SimpleNamespace(start_postgres=start_postgres),
+    assert result.state == "HEALTHY"
+    assert result.fingerprint == "a" * 64
+    assert inspected == [tuple(EXPECTED_RELATION_COUNTS)]
+
+
+def test_reset_clears_stale_active_run_before_recovery_failure(tmp_path: Path, monkeypatch) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("schema_type_change_payment_amount")
+    active = tmp_path / ".dig" / "lab" / "active_run.json"
+    temporary = tmp_path / ".dig" / "lab" / "active_run.json.tmp"
+    active.parent.mkdir(parents=True)
+    active.write_text("stale", encoding="utf-8")
+    temporary.write_text("stale temporary", encoding="utf-8")
+    monkeypatch.setattr(lab, "_load_case", lambda _: scenario)
+    monkeypatch.setattr(lab, "_start_postgres", lambda: None)
+    monkeypatch.setattr(
+        lab,
+        "_build_healthy_baseline",
+        lambda: (_ for _ in ()).throw(IncidentExecutionError("synthetic recovery failure")),
     )
 
-    with pytest.raises(IncidentExecutionError) as error:
-        lab.inject(CASE_ID)
+    with pytest.raises(IncidentExecutionError, match="synthetic recovery failure"):
+        lab.reset("schema_type_change_payment_amount")
 
-    assert "TEST_REDACTED_VALUE" not in str(error.value)
-    assert "***" in str(error.value)
-    assert error.value.__cause__ is None
-    assert error.value.__context__ is None
-    assert secret not in "".join(traceback.format_exception(error.value))
+    assert not active.exists()
+    assert not temporary.exists()
 
 
-def test_reset_postcondition_error_has_no_database_secret_or_context(
-    monkeypatch: pytest.MonkeyPatch,
+def test_restore_accepts_schema_already_restored_by_partial_reset(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    _prepare_ground_truth(tmp_path)
-    secret = "TEST_REDACTED_VALUE"
-    baseline = FakeBaseline(make_baseline_summary("analytics", (DRIFTED,)))
-    lab = IncidentLab(
-        Settings(_env_file=None, postgres_password=secret),
-        tmp_path,
-        baseline_builder=baseline,
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("schema_rename_payment_amount")
+    healthy = RelationSummary(
+        "raw_payments",
+        113,
+        (ColumnSummary("amount", "integer", True, 4),),
     )
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: None)
-
-    with pytest.raises(InvalidIncidentState) as error:
-        lab.reset(CASE_ID)
-
-    assert "重置后未恢复健康 Schema" in str(error.value)
-    assert secret not in str(error.value)
-    assert error.value.__cause__ is None
-    assert error.value.__context__ is None
-    assert secret not in "".join(traceback.format_exception(error.value))
-
-
-def test_build_uses_unique_run_paths_and_returns_expected_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    lab, _ = _lab(tmp_path)
-    lab.settings = Settings(_env_file=None, postgres_password="TEST_REDACTED_VALUE")
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
-
-    class FakeDbtRunner:
-        def run_incident(self, target: Path, logs: Path):
-            target.mkdir(parents=True)
-            logs.mkdir(parents=True)
-            (target / "manifest.json").write_text(
-                '{"message": "TEST_REDACTED_VALUE"}',
-                encoding="utf-8",
-            )
-            (target / "run_results.json").write_text(
-                '{"message": "TEST_REDACTED_VALUE"}',
-                encoding="utf-8",
-            )
-            (logs / "dbt.log").write_text(
-                "failure TEST_REDACTED_VALUE",
-                encoding="utf-8",
-            )
-            return SimpleNamespace(
-                return_code=1,
-                stdout="out TEST_REDACTED_VALUE",
-                stderr="err TEST_REDACTED_VALUE",
-            )
-
-    verification = SimpleNamespace(status="EXPECTED_FAILURE")
-
-    class FakeVerifier:
-        def __init__(self) -> None:
-            self.run_ids: list[str] = []
-
-        def verify(self, run_id: str):
-            self.run_ids.append(run_id)
-            return verification
-
-    fake_verifier = FakeVerifier()
-    lab.dbt_runner = FakeDbtRunner()
-    lab.verifier = fake_verifier
-    lab.run_id_factory = lambda: "0123456789abcdef0123456789abcdef"
-
-    result = lab.build(CASE_ID)
-
-    assert result.dbt_exit_code == 1
-    assert result.verification.status == "EXPECTED_FAILURE"
-    assert fake_verifier.run_ids == [result.run_id]
-    assert result.artifact_dir == (
-        tmp_path / ".dig/lab/runs/0123456789abcdef0123456789abcdef"
+    rename_calls: list[bool] = []
+    monkeypatch.setattr(lab, "_load_case", lambda _: scenario)
+    monkeypatch.setattr(lab, "_healthy_relation", lambda _: healthy)
+    monkeypatch.setattr(
+        lab,
+        "_rename_column",
+        lambda _mutation, *, restore: rename_calls.append(restore),
     )
-    assert (result.artifact_dir / "metadata.json").is_file()
-    assert "TEST_REDACTED_VALUE" not in (
-        result.artifact_dir / "dbt/stdout.log"
-    ).read_text(encoding="utf-8")
-    assert "TEST_REDACTED_VALUE" not in (
-        result.artifact_dir / "dbt/stderr.log"
-    ).read_text(encoding="utf-8")
-    assert "TEST_REDACTED_VALUE" not in (
-        result.artifact_dir / "dbt/logs/dbt.log"
-    ).read_text(encoding="utf-8")
-    assert "TEST_REDACTED_VALUE" not in (
-        result.artifact_dir / "dbt/target/manifest.json"
-    ).read_text(encoding="utf-8")
-    assert "TEST_REDACTED_VALUE" not in (
-        result.artifact_dir / "dbt/target/run_results.json"
-    ).read_text(encoding="utf-8")
-    assert not (tmp_path / ".dig/dbt/target/run_results.json").exists()
+    monkeypatch.setattr(lab, "_clear_active_run", lambda: None)
+    monkeypatch.setattr(lab, "_start_postgres", lambda: None)
+    monkeypatch.setattr(
+        lab,
+        "_build_healthy_baseline",
+        lambda: SimpleNamespace(fingerprint="a" * 64),
+    )
 
-    with pytest.raises(IncidentExecutionError):
-        lab.build(CASE_ID)
-    assert (result.artifact_dir / "metadata.json").is_file()
+    result = lab.restore("schema_rename_payment_amount")
+
+    assert result.state == "HEALTHY"
+    assert rename_calls == []
 
 
-def test_build_publishes_active_run_only_after_expected_failure_verification(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    lab, _ = _lab(tmp_path)
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
-    lab.dbt_runner = SimpleNamespace(
-        run_incident=lambda target, logs: SimpleNamespace(
-            return_code=1,
-            stdout="",
-            stderr="",
+def test_build_rejects_unprepared_or_unknown_schema_drift(tmp_path: Path, monkeypatch) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("schema_type_change_payment_amount")
+    healthy = RelationSummary(
+        "raw_payments",
+        1,
+        (ColumnSummary("amount", "integer", True, 1),),
+    )
+    monkeypatch.setattr(lab, "_healthy_relation", lambda _: healthy)
+
+    with pytest.raises(InvalidIncidentState, match="type mutation"):
+        lab._validate_prepared_state(scenario)
+
+
+def test_null_mutation_helpers_use_bound_values_and_exact_row_count(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = load_scenario_spec(
+        "required_null_payment_id"
+    ).reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, SetFieldNullMutation)
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rows=[(1,)], one=(0,))
+    lab.db_connect = lambda **_: _FakeConnection(cursor)
+
+    assert lab._read_null_target(mutation) == 1
+    assert lab._null_count(mutation) == 0
+    lab._write_null_target(
+        mutation,
+        expected_current=mutation.expected_value,
+        replacement=None,
+    )
+
+    assert calls[0][1] == (1,)
+    assert calls[1][1] == ()
+    assert calls[2][1] == (None, 1, 1)
+    assert "IS NOT DISTINCT FROM" in calls[2][0]
+
+
+def test_null_mutation_helpers_reject_non_unique_selector_or_update(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = load_scenario_spec(
+        "required_null_payment_id"
+    ).reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, SetFieldNullMutation)
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rows=[(1,), (1,)], one=None, rowcount=0)
+    lab.db_connect = lambda **_: _FakeConnection(cursor)
+
+    with pytest.raises(InvalidIncidentState, match="恰好一行"):
+        lab._read_null_target(mutation)
+
+    cursor.rows = [(1,)]
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+    with pytest.raises(InvalidIncidentState, match="恰好一行"):
+        lab._write_null_target(
+            mutation,
+            expected_current=mutation.expected_value,
+            replacement=None,
         )
-    )
-    lab.verifier = SimpleNamespace(verify=lambda _: SimpleNamespace(status="EXPECTED_FAILURE"))
-    lab.run_id_factory = lambda: "0123456789abcdef0123456789abcdef"
 
-    result = lab.build(CASE_ID)
-
-    pointer = tmp_path / ".dig/lab/active_fault_run.json"
-    assert pointer.is_file()
-    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == result.run_id
+    assert connection.transaction_instance.saw_exception is True
 
 
-def test_failed_verification_never_publishes_active_run(
-    monkeypatch: pytest.MonkeyPatch,
+def test_null_mutation_prepare_apply_validate_and_restore_states(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    lab, _ = _lab(tmp_path)
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
-    lab.dbt_runner = SimpleNamespace(
-        run_incident=lambda target, logs: SimpleNamespace(
-            return_code=1,
-            stdout="",
-            stderr="",
-        )
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("required_null_payment_id")
+    mutation = scenario.reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, SetFieldNullMutation)
+    current = [mutation.expected_value]
+    null_count = [0]
+    writes: list[tuple[object, object]] = []
+    monkeypatch.setattr(lab, "_read_null_target", lambda _mutation: current[0])
+    monkeypatch.setattr(lab, "_null_count", lambda _mutation: null_count[0])
+
+    lab._ensure_healthy_for_prepare(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_write_null_target",
+        lambda _mutation, *, expected_current, replacement: (
+            writes.append((expected_current, replacement)),
+            current.__setitem__(0, replacement),
+            null_count.__setitem__(0, 1),
+        )[-1],
     )
-    lab.verifier = SimpleNamespace(
-        verify=lambda _: (_ for _ in ()).throw(LabVerificationError("bad"))
+    lab._apply_mutations(scenario)
+    lab._validate_prepared_state(scenario)
+    assert writes == [(mutation.expected_value, None)]
+
+    monkeypatch.setattr(
+        lab,
+        "_write_null_target",
+        lambda _mutation, *, expected_current, replacement: (
+            writes.append((expected_current, replacement)),
+            current.__setitem__(0, replacement),
+            null_count.__setitem__(0, 0),
+        )[-1],
     )
-    lab.run_id_factory = lambda: "0123456789abcdef0123456789abcdef"
+    lab._restore_mutations(scenario)
+    assert current == [mutation.expected_value]
+    assert null_count == [0]
 
-    with pytest.raises(FaultVerificationError):
-        lab.build(CASE_ID)
+    current[0] = "unexpected"
+    with pytest.raises(InvalidIncidentState, match="未知"):
+        lab._restore_mutations(scenario)
 
-    assert not (tmp_path / ".dig/lab/active_fault_run.json").exists()
 
-
-@pytest.mark.parametrize("method", ["reset", "inject"])
-def test_reset_and_inject_clear_stale_active_run_before_state_change(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    method: str,
+@pytest.mark.parametrize(
+    ("case_id", "healthy_count", "injected_count"),
+    (
+        ("duplicate_payment_record", 113, 114),
+        ("duplicate_payment_coupon_a", 113, 116),
+        ("duplicate_payment_coupon_b", 113, 116),
+    ),
+)
+def test_duplicate_payment_lifecycle_is_exact(
+    case_id: str,
+    healthy_count: int,
+    injected_count: int,
 ) -> None:
-    lab, _ = _lab(tmp_path)
-    pointer = tmp_path / ".dig/lab/active_fault_run.json"
-    pointer.parent.mkdir(parents=True)
-    pointer.write_text("stale", encoding="utf-8")
-    state = HEALTHY if method == "inject" else None
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: state)
-    if method == "reset":
-        monkeypatch.setattr(
-            lab,
-            "_build_healthy_baseline",
-            lambda: make_baseline_summary("analytics", (HEALTHY,)),
+    scenario = load_scenario_spec(case_id)
+    mutation = next(
+        item
+        for item in scenario.reset_and_injection_contract.mutations
+        if isinstance(item, DuplicatePaymentRowsMutation)
+    )
+    pairs = duplicate_payment_rows(mutation)
+    assert healthy_count == 113
+    assert injected_count == 113 + len(pairs)
+    if mutation.mode == "EXACT_RECORD":
+        assert pairs == (
+            ((1, 1, "credit_card", 1000), (1, 1, "credit_card", 1000)),
         )
     else:
-        monkeypatch.setattr(lab, "_rename_column", lambda *_: None)
-        states = iter((HEALTHY, INJECTED))
-        monkeypatch.setattr(lab, "_inspect_relation", lambda _: next(states))
-
-    getattr(lab, method)(CASE_ID)
-
-    assert not pointer.exists()
+        assert pairs == (
+            ((47, 42, "coupon", 1700), (114, 42, "coupon", 1700)),
+            ((66, 58, "coupon", 1800), (115, 58, "coupon", 1800)),
+            ((86, 76, "coupon", 200), (116, 76, "coupon", 200)),
+        )
 
 
-def test_build_rejects_noninjected_schema(
-    monkeypatch: pytest.MonkeyPatch,
+def test_duplicate_payment_state_distinguishes_frozen_batches(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    lab, _ = _lab(tmp_path)
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: HEALTHY)
+    lab = _lab(tmp_path)
+    states = {
+        "duplicate_payment_record": (113, 114, 1, 2),
+        "duplicate_payment_coupon_a": (113, 116, 1, 0),
+    }
+    for case_id, (healthy_total, injected_total, source_count, inserted_count) in states.items():
+        scenario = load_scenario_spec(case_id)
+        mutation = next(
+            item
+            for item in scenario.reset_and_injection_contract.mutations
+            if isinstance(item, DuplicatePaymentRowsMutation)
+        )
+        source_ids = mutation.source_payment_ids
+        mutation_mode = mutation.mode
+        monkeypatch.setattr(lab, "_payment_row_total", lambda total=healthy_total: total)
+        monkeypatch.setattr(
+            lab,
+            "_payment_row_count",
+            lambda row, ids=source_ids, src=source_count, ins=inserted_count: (
+                src if row[0] in ids else ins
+            ),
+        )
+        assert lab._duplicate_payment_state(mutation) == "HEALTHY"
 
-    with pytest.raises(InvalidIncidentState, match="要求已注入状态"):
-        lab.build(CASE_ID)
+        monkeypatch.setattr(lab, "_payment_row_total", lambda total=injected_total: total)
+        monkeypatch.setattr(
+            lab,
+            "_payment_row_count",
+            lambda _, mode=mutation_mode: 2 if mode == "EXACT_RECORD" else 1,
+        )
+        assert lab._duplicate_payment_state(mutation) == "INJECTED"
 
 
-def test_build_preserves_scene_when_verification_fails_without_secret_context(
-    monkeypatch: pytest.MonkeyPatch,
+def test_duplicate_payment_insert_row_guard_is_transactional(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("duplicate_payment_coupon_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, DuplicatePaymentRowsMutation)
+    )
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rowcount=0)
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+
+    with pytest.raises(InvalidIncidentState, match="精确行数"):
+        lab._insert_payment_duplicates(mutation)
+
+    assert connection.transaction_instance.saw_exception is True
+    assert all("raw_payments" in statement for statement, _ in calls)
+    assert calls[0][1] == (114, 42, "coupon", 1700, 115, 58, "coupon", 1800, 116, 76, "coupon", 200)
+
+
+def test_duplicate_payment_delete_row_guard_is_transactional(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("duplicate_payment_coupon_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, DuplicatePaymentRowsMutation)
+    )
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rowcount=0)
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+
+    with pytest.raises(InvalidIncidentState, match="精确行数"):
+        lab._delete_payment_duplicates(mutation)
+
+    assert connection.transaction_instance.saw_exception is True
+    assert all("ctid" in statement and "raw_payments" in statement for statement, _ in calls)
+    assert [parameters for _, parameters in calls] == [
+        (114, 42, "coupon", 1700),
+        (115, 58, "coupon", 1800),
+        (116, 76, "coupon", 200),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case_id", "healthy_count", "injected_count"),
+    (
+        ("orphan_payment_record", 113, 114),
+        ("orphan_payment_coupon_a", 113, 116),
+        ("orphan_payment_coupon_b", 113, 116),
+    ),
+)
+def test_orphan_payment_lifecycle_is_exact(
+    case_id: str,
+    healthy_count: int,
+    injected_count: int,
+) -> None:
+    scenario = load_scenario_spec(case_id)
+    mutation = next(
+        item
+        for item in scenario.reset_and_injection_contract.mutations
+        if isinstance(item, OrphanPaymentRowsMutation)
+    )
+    rows = orphan_payment_rows(mutation)
+    assert healthy_count == 113
+    assert injected_count == 113 + len(rows)
+    if mutation.mode == "SINGLE_REFERENCE":
+        assert rows == ((114, 1000, "credit_card", 1000),)
+    else:
+        assert rows == (
+            (114, 1000, "coupon", 1700),
+            (115, 1001, "coupon", 1800),
+            (116, 1002, "coupon", 200),
+        )
+
+
+def test_orphan_payment_state_distinguishes_frozen_batches(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    lab, _ = _lab(tmp_path)
-    lab.settings = Settings(_env_file=None, postgres_password="TEST_REDACTED_VALUE")
-    monkeypatch.setattr(lab, "_inspect_relation", lambda _: INJECTED)
+    lab = _lab(tmp_path)
+    states = {
+        "orphan_payment_record": (113, 114),
+        "orphan_payment_coupon_a": (113, 116),
+    }
+    for case_id, (healthy_total, injected_total) in states.items():
+        mutation = next(
+            item
+            for item in load_scenario_spec(case_id)
+            .reset_and_injection_contract.mutations
+            if isinstance(item, OrphanPaymentRowsMutation)
+        )
+        rows = orphan_payment_rows(mutation)
+        monkeypatch.setattr(lab, "_payment_row_total", lambda total=healthy_total: total)
+        monkeypatch.setattr(lab, "_payment_row_count", lambda _row: 0)
+        assert lab._orphan_payment_state(mutation) == "HEALTHY"
 
-    class FakeDbtRunner:
-        def run_incident(self, target: Path, logs: Path):
-            target.mkdir(parents=True)
-            logs.mkdir(parents=True)
-            (target / "manifest.json").write_text("{}", encoding="utf-8")
-            (target / "run_results.json").write_text("{}", encoding="utf-8")
-            (logs / "dbt.log").write_text(
-                "failure TEST_REDACTED_VALUE",
-                encoding="utf-8",
-            )
-            return SimpleNamespace(
-                return_code=1,
-                stdout="stdout TEST_REDACTED_VALUE",
-                stderr="stderr TEST_REDACTED_VALUE",
-            )
+        monkeypatch.setattr(lab, "_payment_row_total", lambda total=injected_total: total)
+        monkeypatch.setattr(
+            lab,
+            "_payment_row_count",
+            lambda row, expected=rows: 1 if row in expected else 0,
+        )
+        assert lab._orphan_payment_state(mutation) == "INJECTED"
 
-    class FailingVerifier:
-        def verify(self, _: str):
-            raise LabVerificationError("invalid TEST_REDACTED_VALUE")
+        monkeypatch.setattr(
+            lab,
+            "_payment_row_count",
+            lambda row, expected=rows: 2 if row == expected[0] else 1,
+        )
+        assert lab._orphan_payment_state(mutation) == "DRIFTED"
 
-    lab.dbt_runner = FakeDbtRunner()
-    lab.verifier = FailingVerifier()
-    lab.run_id_factory = lambda: "0123456789abcdef0123456789abcdef"
 
-    with pytest.raises(FaultVerificationError) as error:
-        lab.build(CASE_ID)
+def test_orphan_payment_lifecycle_routes_exact_batch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("orphan_payment_record")
+    mutation = scenario.reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, OrphanPaymentRowsMutation)
+    rows = orphan_payment_rows(mutation)
+    calls: list[tuple[str, tuple[tuple[int, int, str, int], ...]]] = []
 
-    assert "TEST_REDACTED_VALUE" not in str(error.value)
-    assert error.value.__cause__ is None
-    assert error.value.__context__ is None
-    run_root = tmp_path / ".dig/lab/runs/0123456789abcdef0123456789abcdef"
-    assert (run_root / "ground_truth.json").is_file()
-    assert (run_root / "metadata.json").is_file()
-    assert "TEST_REDACTED_VALUE" not in (
-        run_root / "dbt/stdout.log"
-    ).read_text(encoding="utf-8")
+    monkeypatch.setattr(lab, "_orphan_payment_state", lambda _mutation: "HEALTHY")
+    lab._ensure_healthy_for_prepare(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_insert_orphan_payments",
+        lambda _mutation: calls.append(("insert", rows)),
+    )
+    lab._apply_mutations(scenario)
+
+    monkeypatch.setattr(lab, "_orphan_payment_state", lambda _mutation: "INJECTED")
+    lab._validate_prepared_state(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_delete_orphan_payments",
+        lambda _mutation: calls.append(("delete", rows)),
+    )
+    lab._restore_mutations(scenario)
+    monkeypatch.setattr(lab, "_orphan_payment_state", lambda _mutation: "HEALTHY")
+    lab._verify_restored(scenario)
+
+    assert calls == [("insert", rows), ("delete", rows)]
+
+
+@pytest.mark.parametrize("method_name", ("_insert_orphan_payments", "_delete_orphan_payments"))
+def test_orphan_payment_row_guards_are_transactional(
+    tmp_path: Path,
+    method_name: str,
+) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("orphan_payment_coupon_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, OrphanPaymentRowsMutation)
+    )
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rowcount=0)
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+
+    with pytest.raises(InvalidIncidentState, match="精确行数"):
+        getattr(lab, method_name)(mutation)
+
+    assert connection.transaction_instance.saw_exception is True
+    assert all("raw_payments" in statement for statement, _ in calls)
+
+
+@pytest.mark.parametrize(
+    ("case_id", "healthy_total", "injected_total"),
+    (
+        ("silent_payment_drop_record", 113, 112),
+        ("silent_payment_drop_partition_a", 113, 111),
+        ("silent_payment_drop_partition_b", 113, 111),
+    ),
+)
+def test_silent_payment_drop_lifecycle_is_exact(
+    case_id: str,
+    healthy_total: int,
+    injected_total: int,
+) -> None:
+    scenario = load_scenario_spec(case_id)
+    mutation = next(
+        item
+        for item in scenario.reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    rows = deleted_payment_rows(mutation)
+    assert healthy_total == 113
+    assert injected_total == 113 - len(rows)
+    if mutation.mode == "SOURCE_BATCH":
+        assert rows == ((111, 97, "bank_transfer", 1400),)
+    else:
+        assert rows == (
+            (89, 78, "bank_transfer", 2600),
+            (92, 80, "gift_card", 300),
+        )
+
+
+def test_silent_payment_drop_state_rejects_drifted_batches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("silent_payment_drop_partition_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    rows = deleted_payment_rows(mutation)
+    monkeypatch.setattr(lab, "_payment_row_total", lambda: 113)
+    monkeypatch.setattr(lab, "_payment_row_count", lambda row: 1 if row in rows else 0)
+    assert lab._silent_payment_drop_state(mutation) == "HEALTHY"
+
+    monkeypatch.setattr(lab, "_payment_row_total", lambda: 111)
+    monkeypatch.setattr(lab, "_payment_row_count", lambda _row: 0)
+    assert lab._silent_payment_drop_state(mutation) == "INJECTED"
+
+    monkeypatch.setattr(lab, "_payment_row_count", lambda row: 0 if row == rows[0] else 1)
+    assert lab._silent_payment_drop_state(mutation) == "DRIFTED"
+
+
+def test_silent_payment_drop_routes_exact_batch_and_restores_in_reverse_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _lab(tmp_path)
+    scenario = load_scenario_spec("silent_payment_drop_partition_a")
+    mutation = scenario.reset_and_injection_contract.mutations[0]
+    assert isinstance(mutation, DeletePaymentRowsMutation)
+    rows = deleted_payment_rows(mutation)
+    calls: list[tuple[str, tuple[tuple[int, int, str, int], ...]]] = []
+    schema_present = [False]
+
+    def healthy_relation(_: str) -> RelationSummary:
+        columns = (
+            (ColumnSummary("source_batch_note", "text", True, 5),)
+            if schema_present[0]
+            else ()
+        )
+        return RelationSummary("raw_payments", 113, columns)
+
+    monkeypatch.setattr(lab, "_silent_payment_drop_state", lambda _mutation: "HEALTHY")
+    monkeypatch.setattr(lab, "_healthy_relation", healthy_relation)
+    monkeypatch.setattr(lab, "_add_nullable_column", lambda _: schema_present.__setitem__(0, True))
+    monkeypatch.setattr(
+        lab,
+        "_drop_nullable_column",
+        lambda _: schema_present.__setitem__(0, False),
+    )
+    lab._ensure_healthy_for_prepare(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_delete_source_payments",
+        lambda _mutation: calls.append(("delete", rows)),
+    )
+    lab._apply_mutations(scenario)
+
+    monkeypatch.setattr(lab, "_silent_payment_drop_state", lambda _mutation: "INJECTED")
+    lab._validate_prepared_state(scenario)
+    monkeypatch.setattr(
+        lab,
+        "_restore_source_payments",
+        lambda _mutation: calls.append(("insert", rows)),
+    )
+    lab._restore_mutations(scenario)
+    monkeypatch.setattr(lab, "_silent_payment_drop_state", lambda _mutation: "HEALTHY")
+    lab._verify_restored(scenario)
+
+    assert calls == [("delete", rows), ("insert", rows)]
+
+
+def test_silent_payment_drop_delete_guard_is_transactional(tmp_path: Path) -> None:
+    lab = _lab(tmp_path)
+    mutation = next(
+        item
+        for item in load_scenario_spec("silent_payment_drop_partition_a")
+        .reset_and_injection_contract.mutations
+        if isinstance(item, DeletePaymentRowsMutation)
+    )
+    calls: list[tuple[str, tuple[object, ...]]] = []
+    cursor = _FakeCursor(calls, rowcount=0)
+    connection = _FakeConnection(cursor)
+    lab.db_connect = lambda **_: connection
+
+    with pytest.raises(InvalidIncidentState, match="精确行数"):
+        lab._delete_source_payments(mutation)
+
+    assert connection.transaction_instance.saw_exception is True
+    assert all("ctid" in statement and "raw_payments" in statement for statement, _ in calls)
