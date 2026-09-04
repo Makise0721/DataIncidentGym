@@ -6,13 +6,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from data_incident_gym.artifacts import ARTIFACT_FILENAMES, ArtifactWriter
 from data_incident_gym.benchmark_manifest import build_manifest
 from data_incident_gym.benchmark_runner import (
+    BenchmarkCellSelector,
+    BenchmarkDoctorReceipt,
     BenchmarkLedgerEntry,
     BenchmarkRunner,
     BenchmarkRunnerError,
+    is_receipt_acceptable,
 )
 from data_incident_gym.config import Settings
 from data_incident_gym.diagnosis import DiagnosticStrategy
@@ -32,6 +36,13 @@ from data_incident_gym.evaluation_runner import (
 )
 
 NOW = datetime(2026, 9, 1, tzinfo=UTC)
+MODEL_CHECKS = frozenset(
+    {
+        DoctorCheckCode.MODEL_ENDPOINT,
+        DoctorCheckCode.MODEL_PRESENT,
+        DoctorCheckCode.MODEL_TOOL_STRUCTURED_OUTPUT,
+    }
+)
 
 
 def _doctor_result(passed: bool = True) -> DoctorResult:
@@ -43,6 +54,106 @@ def _doctor_result(passed: bool = True) -> DoctorResult:
         status=DoctorStatus.PASSED if passed else DoctorStatus.FAILED,
         checks=checks,
     )
+
+
+def _doctor_without_model() -> DoctorResult:
+    return DoctorResult(
+        status=DoctorStatus.FAILED,
+        checks=tuple(
+            DoctorRunner._check(
+                code,
+                code not in MODEL_CHECKS,
+                "OK" if code not in MODEL_CHECKS else "UNAVAILABLE",
+            )
+            for code in DoctorCheckCode
+        ),
+    )
+
+
+def _scoped_receipt(
+    *,
+    manifest_id: str = "p1-formal-v3",
+    model_probe_required: bool,
+    cell_selector: BenchmarkCellSelector | None = None,
+) -> BenchmarkDoctorReceipt:
+    return BenchmarkDoctorReceipt(
+        manifest_id=manifest_id,
+        manifest_sha256="a" * 64,
+        implementation_revision="a" * 40,
+        checkout_revision="a" * 40,
+        result_inputs_sha256="b" * 64,
+        cell_selector=cell_selector,
+        model_probe_required=model_probe_required,
+        checked_at=NOW,
+        result=_doctor_without_model(),
+    )
+
+
+def test_fixed_rule_receipt_is_acceptable_without_model_probe() -> None:
+    fixed_rule_receipt = _scoped_receipt(model_probe_required=False)
+
+    assert fixed_rule_receipt.model_probe_required is False
+    assert fixed_rule_receipt.result.status is DoctorStatus.FAILED
+    assert is_receipt_acceptable(fixed_rule_receipt) is True
+
+
+def test_model_backed_receipt_requires_full_doctor_pass() -> None:
+    model_receipt_with_failed_probe = _scoped_receipt(model_probe_required=True)
+
+    assert model_receipt_with_failed_probe.model_probe_required is True
+    assert is_receipt_acceptable(model_receipt_with_failed_probe) is False
+
+
+def test_receipt_rejects_scope_mismatch_against_selected_cells(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("a" * 40, manifest_id="p1-formal-v3")
+    runner_with_fixed_rule_selector = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_without_model(),
+        calls=[],
+        doctor_calls=[],
+        cell_selector=BenchmarkCellSelector(
+            manifest_id=manifest.manifest_id,
+            strategies=(DiagnosticStrategy.FIXED_RULE,),
+        ),
+    )
+    model_backed_receipt = _scoped_receipt(model_probe_required=True)
+
+    with pytest.raises(BenchmarkRunnerError, match="scope"):
+        runner_with_fixed_rule_selector.assert_receipt_scope(model_backed_receipt)
+
+
+def test_receipt_rejects_different_fixed_only_selector_even_without_model_probe(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("a" * 40, manifest_id="p1-formal-v3")
+    first_selector = BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id,
+        sequences=(manifest.cells[-1].sequence,),
+    )
+    second_selector = BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id,
+        sequences=(manifest.cells[-2].sequence,),
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_without_model(),
+        calls=[],
+        doctor_calls=[],
+        cell_selector=first_selector,
+    )
+
+    with pytest.raises(BenchmarkRunnerError, match="scope"):
+        runner.assert_receipt_scope(
+            _scoped_receipt(
+                manifest_id=manifest.manifest_id,
+                model_probe_required=False,
+                cell_selector=second_selector,
+            )
+        )
 
 
 def _evaluation(case_id: str, run_id: str) -> EvaluationResult:
@@ -193,6 +304,7 @@ def _runner(
     doctor_calls: list[str],
     writer: object | None = None,
     evaluation_runner_factory: object | None = None,
+    cell_selector: BenchmarkCellSelector | None = None,
 ) -> BenchmarkRunner:
     return BenchmarkRunner(
         manifest,
@@ -204,7 +316,207 @@ def _runner(
         clock=lambda: NOW,
         checkout_verifier=lambda _manifest: None,
         checkout_revision_reader=lambda: "a" * 40,
+        cell_selector=cell_selector,
     )
+
+
+def test_cell_selector_filters_by_strategy() -> None:
+    manifest = build_manifest("a" * 40)
+    selector = BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id,
+        strategies=(DiagnosticStrategy.FIXED_RULE,),
+    )
+
+    selected = selector.select(manifest.cells)
+
+    assert len(selected) == 12
+    assert all(cell.strategy is DiagnosticStrategy.FIXED_RULE for cell in selected)
+    assert all(cell.model_backed is False for cell in selected)
+
+
+def test_cell_selector_filters_by_sequence() -> None:
+    manifest = build_manifest("a" * 40)
+    selector = BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id, sequences=(1, 2, 3)
+    )
+
+    selected = selector.select(manifest.cells)
+
+    assert [cell.sequence for cell in selected] == [1, 2, 3]
+
+
+def test_cell_selector_rejects_empty_duplicate_and_bad_sequence() -> None:
+    with pytest.raises(ValidationError):
+        BenchmarkCellSelector(manifest_id="p1-formal-v2")
+    with pytest.raises(ValidationError):
+        BenchmarkCellSelector(
+            manifest_id="p1-formal-v2",
+            strategies=(
+                DiagnosticStrategy.FIXED_RULE,
+                DiagnosticStrategy.FIXED_RULE,
+            ),
+        )
+    with pytest.raises(ValidationError):
+        BenchmarkCellSelector(manifest_id="p1-formal-v2", sequences=(0,))
+
+
+def test_runner_rejects_selector_bound_to_another_manifest(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("a" * 40)
+    selector = BenchmarkCellSelector(
+        manifest_id=(
+            "p1-formal-v4"
+            if manifest.manifest_id != "p1-formal-v4"
+            else "p1-formal-v3"
+        ),
+        strategies=(DiagnosticStrategy.FIXED_RULE,),
+    )
+
+    with pytest.raises(BenchmarkRunnerError):
+        _runner(
+            manifest,
+            tmp_path,
+            doctor_result=_doctor_result(),
+            calls=[],
+            doctor_calls=[],
+            cell_selector=selector,
+        )
+
+
+def test_runner_rejects_unapproved_manifest_identity_before_setup(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40).model_copy(update={"manifest_id": "p1-formal-v999"})
+
+    with pytest.raises(BenchmarkRunnerError, match="approved formal identity"):
+        _runner(
+            manifest,
+            tmp_path,
+            doctor_result=_doctor_result(),
+            calls=[],
+            doctor_calls=[],
+        )
+
+
+def test_full_runner_rejects_existing_subset_marker(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+    )
+    asyncio.run(runner.preflight())
+    (runner._suite_root() / "subset.json").write_text(
+        "{}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(BenchmarkRunnerError, match="marked as a subset"):
+        asyncio.run(runner.run())
+
+
+def test_subset_runner_executes_selected_cells_and_records_marker(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    selector = BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id,
+        strategies=(DiagnosticStrategy.FIXED_RULE,),
+    )
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=[],
+        cell_selector=selector,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    selected = tuple(
+        cell for cell in manifest.cells if cell.strategy is DiagnosticStrategy.FIXED_RULE
+    )
+    marker = runner._suite_root() / "subset.json"
+    assert result.status == "COMPLETED"
+    assert result.subset is True
+    assert result.model_probe_required is False
+    assert len(calls) == len(selected) == 12
+    assert [item[2] for item in calls] == [cell.run_id for cell in selected]
+    assert marker.read_text(encoding="utf-8") == selector.model_dump_json(indent=2) + "\n"
+
+
+def test_subset_scope_failure_does_not_leave_marker(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40, manifest_id="p1-formal-v3")
+    selector = BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id,
+        strategies=(DiagnosticStrategy.FIXED_RULE,),
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_without_model(),
+        calls=[],
+        doctor_calls=[],
+        cell_selector=selector,
+    )
+    asyncio.run(runner.preflight())
+    outside = manifest.cells[0]
+    entries = (
+        BenchmarkLedgerEntry.create(
+            manifest_id=manifest.manifest_id,
+            sequence=outside.sequence,
+            run_id=outside.run_id,
+            incident_case_id=outside.incident_case_id,
+            strategy=outside.strategy,
+            state="STARTED",
+            now=NOW,
+            started_at=NOW,
+        ),
+        BenchmarkLedgerEntry.create(
+            manifest_id=manifest.manifest_id,
+            sequence=outside.sequence,
+            run_id=outside.run_id,
+            incident_case_id=outside.incident_case_id,
+            strategy=outside.strategy,
+            state="COMPLETED",
+            now=NOW,
+            started_at=NOW,
+        ),
+    )
+    (runner._suite_root() / "ledger.jsonl").write_text(
+        "\n".join(entry.model_dump_json() for entry in entries) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(BenchmarkRunnerError, match="outside the selected scope"):
+        asyncio.run(runner.run())
+    assert not (runner._suite_root() / "subset.json").exists()
+
+
+def test_unstarted_artifact_failure_does_not_leave_marker(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40, manifest_id="p1-formal-v3")
+    selector = BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id,
+        strategies=(DiagnosticStrategy.FIXED_RULE,),
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_without_model(),
+        calls=[],
+        doctor_calls=[],
+        cell_selector=selector,
+    )
+    asyncio.run(runner.preflight())
+    (tmp_path / "artifacts" / manifest.cells[0].run_id).mkdir(parents=True)
+
+    with pytest.raises(BenchmarkRunnerError, match="unstarted cell"):
+        asyncio.run(runner.run())
+    assert not (runner._suite_root() / "subset.json").exists()
 
 
 def test_runner_verifies_before_doctor_and_executes_each_cell_once(tmp_path: Path) -> None:
@@ -362,9 +674,10 @@ def test_preflight_runs_doctor_and_writes_receipt_before_execution(tmp_path: Pat
         doctor_calls=doctor_calls,
     )
 
-    result = __import__("asyncio").run(runner.preflight())
+    receipt = __import__("asyncio").run(runner.preflight())
 
-    assert result.status is DoctorStatus.PASSED
+    assert receipt.result.status is DoctorStatus.PASSED
+    assert receipt.model_probe_required is True
     assert doctor_calls == ["doctor"]
     suite_root = tmp_path / "artifacts" / "benchmarks" / manifest.manifest_id
     receipt = suite_root / "doctor.json"
@@ -540,7 +853,7 @@ def test_runner_doctor_failure_creates_no_started_cell(tmp_path: Path) -> None:
     )
 
     __import__("asyncio").run(runner.preflight())
-    with pytest.raises(BenchmarkRunnerError, match="receipt is not PASSED"):
+    with pytest.raises(BenchmarkRunnerError, match="receipt is not acceptable"):
         __import__("asyncio").run(runner.run())
 
     assert calls == []
@@ -563,6 +876,9 @@ def test_runner_materializes_an_interrupted_cell_once(tmp_path: Path) -> None:
         writer=writer,
     )
     __import__("asyncio").run(runner.preflight())
+    raw_artifact = tmp_path / "artifacts" / manifest.cells[0].run_id
+    raw_artifact.mkdir(parents=True)
+    (raw_artifact / "partial-output.txt").write_text("incomplete", encoding="utf-8")
     suite_root = runner._suite_root()
     started = BenchmarkLedgerEntry.create(
         manifest_id=manifest.manifest_id,
@@ -583,6 +899,8 @@ def test_runner_materializes_an_interrupted_cell_once(tmp_path: Path) -> None:
     assert len(calls) == 105
     assert len(writer.runs) == 1
     assert writer.runs[0].run_id == manifest.cells[0].run_id
+    preserved = suite_root / "interrupted-artifacts" / manifest.cells[0].run_id
+    assert (preserved / "partial-output.txt").read_text(encoding="utf-8") == "incomplete"
 
 
 def test_runner_rejects_terminal_ledger_entry_without_started_predecessor(tmp_path: Path) -> None:
@@ -610,6 +928,39 @@ def test_runner_rejects_terminal_ledger_entry_without_started_predecessor(tmp_pa
 
     with pytest.raises(BenchmarkRunnerError, match="STARTED predecessor"):
         runner._read_ledger(suite_root / "ledger.jsonl")
+
+
+def test_runner_rejects_duplicate_ledger_json_key(tmp_path: Path) -> None:
+    manifest = build_manifest("e" * 40)
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+    )
+    suite_root = runner._suite_root()
+    started = BenchmarkLedgerEntry.create(
+        manifest_id=manifest.manifest_id,
+        sequence=1,
+        run_id=manifest.cells[0].run_id,
+        incident_case_id=manifest.cells[0].incident_case_id,
+        strategy=manifest.cells[0].strategy,
+        state="STARTED",
+        now=NOW,
+        started_at=NOW,
+    )
+    ledger_path = suite_root / "ledger.jsonl"
+    ledger_path.write_text(
+        started.model_dump_json().replace(
+            '"state":"STARTED"', '"state":"STARTED","state":"STARTED"', 1
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BenchmarkRunnerError, match="ledger is invalid"):
+        runner._read_ledger(ledger_path)
 
 
 def test_runner_materializes_stale_cell_with_passed_doctor_receipt(tmp_path: Path) -> None:

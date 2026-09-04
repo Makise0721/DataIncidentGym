@@ -8,17 +8,25 @@ from pathlib import Path
 import typer
 
 from data_incident_gym.baseline import BaselineBuilder, BaselineError
+from data_incident_gym.benchmark_archive import ArchiveError, archive_suite
 from data_incident_gym.benchmark_manifest import (
+    APPROVED_MANIFEST_IDS,
     MANIFEST_ID,
     MANIFEST_PATH,
     BenchmarkManifestError,
     build_manifest,
     freeze_manifest,
     load_manifest,
+    manifest_path_for,
     verify_manifest,
 )
 from data_incident_gym.benchmark_report import BenchmarkReporter, BenchmarkReportError
-from data_incident_gym.benchmark_runner import BenchmarkRunner, BenchmarkRunnerError
+from data_incident_gym.benchmark_runner import (
+    BenchmarkCellSelector,
+    BenchmarkRunner,
+    BenchmarkRunnerError,
+    is_receipt_acceptable,
+)
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.diagnosis import DiagnosisStatus, DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import DiagnosisRunner
@@ -57,6 +65,19 @@ IMPLEMENTATION_REVISION_OPTION = typer.Option(..., "--implementation-revision")
 BENCHMARK_OUTPUT_OPTION = typer.Option(MANIFEST_PATH, "--output")
 BENCHMARK_MANIFEST_OPTION = typer.Option(..., "--manifest")
 BENCHMARK_SHA256_OPTION = typer.Option(..., "--confirm-sha256")
+BENCHMARK_STRATEGY_OPTION = typer.Option(
+    None,
+    "--only-strategy",
+    help=(
+        "开发期 smoke 子集：只执行该策略的 cell；会留下 subset.json，"
+        "该 suite 永远无法出具正式报告。可重复传入。"
+    ),
+)
+BENCHMARK_SEQUENCE_OPTION = typer.Option(
+    None,
+    "--only-sequence",
+    help="开发期 smoke 子集：只执行该 sequence 的 cell。可重复传入。",
+)
 
 
 def _diagnostic_strategy(strategy: CliStrategy) -> DiagnosticStrategy:
@@ -105,8 +126,8 @@ def create_doctor_runner() -> DoctorRunner:
     return DoctorRunner.for_project(DiagnosticSettings())
 
 
-def create_benchmark_runner(manifest) -> BenchmarkRunner:
-    return BenchmarkRunner.for_project(manifest)
+def create_benchmark_runner(manifest, selector=None) -> BenchmarkRunner:
+    return BenchmarkRunner.for_project(manifest, cell_selector=selector)
 
 
 def create_benchmark_reporter(manifest) -> BenchmarkReporter:
@@ -121,10 +142,13 @@ def _canonical_benchmark_manifest_path(path: Path) -> Path:
     if candidate.is_symlink():
         raise BenchmarkManifestError("formal manifest path must not be a symlink")
     resolved = candidate.resolve(strict=False)
-    expected = (PROJECT_ROOT / MANIFEST_PATH).resolve(strict=False)
-    if resolved != expected:
+    approved = {
+        (PROJECT_ROOT / manifest_path_for(manifest_id)).resolve(strict=False)
+        for manifest_id in APPROVED_MANIFEST_IDS
+    }
+    if resolved not in approved:
         raise BenchmarkManifestError(
-            "formal manifest path must be config/benchmark/p1-formal-v1.json"
+            "formal manifest path must be config/benchmark/<approved-manifest-id>.json"
         )
     return resolved
 
@@ -135,8 +159,29 @@ def _confirmed_benchmark_manifest(path: Path, confirm_sha256: str):
     if confirm_sha256 != actual_sha256:
         raise BenchmarkRunnerError("manifest SHA-256 confirmation does not match file")
     loaded = load_manifest(manifest_path)
+    if manifest_path.stem != loaded.manifest_id:
+        raise BenchmarkManifestError("manifest file name must match its manifest_id")
     verify_manifest(loaded)
     return manifest_path, loaded
+
+
+def _cell_selector(
+    manifest,
+    only_strategy: list[str],
+    only_sequence: list[int],
+) -> BenchmarkCellSelector | None:
+    only_strategy = only_strategy or []
+    only_sequence = only_sequence or []
+    if not only_strategy and not only_sequence:
+        return None
+    strategies = tuple(
+        DiagnosticStrategy(value.upper().replace("-", "_")) for value in only_strategy
+    )
+    return BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id,
+        strategies=strategies,
+        sequences=tuple(only_sequence),
+    )
 
 
 def _exit_lab_error(error: LabError | ScenarioError) -> None:
@@ -306,16 +351,21 @@ def benchmark_verify(
 def benchmark_run(
     manifest: Path = BENCHMARK_MANIFEST_OPTION,
     confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+    only_strategy: list[str] = BENCHMARK_STRATEGY_OPTION,
+    only_sequence: list[int] = BENCHMARK_SEQUENCE_OPTION,
 ) -> None:
-    """执行已冻结的正式 benchmark；无重试、替换或扩展样本选项。"""
+    """执行已冻结的 benchmark；无重试、替换或扩展样本选项。"""
     try:
         _, loaded = _confirmed_benchmark_manifest(manifest, confirm_sha256)
-        result = asyncio.run(create_benchmark_runner(loaded).run())
+        selector = _cell_selector(loaded, only_strategy, only_sequence)
+        result = asyncio.run(create_benchmark_runner(loaded, selector).run())
     except (BenchmarkManifestError, BenchmarkRunnerError, OSError, ValueError) as exc:
         typer.echo(f"benchmark 执行失败：{exc}", err=True)
         raise typer.Exit(code=1) from None
     typer.echo(f"status: {result.status}")
     typer.echo(f"cells: {result.terminal_cells}/{result.total_cells}")
+    typer.echo(f"subset: {result.subset}")
+    typer.echo(f"model_probe_required: {result.model_probe_required}")
     typer.echo(f"ledger: {result.ledger_path}")
     if result.status != "COMPLETED":
         raise typer.Exit(code=1)
@@ -325,21 +375,27 @@ def benchmark_run(
 def benchmark_preflight(
     manifest: Path = BENCHMARK_MANIFEST_OPTION,
     confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+    only_strategy: list[str] = BENCHMARK_STRATEGY_OPTION,
+    only_sequence: list[int] = BENCHMARK_SEQUENCE_OPTION,
 ) -> None:
-    """执行 Manifest-bound doctor；不会创建正式 cell 或 ledger。"""
+    """执行与所选 cell 范围绑定的 doctor；不会创建 cell 或 ledger。"""
     try:
         _, loaded = _confirmed_benchmark_manifest(manifest, confirm_sha256)
-        result = asyncio.run(create_benchmark_runner(loaded).preflight())
+        selector = _cell_selector(loaded, only_strategy, only_sequence)
+        receipt = asyncio.run(create_benchmark_runner(loaded, selector).preflight())
+        acceptable = is_receipt_acceptable(receipt)
     except (BenchmarkManifestError, BenchmarkRunnerError, OSError, ValueError) as exc:
         typer.echo(f"benchmark preflight 失败：{exc}", err=True)
         raise typer.Exit(code=1) from None
-    typer.echo(f"status: {result.status.value}")
+    typer.echo(f"status: {'PASSED' if acceptable else 'FAILED'}")
+    typer.echo(f"doctor_status: {receipt.result.status.value}")
+    typer.echo(f"model_probe_required: {receipt.model_probe_required}")
     typer.echo(
         "receipt: "
         f"{PROJECT_ROOT / 'artifacts' / 'benchmarks' / loaded.manifest_id / 'doctor.json'}"
     )
     typer.echo("started_cells: 0")
-    if result.status is not DoctorStatus.PASSED:
+    if not acceptable:
         raise typer.Exit(code=1)
 
 
@@ -363,6 +419,31 @@ def benchmark_report(
         raise typer.Exit(code=1) from None
     typer.echo(f"summary: {summary_path}")
     typer.echo(f"report: {report_path}")
+
+
+@benchmark_app.command("archive")
+def benchmark_archive(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+) -> None:
+    """只读保全 suite 的取证数据；不会调用模型、数据库或 evaluator。"""
+    try:
+        _, loaded = _confirmed_benchmark_manifest(manifest, confirm_sha256)
+        suite_root = PROJECT_ROOT / "artifacts" / "benchmarks" / loaded.manifest_id
+        archive_root = PROJECT_ROOT / "reports" / "benchmark" / loaded.manifest_id
+        result = archive_suite(suite_root, archive_root, loaded)
+    except (
+        ArchiveError,
+        BenchmarkManifestError,
+        BenchmarkRunnerError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"benchmark 归档失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"archive: {result.archive_root}")
+    typer.echo(f"cells: {result.cell_count}")
+    typer.echo(f"source sha256: {result.aggregate_sha256}")
 
 
 @lab_app.command("reset")

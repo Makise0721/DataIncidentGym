@@ -12,6 +12,7 @@ from data_incident_gym.benchmark_manifest import (
     CONFIRMABLE_SCENARIO_IDS,
     FORMAL_SCENARIO_IDS,
     MANIFEST_ID,
+    MANIFEST_PATH,
     BenchmarkManifest,
     BenchmarkManifestError,
     ManifestModelConfiguration,
@@ -19,6 +20,7 @@ from data_incident_gym.benchmark_manifest import (
     freeze_manifest,
     generate_cells,
     load_manifest,
+    manifest_path_for,
     run_id_for_cell,
     verify_manifest,
 )
@@ -162,3 +164,55 @@ def test_formal_model_strategy_count_is_not_fixed_rule() -> None:
         cell.model_backed == (cell.strategy is not DiagnosticStrategy.FIXED_RULE)
         for cell in manifest.cells
     )
+
+
+def test_manifest_path_is_derived_from_manifest_id() -> None:
+    assert manifest_path_for(MANIFEST_ID) == MANIFEST_PATH
+    assert manifest_path_for("p1-formal-v2") == Path("config/benchmark/p1-formal-v2.json")
+    assert manifest_path_for("p1-formal-v3") == Path("config/benchmark/p1-formal-v3.json")
+    assert manifest_path_for("p1-formal-v4") == Path("config/benchmark/p1-formal-v4.json")
+
+
+def test_manifest_path_rejects_unversioned_identity() -> None:
+    with pytest.raises(BenchmarkManifestError):
+        manifest_path_for("p1-formal")
+    with pytest.raises(BenchmarkManifestError):
+        manifest_path_for("p2-formal-v1")
+    with pytest.raises(BenchmarkManifestError):
+        manifest_path_for("p1-formal-v5")
+
+
+def test_build_manifest_accepts_approved_rerun_identities() -> None:
+    for manifest_id in ("p1-formal-v2", "p1-formal-v3", "p1-formal-v4"):
+        manifest = build_manifest(
+            "b" * 40,
+            project_root=PROJECT_ROOT,
+            manifest_id=manifest_id,
+        )
+
+        assert manifest.manifest_id == manifest_id
+        assert manifest.total_cells == 106
+        assert manifest.model_backed_count == 94
+
+
+def test_build_manifest_rejects_unapproved_identity() -> None:
+    with pytest.raises(BenchmarkManifestError):
+        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v5")
+
+
+def test_freeze_manifest_writes_to_id_derived_path(tmp_path: Path) -> None:
+    manifest = build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v2")
+    output = tmp_path / "config" / "benchmark" / "p1-formal-v2.json"
+
+    written = freeze_manifest(manifest, output, project_root=tmp_path)
+
+    assert written == output.resolve()
+    assert json.loads(written.read_text(encoding="utf-8"))["manifest_id"] == "p1-formal-v2"
+
+
+def test_freeze_manifest_rejects_path_that_disagrees_with_id(tmp_path: Path) -> None:
+    manifest = build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v2")
+    wrong = tmp_path / "config" / "benchmark" / "p1-formal-v1.json"
+
+    with pytest.raises(BenchmarkManifestError):
+        freeze_manifest(manifest, wrong, project_root=tmp_path)

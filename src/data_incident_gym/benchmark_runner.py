@@ -29,7 +29,10 @@ from data_incident_gym.artifacts import (
     RecoveryStatus,
 )
 from data_incident_gym.benchmark_manifest import (
+    APPROVED_MANIFEST_IDS,
     BenchmarkManifest,
+    ManifestCell,
+    manifest_path_for,
     verify_manifest,
 )
 from data_incident_gym.config import PROJECT_ROOT, Settings
@@ -82,6 +85,7 @@ _REVISION_PATTERN = r"^[0-9a-f]{40}$"
 _ARTIFACT_PATH_PATTERN = re.compile(r"^artifacts/[0-9a-f]{32}$")
 _REASON_CODES = frozenset({"RUN_SETUP_ERROR", "EVALUATION_FAILED"})
 _LEDGER_FILENAME = "ledger.jsonl"
+_SUBSET_FILENAME = "subset.json"
 _DOCTOR_FILENAME = "doctor.json"
 _LOCK_FILENAME = ".lock"
 _INTERRUPTED_ARTIFACTS_DIRNAME = "interrupted-artifacts"
@@ -152,17 +156,72 @@ class BenchmarkLedgerEntry(BaseModel):
             reason_code=reason_code,
         )
 
+
+class BenchmarkCellSelector(BaseModel):
+    """An explicit, recorded restriction of a suite to a development smoke subset."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["p1.benchmark_subset.v1"] = "p1.benchmark_subset.v1"
+    manifest_id: StrictStr
+    strategies: tuple[DiagnosticStrategy, ...] = ()
+    sequences: tuple[StrictInt, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_selector_is_explicit_and_unique(self) -> Self:
+        if not self.strategies and not self.sequences:
+            raise ValueError("cell selector must restrict strategies or sequences")
+        if len(set(self.strategies)) != len(self.strategies):
+            raise ValueError("cell selector strategies must be unique")
+        if len(set(self.sequences)) != len(self.sequences):
+            raise ValueError("cell selector sequences must be unique")
+        if any(value < 1 for value in self.sequences):
+            raise ValueError("cell selector sequences must be at least 1")
+        return self
+
+    def select(self, cells: tuple[ManifestCell, ...]) -> tuple[ManifestCell, ...]:
+        return tuple(
+            cell
+            for cell in cells
+            if (not self.strategies or cell.strategy in self.strategies)
+            and (not self.sequences or cell.sequence in self.sequences)
+        )
+
+
 class BenchmarkDoctorReceipt(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal["p1.benchmark_doctor.v2"] = "p1.benchmark_doctor.v2"
+    schema_version: Literal["p1.benchmark_doctor.v3"] = "p1.benchmark_doctor.v3"
     manifest_id: StrictStr
     manifest_sha256: Annotated[StrictStr, Field(pattern=_DIGEST_PATTERN)]
     implementation_revision: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{40}$")]
     checkout_revision: Annotated[StrictStr, Field(pattern=_REVISION_PATTERN)]
     result_inputs_sha256: Annotated[StrictStr, Field(pattern=_DIGEST_PATTERN)]
+    cell_selector: BenchmarkCellSelector | None = None
+    model_probe_required: bool
     checked_at: datetime
     result: DoctorResult
+
+
+_MODEL_CHECK_CODES = frozenset(
+    {
+        DoctorCheckCode.MODEL_ENDPOINT,
+        DoctorCheckCode.MODEL_PRESENT,
+        DoctorCheckCode.MODEL_TOOL_STRUCTURED_OUTPUT,
+    }
+)
+
+
+def is_receipt_acceptable(receipt: BenchmarkDoctorReceipt) -> bool:
+    """Return whether a receipt satisfies the suite scope it was issued for."""
+
+    if receipt.model_probe_required:
+        return receipt.result.status is DoctorStatus.PASSED
+    return all(
+        check.passed
+        for check in receipt.result.checks
+        if check.code not in _MODEL_CHECK_CODES
+    )
 
 
 class BenchmarkRunResult(BaseModel):
@@ -174,6 +233,8 @@ class BenchmarkRunResult(BaseModel):
     terminal_cells: StrictInt
     completed_cells: StrictInt
     failed_cells: StrictInt
+    subset: bool = False
+    model_probe_required: bool = True
     doctor_status: DoctorStatus
     doctor_path: Path
     ledger_path: Path
@@ -200,6 +261,15 @@ def _bind_manifest_model_configuration(
 
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = item
+    return value
 
 
 def _digest(value: object) -> str:
@@ -377,7 +447,12 @@ class BenchmarkRunner:
         clock: Clock = lambda: datetime.now(UTC),
         checkout_verifier: CheckoutVerifier | None = None,
         checkout_revision_reader: CheckoutRevisionReader | None = None,
+        cell_selector: BenchmarkCellSelector | None = None,
     ) -> None:
+        if manifest.manifest_id not in APPROVED_MANIFEST_IDS:
+            raise BenchmarkRunnerError("manifest_id is not an approved formal identity")
+        if cell_selector is not None and cell_selector.manifest_id != manifest.manifest_id:
+            raise BenchmarkRunnerError("cell selector is bound to another manifest")
         self._manifest = manifest
         self._project_root = project_root
         self._doctor_factory = doctor_factory
@@ -388,6 +463,7 @@ class BenchmarkRunner:
         self._checkout_revision_reader = (
             checkout_revision_reader or self._read_checkout_revision
         )
+        self._cell_selector = cell_selector
 
     @classmethod
     def for_project(
@@ -397,6 +473,7 @@ class BenchmarkRunner:
         project_root: Path = PROJECT_ROOT,
         settings: Settings | None = None,
         diagnostic_settings: DiagnosticSettings | None = None,
+        cell_selector: BenchmarkCellSelector | None = None,
     ) -> BenchmarkRunner:
         settings = settings or Settings()
         diagnostic_settings = _bind_manifest_model_configuration(
@@ -446,6 +523,7 @@ class BenchmarkRunner:
             ),
             evaluation_runner_factory=evaluation_runner_factory,
             artifact_writer=artifact_writer,
+            cell_selector=cell_selector,
         )
 
     def _suite_root(self) -> Path:
@@ -466,6 +544,43 @@ class BenchmarkRunner:
         if not resolved.is_relative_to(artifacts_root.resolve(strict=True)):
             raise BenchmarkRunnerError("benchmark suite escaped artifacts root")
         return resolved
+
+    def _selected_cells(self) -> tuple[ManifestCell, ...]:
+        if self._cell_selector is None:
+            return self._manifest.cells
+        return self._cell_selector.select(self._manifest.cells)
+
+    def _model_probe_required(self) -> bool:
+        return any(cell.model_backed for cell in self._selected_cells())
+
+    def _write_subset_marker(self, suite_root: Path) -> None:
+        path = suite_root / _SUBSET_FILENAME
+        if path.is_symlink():
+            raise BenchmarkRunnerError("benchmark subset marker must not be a symlink")
+        if self._cell_selector is None:
+            if path.exists():
+                raise BenchmarkRunnerError(
+                    "full benchmark cannot use a suite marked as a subset"
+                )
+            return
+        payload = self._cell_selector.model_dump_json(indent=2) + "\n"
+        if path.exists():
+            try:
+                existing = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise BenchmarkRunnerError("cannot read benchmark subset marker") from exc
+            if existing != payload:
+                raise BenchmarkRunnerError(
+                    "benchmark subset marker already exists for another selection"
+                )
+            return
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise BenchmarkRunnerError("cannot write benchmark subset marker") from exc
 
     def _verify_checkout(self, manifest: BenchmarkManifest) -> None:
         verify_manifest(manifest, project_root=self._project_root)
@@ -494,7 +609,7 @@ class BenchmarkRunner:
         changed = self._git_output(
             ["diff", "--name-only", f"{manifest.implementation_revision}..{revision}"]
         ).splitlines()
-        if changed != ["config/benchmark/p1-formal-v1.json"]:
+        if changed != [manifest_path_for(manifest.manifest_id).as_posix()]:
             raise BenchmarkRunnerError("formal checkout contains paths beyond the manifest")
 
     def _git_output(self, arguments: Sequence[str]) -> str:
@@ -528,7 +643,9 @@ class BenchmarkRunner:
             if not line.strip():
                 continue
             try:
-                entry = BenchmarkLedgerEntry.model_validate(json.loads(line))
+                entry = BenchmarkLedgerEntry.model_validate(
+                    json.loads(line, object_pairs_hook=_reject_duplicate_json_keys)
+                )
             except Exception as exc:
                 raise BenchmarkRunnerError("benchmark ledger is invalid") from exc
             if entry.manifest_id != self._manifest.manifest_id:
@@ -576,6 +693,7 @@ class BenchmarkRunner:
         result: DoctorResult,
         *,
         checkout_revision: str,
+        model_probe_required: bool,
     ) -> BenchmarkDoctorReceipt:
         receipt = BenchmarkDoctorReceipt(
             manifest_id=self._manifest.manifest_id,
@@ -583,6 +701,8 @@ class BenchmarkRunner:
             implementation_revision=self._manifest.implementation_revision,
             checkout_revision=checkout_revision,
             result_inputs_sha256=_digest(self._manifest.result_inputs.model_dump(mode="json")),
+            cell_selector=self._cell_selector,
+            model_probe_required=model_probe_required,
             checked_at=_aware_utc(self._clock()),
             result=result,
         )
@@ -633,12 +753,25 @@ class BenchmarkRunner:
             raise BenchmarkRunnerError("doctor receipt result inputs do not match manifest")
         return receipt
 
+    def assert_receipt_scope(self, receipt: BenchmarkDoctorReceipt) -> None:
+        if receipt.cell_selector != self._cell_selector:
+            raise BenchmarkRunnerError(
+                "doctor receipt selector scope does not match the selected cells"
+            )
+        if receipt.model_probe_required != self._model_probe_required():
+            raise BenchmarkRunnerError(
+                "doctor receipt scope does not match the selected cells"
+            )
+        if receipt.manifest_id != self._manifest.manifest_id:
+            raise BenchmarkRunnerError("doctor receipt is bound to another manifest")
+
     async def _run_doctor(
         self,
         path: Path,
         *,
         checkout_revision: str,
-    ) -> DoctorResult:
+        model_probe_required: bool,
+    ) -> BenchmarkDoctorReceipt:
         doctor = self._doctor_factory()
         try:
             result = doctor.run()
@@ -648,12 +781,12 @@ class BenchmarkRunner:
                 raise TypeError("doctor returned an invalid result")
         except Exception:
             result = _failed_doctor()
-        self._write_doctor_receipt(
+        return self._write_doctor_receipt(
             path,
             result,
             checkout_revision=checkout_revision,
+            model_probe_required=model_probe_required,
         )
-        return result
 
     def _assert_unstarted_artifacts_absent(
         self,
@@ -671,7 +804,7 @@ class BenchmarkRunner:
                     f"artifact already exists for unstarted cell {cell.run_id}"
                 )
 
-    async def preflight(self) -> DoctorResult:
+    async def preflight(self) -> BenchmarkDoctorReceipt:
         """Validate an untouched suite and persist its bound doctor receipt."""
 
         self._checkout_verifier(self._manifest)
@@ -695,6 +828,7 @@ class BenchmarkRunner:
             return await self._run_doctor(
                 doctor_path,
                 checkout_revision=checkout_revision,
+                model_probe_required=self._model_probe_required(),
             )
 
     def _materialize_setup_error(
@@ -794,6 +928,9 @@ class BenchmarkRunner:
     async def run(self) -> BenchmarkRunResult:
         self._checkout_verifier(self._manifest)
         suite_root = self._suite_root()
+        cells = self._selected_cells()
+        if not cells:
+            raise BenchmarkRunnerError("cell selector matched no manifest cell")
         ledger_path = suite_root / _LEDGER_FILENAME
         doctor_path = suite_root / _DOCTOR_FILENAME
         lock_path = suite_root / _LOCK_FILENAME
@@ -801,11 +938,20 @@ class BenchmarkRunner:
             ledger = self._read_ledger(ledger_path)
             receipt = self._read_doctor_receipt(doctor_path)
             doctor_result = receipt.result
-            if doctor_result.status is not DoctorStatus.PASSED:
-                raise BenchmarkRunnerError("doctor receipt is not PASSED")
+            self.assert_receipt_scope(receipt)
+            if not is_receipt_acceptable(receipt):
+                raise BenchmarkRunnerError(
+                    "doctor receipt is not acceptable for this suite scope"
+                )
+            selected_run_ids = {cell.run_id for cell in cells}
+            if any(run_id not in selected_run_ids for run_id in ledger):
+                raise BenchmarkRunnerError(
+                    "benchmark ledger contains a cell outside the selected scope"
+                )
             self._assert_unstarted_artifacts_absent(ledger)
+            self._write_subset_marker(suite_root)
 
-            for cell in self._manifest.cells:
+            for cell in cells:
                 previous = ledger.get(cell.run_id)
                 if previous is not None and previous.state in {"COMPLETED", "FAILED"}:
                     continue
@@ -892,23 +1038,26 @@ class BenchmarkRunner:
             failed = sum(entry.state == "FAILED" for entry in terminal)
             status = (
                 "COMPLETED"
-                if len(terminal) == len(self._manifest.cells) and failed == 0
+                if len(terminal) == len(cells) and failed == 0
                 else "FAILED"
             )
             return BenchmarkRunResult(
                 manifest_id=self._manifest.manifest_id,
                 status=status,
-                total_cells=len(self._manifest.cells),
+                total_cells=len(cells),
                 terminal_cells=len(terminal),
                 completed_cells=completed,
                 failed_cells=failed,
                 doctor_status=doctor_result.status,
                 doctor_path=doctor_path,
                 ledger_path=ledger_path,
+                subset=self._cell_selector is not None,
+                model_probe_required=self._model_probe_required(),
             )
 
 
 __all__ = [
+    "BenchmarkCellSelector",
     "BenchmarkDoctorReceipt",
     "BenchmarkLedgerEntry",
     "BenchmarkRunResult",

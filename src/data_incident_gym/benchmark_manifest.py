@@ -79,10 +79,29 @@ _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 _REVISION_PATTERN = r"^[0-9a-f]{40}$"
 _RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 _MANIFEST_ID_PATTERN = r"^p1-formal-v[1-9][0-9]*$"
+APPROVED_MANIFEST_IDS = (
+    "p1-formal-v1",
+    "p1-formal-v2",
+    "p1-formal-v3",
+    "p1-formal-v4",
+)
 
 
 class BenchmarkManifestError(ValueError):
     """Raised when a benchmark manifest cannot be frozen or verified safely."""
+
+
+def manifest_path_for(manifest_id: str) -> Path:
+    """Return the canonical repository path for an approved manifest identity."""
+
+    if re.fullmatch(_MANIFEST_ID_PATTERN, manifest_id) is None:
+        raise BenchmarkManifestError("manifest_id must match p1-formal-v<N>")
+    if manifest_id not in APPROVED_MANIFEST_IDS:
+        raise BenchmarkManifestError(
+            "manifest_id must be an approved formal identity: "
+            + ", ".join(APPROVED_MANIFEST_IDS)
+        )
+    return Path(f"config/benchmark/{manifest_id}.json")
 
 
 def _canonical_json(value: object) -> str:
@@ -492,8 +511,11 @@ def build_manifest(
 ) -> BenchmarkManifest:
     if re.fullmatch(_REVISION_PATTERN, implementation_revision) is None:
         raise BenchmarkManifestError("implementation_revision must be a 40-hex revision")
-    if manifest_id != MANIFEST_ID:
-        raise BenchmarkManifestError("only p1-formal-v1 is approved for M11")
+    if manifest_id not in APPROVED_MANIFEST_IDS:
+        raise BenchmarkManifestError(
+            "manifest_id must be an approved formal identity: "
+            + ", ".join(APPROVED_MANIFEST_IDS)
+        )
     if model_name != DEFAULT_FORMAL_MODEL:
         raise BenchmarkManifestError("formal model must be mimo-v2.5")
     return BenchmarkManifest(
@@ -538,6 +560,11 @@ def verify_manifest(
     *,
     project_root: Path = PROJECT_ROOT,
 ) -> BenchmarkManifest:
+    if manifest.manifest_id not in APPROVED_MANIFEST_IDS:
+        raise BenchmarkManifestError(
+            "manifest_id must be an approved formal identity: "
+            + ", ".join(APPROVED_MANIFEST_IDS)
+        )
     catalog, result_inputs, policies = _current_result_inputs(manifest, project_root=project_root)
     if manifest.scenario_catalog != catalog:
         raise BenchmarkManifestError("ScenarioSpec catalog or digest drifted")
@@ -568,9 +595,11 @@ def freeze_manifest(
     if raw_output.is_symlink() or raw_output.exists():
         raise BenchmarkManifestError("manifest output already exists")
     output = raw_output.resolve(strict=False)
-    expected = (project_root / MANIFEST_PATH).resolve(strict=False)
+    expected = (project_root / manifest_path_for(manifest.manifest_id)).resolve(strict=False)
     if output != expected:
-        raise BenchmarkManifestError("manifest output must be config/benchmark/p1-formal-v1.json")
+        raise BenchmarkManifestError(
+            f"manifest output must be config/benchmark/{manifest.manifest_id}.json"
+        )
     for parent in (project_root / "config", project_root / "config" / "benchmark"):
         if parent.is_symlink():
             raise BenchmarkManifestError("manifest output parent must not be a symlink")
@@ -594,7 +623,15 @@ def load_manifest(path: Path) -> BenchmarkManifest:
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
         )
-        return BenchmarkManifest.model_validate(payload)
+        manifest = BenchmarkManifest.model_validate(payload)
+        if manifest.manifest_id not in APPROVED_MANIFEST_IDS:
+            raise BenchmarkManifestError(
+                "manifest_id must be an approved formal identity: "
+                + ", ".join(APPROVED_MANIFEST_IDS)
+            )
+        if path.name != f"{manifest.manifest_id}.json":
+            raise BenchmarkManifestError("manifest file name must match its manifest_id")
+        return manifest
     except BenchmarkManifestError:
         raise
     except Exception as exc:
@@ -602,6 +639,7 @@ def load_manifest(path: Path) -> BenchmarkManifest:
 
 
 __all__ = [
+    "APPROVED_MANIFEST_IDS",
     "BenchmarkManifest",
     "BenchmarkManifestError",
     "CONFIRMABLE_SCENARIO_IDS",
@@ -621,6 +659,7 @@ __all__ = [
     "freeze_manifest",
     "generate_cells",
     "load_manifest",
+    "manifest_path_for",
     "run_id_for_cell",
     "verify_manifest",
 ]

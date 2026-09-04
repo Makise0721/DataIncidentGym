@@ -16,7 +16,11 @@ from data_incident_gym.artifacts import (
 )
 from data_incident_gym.benchmark_manifest import build_manifest
 from data_incident_gym.benchmark_report import BenchmarkReporter, BenchmarkReportError
-from data_incident_gym.benchmark_runner import BenchmarkDoctorReceipt, BenchmarkLedgerEntry
+from data_incident_gym.benchmark_runner import (
+    BenchmarkCellSelector,
+    BenchmarkDoctorReceipt,
+    BenchmarkLedgerEntry,
+)
 from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisMetrics,
@@ -99,6 +103,7 @@ def _write_fixture(
         implementation_revision=manifest.implementation_revision,
         checkout_revision="c" * 40,
         result_inputs_sha256=BenchmarkReporter.result_inputs_digest(manifest),
+        model_probe_required=True,
         checked_at=datetime(2026, 9, 1, tzinfo=UTC),
         result=_doctor(),
     )
@@ -307,6 +312,46 @@ def test_reporter_writes_deterministic_summary_and_markdown(tmp_path: Path) -> N
     assert "当前固定样本尚未证明 Diagnostic Kernel 优势。" in (suite_root / "report.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_reporter_refuses_subset_suite(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    suite_root = tmp_path / "artifacts" / "benchmarks" / manifest.manifest_id
+    suite_root.mkdir(parents=True)
+    (suite_root / "subset.json").write_text(
+        BenchmarkCellSelector(
+            manifest_id=manifest.manifest_id,
+            strategies=(DiagnosticStrategy.FIXED_RULE,),
+        ).model_dump_json(indent=2)
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(BenchmarkReportError, match="subset"):
+        BenchmarkReporter(manifest, suite_root).write()
+
+
+def test_reporter_refuses_subset_scope_even_when_marker_is_missing(tmp_path: Path) -> None:
+    suite_root, _ = _write_fixture(tmp_path)
+    manifest = build_manifest("a" * 40)
+    receipt_path = suite_root / "doctor.json"
+    receipt = BenchmarkDoctorReceipt.model_validate(json.loads(receipt_path.read_text()))
+    receipt_path.write_text(
+        receipt.model_copy(
+            update={
+                "cell_selector": BenchmarkCellSelector(
+                    manifest_id=manifest.manifest_id,
+                    strategies=(DiagnosticStrategy.FIXED_RULE,),
+                )
+            }
+        ).model_dump_json(indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BenchmarkReportError, match="doctor receipt"):
+        BenchmarkReporter(manifest, suite_root).write()
 
 
 @pytest.mark.parametrize("fixture", ["manifest_mismatch", "missing_artifact"])

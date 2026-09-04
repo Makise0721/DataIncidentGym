@@ -380,7 +380,12 @@ class BenchmarkReporter:
             receipt.implementation_revision,
             receipt.result_inputs_sha256,
         )
-        if actual != expected or receipt.result.status.value != "PASSED":
+        if (
+            actual != expected
+            or receipt.cell_selector is not None
+            or receipt.model_probe_required is not True
+            or receipt.result.status.value != "PASSED"
+        ):
             self._fail("doctor receipt does not match a passing manifest-bound doctor")
         return receipt
 
@@ -868,6 +873,11 @@ class BenchmarkReporter:
                 temporary.unlink(missing_ok=True)
 
     def write(self) -> tuple[Path, Path]:
+        subset_path = self._suite_root / "subset.json"
+        if subset_path.is_symlink():
+            self._fail("benchmark subset marker must not be a symlink")
+        if subset_path.exists():
+            self._fail("subset suites cannot produce a formal report")
         records, doctor = self._validate()
         summary = self.summary(records, doctor)
         summary_bytes = (
