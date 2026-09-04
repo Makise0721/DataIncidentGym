@@ -179,6 +179,7 @@ class DoctorRunner:
             base_url=str(diagnostic_settings.model_base_url),
             api_key=diagnostic_settings.model_api_key.get_secret_value(),
         )
+        provider.client.max_retries = 0
         model = OpenAIChatModel(diagnostic_settings.model_name, provider=provider)
         return cls(
             diagnostic_settings,

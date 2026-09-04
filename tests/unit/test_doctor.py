@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
+
+import httpx2
+from openai import AsyncOpenAI
+from pydantic_ai.models import override_allow_model_requests
+from pydantic_ai.providers.openai import OpenAIProvider
 
 import data_incident_gym.doctor as doctor_module
 from data_incident_gym.diagnostic_config import DiagnosticSettings
@@ -39,6 +45,65 @@ def test_passing_check_preserves_only_safe_observation() -> None:
     assert check.passed is True
     assert check.observed == "LOADED"
     assert check.recommendation_code is None
+
+
+def test_for_project_model_probe_uses_one_post_and_preserves_doctor_checks(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(500, request=request)
+
+    mock_http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    clients: list[AsyncOpenAI] = []
+
+    def provider_factory(*, base_url: str, api_key: str) -> OpenAIProvider:
+        client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            http_client=mock_http_client,
+        )
+        clients.append(client)
+        return OpenAIProvider(openai_client=client)
+
+    class ModelsResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"data":[{"id":"mimo-v2.5"}]}'
+
+    monkeypatch.setattr(doctor_module, "OpenAIProvider", provider_factory)
+    monkeypatch.setattr(
+        doctor_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(doctor_module, "urlopen", lambda *_args, **_kwargs: ModelsResponse())
+    settings = DiagnosticSettings(
+        _env_file=None,
+        model_base_url="https://example.invalid/v1",
+        model_name="mimo-v2.5",
+        model_api_key="offline-test-key",
+    )
+    runner = DoctorRunner.for_project(settings, tmp_path)
+
+    try:
+        with override_allow_model_requests(True):
+            result = asyncio.run(runner.run())
+    finally:
+        asyncio.run(clients[0].close())
+
+    assert [request.method for request in requests] == ["POST"]
+    assert tuple(check.code for check in result.checks) == tuple(DoctorCheckCode)
+    assert result.checks[-1].code is DoctorCheckCode.MODEL_TOOL_STRUCTURED_OUTPUT
+    assert result.checks[-1].passed is False
 
 
 def _runner(tmp_path) -> DoctorRunner:
