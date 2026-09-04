@@ -102,13 +102,17 @@ def test_benchmark_help_exposes_preflight_report_and_one_shot_run() -> None:
     assert "run" in help_text
 
 
-def test_benchmark_run_and_preflight_help_expose_subset_options() -> None:
+@pytest.mark.parametrize("force_color", [None, "1"])
+def test_benchmark_run_and_preflight_help_expose_subset_options(force_color: str | None) -> None:
     for command in ("run", "preflight"):
-        result = runner.invoke(app, ["benchmark", command, "--help"])
+        result = runner.invoke(
+            app, ["benchmark", command, "--help"], env={"FORCE_COLOR": force_color}
+        )
 
         assert result.exit_code == 0
-        assert "--only-strategy" in result.stdout
-        assert "--only-sequence" in result.stdout
+        help_text = click.unstyle(result.stdout)
+        assert "--only-strategy" in help_text
+        assert "--only-sequence" in help_text
 
 
 def test_benchmark_archive_command_is_registered() -> None:
