@@ -1,0 +1,114 @@
+{
+  "schema_version": "p1.benchmark_doctor.v3",
+  "manifest_id": "p1-formal-v3",
+  "manifest_sha256": "d31423a06fd5f99f614008ccb53628a54fae3e7872fd7c967e157d1aad941acb",
+  "implementation_revision": "91a0af13090d74f910c0547a496257c483ec7219",
+  "checkout_revision": "79c9d9adf24ee9d3a362e747996c9a3b03a69421",
+  "result_inputs_sha256": "2b08794ea37008c401b6330d842313683f753750693bf5986dc01af070df8208",
+  "cell_selector": {
+    "schema_version": "p1.benchmark_subset.v1",
+    "manifest_id": "p1-formal-v3",
+    "strategies": [
+      "FIXED_RULE"
+    ],
+    "sequences": []
+  },
+  "model_probe_required": false,
+  "checked_at": "2026-09-05T00:29:10.537287Z",
+  "result": {
+    "status": "PASSED",
+    "checks": [
+      {
+        "code": "PYTHON",
+        "passed": true,
+        "observed": "3.12.10",
+        "reason_code": "PYTHON_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "UV",
+        "passed": true,
+        "observed": "0.11.24",
+        "reason_code": "UV_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "DOCKER",
+        "passed": true,
+        "observed": "29.1.3",
+        "reason_code": "DOCKER_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "COMPOSE_POSTGRES",
+        "passed": true,
+        "observed": "postgres",
+        "reason_code": "COMPOSE_POSTGRES_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "POSTGRES_CONNECTION",
+        "passed": true,
+        "observed": "CONNECTED",
+        "reason_code": "POSTGRES_CONNECTION_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "DBT_PROFILE_CONNECTION",
+        "passed": true,
+        "observed": "CONNECTED",
+        "reason_code": "DBT_PROFILE_CONNECTION_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "PROFILE_SPEC",
+        "passed": true,
+        "observed": "profile_spec.v1:e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+        "reason_code": "PROFILE_SPEC_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "PROFILE_SNAPSHOT",
+        "passed": true,
+        "observed": "LOADED",
+        "reason_code": "PROFILE_SNAPSHOT_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "PROFILE_READ_ONLY",
+        "passed": true,
+        "observed": "READ_ONLY_AND_MATCHED",
+        "reason_code": "PROFILE_READ_ONLY_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "PROFILE_BOUNDS",
+        "passed": true,
+        "observed": "BOUNDS_AND_INVALID_PROBE",
+        "reason_code": "PROFILE_BOUNDS_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "MODEL_ENDPOINT",
+        "passed": true,
+        "observed": "REACHABLE",
+        "reason_code": "MODEL_ENDPOINT_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "MODEL_PRESENT",
+        "passed": true,
+        "observed": "mimo-v2.5",
+        "reason_code": "MODEL_PRESENT_PASSED",
+        "recommendation_code": null
+      },
+      {
+        "code": "MODEL_TOOL_STRUCTURED_OUTPUT",
+        "passed": true,
+        "observed": "TOOL_CALLED",
+        "reason_code": "MODEL_TOOL_STRUCTURED_OUTPUT_PASSED",
+        "recommendation_code": null
+      }
+    ]
+  }
+}
