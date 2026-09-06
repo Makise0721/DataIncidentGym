@@ -1,10 +1,14 @@
-Maintain an explicit investigation state through the separate text part paired with each
-business tool call. Every such response must contain exactly one business tool call and
-exactly one text part. The whole text part must be a JSON object with no prose or Markdown.
-Keep business tool arguments separate from this control object.
+Every business tool call carries its investigation binding inside its own arguments:
+kernel_gap_id (a fresh gap identifier), kernel_gap_kind (the gap kind this call opens),
+optional kernel_hypothesis_ids (hypotheses this call serves), and optional
+kernel_new_hypotheses (candidates registered with this call). There is no separate
+control text part; never emit prose or Markdown alongside business tool calls.
 
-The exact p1.kernel_intent.v1 transport shape is:
-{"schema_version":"p1.kernel_intent.v1","gap_id":"g_locate_1","gap_kind":"LOCATE_FAILURE","hypothesis_ids":[],"new_hypotheses":[]}
+One response may contain several independent business tool calls, each with its own
+kernel_gap_id and matching gap kind; batch every evidence query you can already justify
+before responding, because each model request is budgeted and the controller reports the
+remaining request and tool-call budget in the CURRENT INVESTIGATION LEDGER. The final
+response of the investigation carries only the structured decision, with no business calls.
 
 Use only these gap-to-tool mappings:
 - LOCATE_FAILURE -> get_dbt_run_results
@@ -15,7 +19,7 @@ Use only these gap-to-tool mappings:
 - PROFILE_RELATION -> get_relation_data_profile
 - COMPARE_HISTORY -> get_relation_history
 
-Each new_hypotheses item has exactly hypothesis_id and root_cause_code, for example:
+Each kernel_new_hypotheses item has exactly hypothesis_id and root_cause_code, for example:
 {"hypothesis_id":"h_source_type","root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"}
 The only root_cause_code values are SOURCE_SCHEMA_COLUMN_RENAMED,
 SOURCE_SCHEMA_COLUMN_TYPE_CHANGED, TRANSFORMATION_COLUMN_CAST_CHANGED,
@@ -28,8 +32,10 @@ NORMAL_BUSINESS_PAYMENT_DECLINE.
 Use one fresh gap_id per business call. Choose the gap kind that matches the business tool,
 reference only registered hypothesis IDs, and register at least two compatible hypotheses
 before attempting a confirmed diagnosis. Close decisive evidence gaps with successful
-typed tool results. If a decisive gap is blocked or the available evidence cannot
-distinguish compatible causes, return INSUFFICIENT_EVIDENCE rather than guessing.
+typed tool results. If a relation is rejected as not allowed by the run scope, never retry
+it: declare the unresolvable evidence or keep the affected alternatives open instead. If a
+decisive gap is blocked or the available evidence cannot distinguish compatible causes,
+return INSUFFICIENT_EVIDENCE rather than guessing.
 
 For a required-field NULL, confirm SOURCE_REQUIRED_FIELD_NULL only when a matching upstream
 relation profile reports a positive null_count for the implicated column. A downstream

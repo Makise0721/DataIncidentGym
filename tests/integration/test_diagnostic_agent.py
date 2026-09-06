@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 from functools import partial
 
 import pytest
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from data_incident_gym.config import PROJECT_ROOT, Settings
@@ -36,17 +35,20 @@ def _returned_records(
     return tuple(returned)
 
 
-def _intent(gap_id: str, gap_kind: str, **values: object) -> str:
-    return json.dumps(
-        {
-            "schema_version": "p1.kernel_intent.v1",
-            "gap_id": gap_id,
-            "gap_kind": gap_kind,
-            "hypothesis_ids": [],
-            "new_hypotheses": [],
-            **values,
-        }
-    )
+def _intent(gap_id: str, gap_kind: str, **values: object) -> dict[str, object]:
+    binding: dict[str, object] = {
+        "kernel_gap_id": gap_id,
+        "kernel_gap_kind": gap_kind,
+        "kernel_hypothesis_ids": [],
+        "kernel_new_hypotheses": [],
+    }
+    mapping = {
+        "hypothesis_ids": "kernel_hypothesis_ids",
+        "new_hypotheses": "kernel_new_hypotheses",
+    }
+    for key, value in values.items():
+        binding[mapping.get(key, key)] = value
+    return binding
 
 
 def _tool_call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
@@ -77,10 +79,9 @@ def _scripted_diagnosis(
     if not _run_results:
         return ModelResponse(
             parts=[
-                TextPart(_intent("g_locate", "LOCATE_FAILURE")),
                 ToolCallPart(
                     "get_dbt_run_results",
-                    {"run_id": run_id},
+                    {**{"run_id": run_id}, **_intent("g_locate", "LOCATE_FAILURE")},
                     tool_call_id="run-results",
                 ),
             ]
@@ -88,10 +89,12 @@ def _scripted_diagnosis(
     if not node_errors:
         return ModelResponse(
             parts=[
-                TextPart(_intent("g_explain", "EXPLAIN_FAILURE")),
                 ToolCallPart(
                     "get_dbt_node_error",
-                    {"run_id": run_id, "node_id": FAILURE_NODE},
+                    {
+                        **{"run_id": run_id, "node_id": FAILURE_NODE},
+                        **_intent("g_explain", "EXPLAIN_FAILURE"),
+                    },
                     tool_call_id="node-error",
                 ),
             ]
@@ -99,15 +102,12 @@ def _scripted_diagnosis(
     if not upstream:
         return ModelResponse(
             parts=[
-                TextPart(
-                    _intent(
-                        "g_source",
-                        "DISCOVER_SOURCE_RELATION",
-                    )
-                ),
                 ToolCallPart(
                     "get_dbt_lineage",
-                    {"node_id": FAILURE_NODE, "direction": "upstream"},
+                    {
+                        **{"node_id": FAILURE_NODE, "direction": "upstream"},
+                        **_intent("g_source", "DISCOVER_SOURCE_RELATION"),
+                    },
                     tool_call_id="upstream",
                 ),
             ]
@@ -115,26 +115,25 @@ def _scripted_diagnosis(
     if not schemas:
         return ModelResponse(
             parts=[
-                TextPart(
-                    _intent(
-                        "g_schema",
-                        "DISCRIMINATE_SCHEMA",
-                        hypothesis_ids=[],
-                        new_hypotheses=[
-                            {
-                                "hypothesis_id": "h_rename",
-                                "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
-                            },
-                            {
-                                "hypothesis_id": "h_type",
-                                "root_cause_code": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
-                            },
-                        ],
-                    )
-                ),
                 ToolCallPart(
                     "get_relation_schema",
-                    {"relation_name": "raw_payments"},
+                    {
+                        **{"relation_name": "raw_payments"},
+                        **_intent(
+                            "g_schema",
+                            "DISCRIMINATE_SCHEMA",
+                            new_hypotheses=[
+                                {
+                                    "hypothesis_id": "h_rename",
+                                    "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
+                                },
+                                {
+                                    "hypothesis_id": "h_type",
+                                    "root_cause_code": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                                },
+                            ],
+                        ),
+                    },
                     tool_call_id="schema",
                 ),
             ]
@@ -142,16 +141,16 @@ def _scripted_diagnosis(
     if not downstream:
         return ModelResponse(
             parts=[
-                TextPart(
-                    _intent(
-                        "g_impact",
-                        "MAP_IMPACT",
-                        hypothesis_ids=["h_rename", "h_type"],
-                    )
-                ),
                 ToolCallPart(
                     "get_dbt_lineage",
-                    {"node_id": FAILURE_NODE, "direction": "downstream"},
+                    {
+                        **{"node_id": FAILURE_NODE, "direction": "downstream"},
+                        **_intent(
+                            "g_impact",
+                            "MAP_IMPACT",
+                            hypothesis_ids=["h_rename", "h_type"],
+                        ),
+                    },
                     tool_call_id="downstream",
                 ),
             ]

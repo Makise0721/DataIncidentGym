@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from time import monotonic
@@ -28,6 +28,7 @@ from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.tools import ToolDefinition
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import (
@@ -50,9 +51,13 @@ from data_incident_gym.diagnosis import (
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.diagnostic_kernel import (
+    _GAP_ID_PATTERN,
+    _HYPOTHESIS_ID_PATTERN,
     ClaimKind,
     DiagnosticKernel,
-    InvestigationIntentTransport,
+    EvidenceGapKind,
+    Hypothesis,
+    InvestigationIntent,
     InvestigationState,
     KernelDecision,
     KernelError,
@@ -65,10 +70,10 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v5"
+KERNEL_PROMPT_VERSION = "p1.kernel.v6"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v4"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v5"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -198,9 +203,6 @@ _SAFE_CONTROLLER_ERRORS = {
     "HYPOTHESIS_ASSESSMENT_INCOMPLETE",
     "HYPOTHESIS_REFERENCE_UNKNOWN",
     "INSUFFICIENCY_GAP_REQUIRED",
-    "KERNEL_INTENT_INVALID",
-    "KERNEL_INTENT_MISSING",
-    "KERNEL_INTENT_SHAPE_INVALID",
     "NODE_ARGUMENT_NOT_PROVEN",
     "ONTOLOGY_CODE_UNKNOWN",
     "RELATION_ARGUMENT_NOT_PROVEN",
@@ -289,6 +291,7 @@ class _PolicyAdapter(Protocol):
         tool_name: str,
         arguments: dict[str, str],
         observation: ModelResponse | None,
+        intent: InvestigationIntent | None,
     ) -> PreparedEvidenceCall:
         ...
 
@@ -337,8 +340,6 @@ class _RunState:
     static_diagnosis: Diagnosis | None = None
     last_response: ModelResponse | None = None
     last_observation: tuple[tuple[str, ...], tuple[str, ...], bool] | None = None
-    pending_intent: InvestigationIntentTransport | None = None
-    pending_intent_error: str | None = None
     protocol_failure: tuple[str, str, str | None] | None = None
     protocol_trace_recorded: bool = False
 
@@ -362,33 +363,11 @@ class _RunState:
             for part in response.parts
             if isinstance(part, ToolCallPart) and part.tool_name in output_names
         )
-        business_calls = tuple(
-            part.tool_name
-            for part in response.parts
-            if isinstance(part, ToolCallPart) and part.tool_name in TOOL_NAMES
-        )
         self.last_observation = (
             function_calls,
             output_calls,
             any(isinstance(part, TextPart) for part in response.parts),
         )
-        self.pending_intent = None
-        self.pending_intent_error = None
-        if not _is_kernel_strategy(self.strategy) or not business_calls:
-            return
-        text_parts = tuple(part for part in response.parts if isinstance(part, TextPart))
-        if len(business_calls) != 1 or len(text_parts) != 1:
-            self.pending_intent_error = "KERNEL_INTENT_SHAPE_INVALID"
-            return
-        try:
-            payload = json.loads(
-                text_parts[0].content,
-                object_pairs_hook=_reject_duplicate_keys,
-                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
-            )
-            self.pending_intent = InvestigationIntentTransport.model_validate(payload)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            self.pending_intent_error = "KERNEL_INTENT_INVALID"
 
     def set_protocol_failure(
         self,
@@ -438,15 +417,6 @@ class _RunState:
         )
 
 
-def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON object key")
-        result[key] = value
-    return result
-
-
 class _StaticPolicyAdapter:
     def __init__(self, state: _RunState, *, tool_call_limit: int) -> None:
         self._state = state
@@ -460,8 +430,9 @@ class _StaticPolicyAdapter:
         tool_name: str,
         arguments: dict[str, str],
         observation: ModelResponse | None,
+        intent: InvestigationIntent | None,
     ) -> PreparedEvidenceCall:
-        del observation
+        del observation, intent
         fingerprint = _fingerprint(self._state.run_id, tool_name, arguments)
         if len(self._fingerprints) >= self._tool_call_limit:
             raise _PolicyError("TOOL_CALL_LIMIT", fingerprint=fingerprint)
@@ -513,17 +484,14 @@ class _KernelPolicyAdapter:
         tool_name: str,
         arguments: dict[str, str],
         observation: ModelResponse | None,
+        intent: InvestigationIntent | None,
     ) -> PreparedEvidenceCall:
         del observation
         kernel = self._state.kernel
         if kernel is None:
             raise _PolicyError("KERNEL_NOT_INITIALIZED")
-        if self._state.pending_intent_error is not None:
-            raise _PolicyError(self._state.pending_intent_error)
-        intent = self._state.pending_intent
         if intent is None:
             raise _PolicyError("KERNEL_INTENT_MISSING")
-        self._state.pending_intent = None
         try:
             prepared = kernel.prepare_tool(
                 intent=intent,
@@ -650,15 +618,55 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
         )
 
 
+def _kernel_state_summary(snapshot: InvestigationState) -> str:
+    """Project the model-visible investigation ledger for the current request."""
+
+    payload = {
+        "hypotheses": [
+            {"hypothesis_id": item.hypothesis_id, "root_cause_code": item.root_cause_code}
+            for item in snapshot.hypotheses
+        ],
+        "gaps": [
+            {
+                "gap_id": gap.gap_id,
+                "gap_kind": gap.gap_kind.value,
+                "status": gap.status.value,
+            }
+            for gap in snapshot.gaps
+        ],
+        "model_requests_remaining": snapshot.model_requests_remaining,
+        "tool_calls_remaining": snapshot.tool_calls_remaining,
+    }
+    return (
+        "CURRENT INVESTIGATION LEDGER (controller-maintained; authoritative):\n"
+        + _canonical_json(payload)
+        + "\nUse a fresh gap_id for every business call; reference only these hypothesis IDs; "
+        "budget remaining requests conservatively."
+    )
+
+
+def _kernel_state_prepare(
+    ctx: RunContext[_RunState],
+    tool_def: ToolDefinition,
+) -> ToolDefinition:
+    """Attach the current investigation ledger to each Kernel tool description."""
+
+    kernel = ctx.deps.kernel
+    if kernel is None:
+        return tool_def
+    snapshot = kernel.snapshot(model_requests_used=ctx.deps.usage.requests)
+    if not snapshot.hypotheses and not snapshot.gaps:
+        return tool_def
+    description = tool_def.description or ""
+    ledger = _kernel_state_summary(snapshot)
+    return replace(tool_def, description=f"{description}\n\n{ledger}" if description else ledger)
+
+
 def _kernel_retry_message(code: str) -> str:
     messages = {
         "ARGUMENTS_INVALID": "Send only the business arguments for the selected tool.",
         "GAP_TOOL_MISMATCH": "Choose the business tool matching the declared evidence gap.",
-        "KERNEL_INTENT_INVALID": "Return exactly one valid p1.kernel_intent.v1 JSON text part.",
-        "KERNEL_INTENT_SHAPE_INVALID": (
-            "Pair exactly one Kernel business call with one intent text part."
-        ),
-        "KERNEL_INTENT_MISSING": "Pair every Kernel business call with one intent JSON text part.",
+        "KERNEL_INTENT_MISSING": "Every Kernel business call must carry its binding arguments.",
         "RELATION_ARGUMENT_NOT_PROVEN": (
             "Use an exact observable relation from context or accepted evidence."
         ),
@@ -688,15 +696,46 @@ def _tool_schema_payload(agent: Agent[Any, Any]) -> list[dict[str, object]]:
     ]
 
 
+_GAP_ID_FIELD_DESCRIPTION = (
+    "A fresh evidence-gap identifier unique across this investigation; never reuse a gap_id."
+)
+_GAP_KIND_FIELD_DESCRIPTION = (
+    "The kind of evidence gap this business call opens; it must match the business tool."
+)
+
+
+def _kernel_intent(
+    gap_id: str,
+    gap_kind: EvidenceGapKind,
+    hypothesis_ids: tuple[str, ...],
+    new_hypotheses: tuple[Hypothesis, ...],
+) -> InvestigationIntent:
+    return InvestigationIntent(
+        gap_id=gap_id,
+        gap_kind=gap_kind,
+        hypothesis_ids=hypothesis_ids,
+        new_hypotheses=new_hypotheses,
+    )
+
+
 def _register_evidence_tools(
     agent: Agent[_RunState, Any],
     *,
+    kernel_mode: bool = False,
     excluded_tool_names: frozenset[str] = frozenset(),
 ) -> None:
     enabled_tool_names = set(TOOL_NAMES) - excluded_tool_names
 
     def register(tool_name: str):
-        return agent.tool if tool_name in enabled_tool_names else lambda function: function
+        if tool_name not in enabled_tool_names:
+            return lambda function: function
+        if kernel_mode:
+            return agent.tool(prepare=_kernel_state_prepare)
+        return agent.tool
+
+    if kernel_mode:
+        _register_kernel_evidence_tools(agent, register)
+        return
 
     @register("get_dbt_run_results")
     def get_dbt_run_results(
@@ -785,6 +824,193 @@ def _register_evidence_tools(
         )
 
 
+def _register_kernel_evidence_tools(
+    agent: Agent[_RunState, Any],
+    register: Callable[[str], Callable[[Any], Any]],
+) -> None:
+    @register("get_dbt_run_results")
+    def get_dbt_run_results(
+        ctx: RunContext[_RunState],
+        run_id: Annotated[StrictStr, Field(description="The exact verified run identifier.")],
+        kernel_gap_id: Annotated[
+            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
+        ],
+        kernel_gap_kind: Annotated[
+            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
+        ],
+        kernel_hypothesis_ids: tuple[
+            Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
+        ] = (),
+        kernel_new_hypotheses: tuple[Hypothesis, ...] = (),
+    ) -> tuple[EvidenceRecord, ...]:
+        return _execute_evidence(
+            ctx,
+            "get_dbt_run_results",
+            {"run_id": run_id},
+            lambda: ctx.deps.tools.get_dbt_run_results(run_id),
+            kernel_intent=_kernel_intent(
+                kernel_gap_id,
+                kernel_gap_kind,
+                kernel_hypothesis_ids,
+                kernel_new_hypotheses,
+            ),
+        )
+
+    @register("get_dbt_node_error")
+    def get_dbt_node_error(
+        ctx: RunContext[_RunState],
+        run_id: Annotated[StrictStr, Field(description="The exact verified run identifier.")],
+        node_id: Annotated[
+            StrictStr,
+            Field(description="A node identifier returned by run evidence."),
+        ],
+        kernel_gap_id: Annotated[
+            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
+        ],
+        kernel_gap_kind: Annotated[
+            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
+        ],
+        kernel_hypothesis_ids: tuple[
+            Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
+        ] = (),
+        kernel_new_hypotheses: tuple[Hypothesis, ...] = (),
+    ) -> tuple[EvidenceRecord, ...]:
+        return _execute_evidence(
+            ctx,
+            "get_dbt_node_error",
+            {"run_id": run_id, "node_id": node_id},
+            lambda: ctx.deps.tools.get_dbt_node_error(run_id, node_id),
+            kernel_intent=_kernel_intent(
+                kernel_gap_id,
+                kernel_gap_kind,
+                kernel_hypothesis_ids,
+                kernel_new_hypotheses,
+            ),
+        )
+
+    @register("get_relation_schema")
+    def get_relation_schema(
+        ctx: RunContext[_RunState],
+        relation_name: Annotated[
+            StrictStr,
+            Field(description="An exact observable relation name returned by evidence."),
+        ],
+        kernel_gap_id: Annotated[
+            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
+        ],
+        kernel_gap_kind: Annotated[
+            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
+        ],
+        kernel_hypothesis_ids: tuple[
+            Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
+        ] = (),
+        kernel_new_hypotheses: tuple[Hypothesis, ...] = (),
+    ) -> tuple[EvidenceRecord, ...]:
+        return _execute_evidence(
+            ctx,
+            "get_relation_schema",
+            {"relation_name": relation_name},
+            lambda: ctx.deps.tools.get_relation_schema(relation_name),
+            kernel_intent=_kernel_intent(
+                kernel_gap_id,
+                kernel_gap_kind,
+                kernel_hypothesis_ids,
+                kernel_new_hypotheses,
+            ),
+        )
+
+    @register("get_dbt_lineage")
+    def get_dbt_lineage(
+        ctx: RunContext[_RunState],
+        node_id: Annotated[StrictStr, Field(description="A node identifier returned by evidence.")],
+        direction: Literal["upstream", "downstream"],
+        kernel_gap_id: Annotated[
+            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
+        ],
+        kernel_gap_kind: Annotated[
+            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
+        ],
+        kernel_hypothesis_ids: tuple[
+            Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
+        ] = (),
+        kernel_new_hypotheses: tuple[Hypothesis, ...] = (),
+    ) -> tuple[EvidenceRecord, ...]:
+        return _execute_evidence(
+            ctx,
+            "get_dbt_lineage",
+            {"node_id": node_id, "direction": direction},
+            lambda: ctx.deps.tools.get_dbt_lineage(node_id, direction),
+            kernel_intent=_kernel_intent(
+                kernel_gap_id,
+                kernel_gap_kind,
+                kernel_hypothesis_ids,
+                kernel_new_hypotheses,
+            ),
+        )
+
+    @register("get_relation_data_profile")
+    def get_relation_data_profile(
+        ctx: RunContext[_RunState],
+        relation_name: Annotated[
+            StrictStr,
+            Field(description="An exact observable relation name returned by evidence."),
+        ],
+        kernel_gap_id: Annotated[
+            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
+        ],
+        kernel_gap_kind: Annotated[
+            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
+        ],
+        kernel_hypothesis_ids: tuple[
+            Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
+        ] = (),
+        kernel_new_hypotheses: tuple[Hypothesis, ...] = (),
+    ) -> tuple[EvidenceRecord, ...]:
+        return _execute_evidence(
+            ctx,
+            "get_relation_data_profile",
+            {"relation_name": relation_name},
+            lambda: ctx.deps.tools.get_relation_data_profile(relation_name),
+            kernel_intent=_kernel_intent(
+                kernel_gap_id,
+                kernel_gap_kind,
+                kernel_hypothesis_ids,
+                kernel_new_hypotheses,
+            ),
+        )
+
+    @register("get_relation_history")
+    def get_relation_history(
+        ctx: RunContext[_RunState],
+        relation_name: Annotated[
+            StrictStr,
+            Field(description="An exact observable relation name returned by evidence."),
+        ],
+        kernel_gap_id: Annotated[
+            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
+        ],
+        kernel_gap_kind: Annotated[
+            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
+        ],
+        kernel_hypothesis_ids: tuple[
+            Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
+        ] = (),
+        kernel_new_hypotheses: tuple[Hypothesis, ...] = (),
+    ) -> tuple[EvidenceRecord, ...]:
+        return _execute_evidence(
+            ctx,
+            "get_relation_history",
+            {"relation_name": relation_name},
+            lambda: ctx.deps.tools.get_relation_history(relation_name),
+            kernel_intent=_kernel_intent(
+                kernel_gap_id,
+                kernel_gap_kind,
+                kernel_hypothesis_ids,
+                kernel_new_hypotheses,
+            ),
+        )
+
+
 def _build_policy_surface(
     strategy: DiagnosticStrategy,
     *,
@@ -804,6 +1030,7 @@ def _build_policy_surface(
     enabled = _enabled_tool_names(strategy)
     _register_evidence_tools(
         schema_agent,
+        kernel_mode=_is_kernel_strategy(strategy),
         excluded_tool_names=frozenset(set(TOOL_NAMES) - set(enabled)),
     )
     tool_schema_payload = _tool_schema_payload(schema_agent)
@@ -888,6 +1115,8 @@ def _execute_evidence(
     tool_name: str,
     arguments: dict[str, str],
     call: Callable[[], tuple[EvidenceRecord, ...]],
+    *,
+    kernel_intent: InvestigationIntent | None = None,
 ) -> tuple[EvidenceRecord, ...]:
     state = ctx.deps
     started_at = monotonic()
@@ -896,6 +1125,7 @@ def _execute_evidence(
             tool_name=tool_name,
             arguments=arguments,
             observation=state.last_response,
+            intent=kernel_intent,
         )
     except _PolicyError as error:
         fingerprint = error.fingerprint or _fingerprint(state.run_id, tool_name, arguments)
@@ -1175,6 +1405,7 @@ class DiagnosisRunner:
         enabled = _enabled_tool_names(self._strategy)
         _register_evidence_tools(
             agent,
+            kernel_mode=_is_kernel_strategy(self._strategy),
             excluded_tool_names=frozenset(set(TOOL_NAMES) - set(enabled)),
         )
 
@@ -1417,7 +1648,6 @@ __all__ = [
     "CONTROLLER_PROTOCOL_VERSION",
     "DiagnosisBudget",
     "DiagnosisRunner",
-    "InvestigationIntentTransport",
     "KERNEL_PROMPT",
     "KERNEL_PROMPT_VERSION",
     "ModelIdentity",

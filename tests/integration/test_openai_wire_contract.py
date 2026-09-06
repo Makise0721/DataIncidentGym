@@ -353,7 +353,7 @@ async def test_openai_wire_static_tool_return_final_contract(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_openai_wire_kernel_intent_tool_return_fails_closed_on_bad_final(
+async def test_openai_wire_kernel_binding_tool_return_fails_closed_on_bad_final(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(pydantic_ai.models, "ALLOW_MODEL_REQUESTS", True)
@@ -364,23 +364,24 @@ async def test_openai_wire_kernel_intent_tool_return_fails_closed_on_bad_final(
         nonlocal calls
         calls += 1
         if calls == 1:
-            intent = {
-                "schema_version": "p1.kernel_intent.v1",
-                "gap_id": "g_locate",
-                "gap_kind": "LOCATE_FAILURE",
-                "hypothesis_ids": [],
-                "new_hypotheses": [],
-            }
             return 200, _chat_response(
                 {
-                    "content": json.dumps(intent),
+                    "content": None,
                     "tool_calls": [
                         {
                             "id": "call-run-results",
                             "type": "function",
                             "function": {
                                 "name": "get_dbt_run_results",
-                                "arguments": json.dumps({"run_id": run_id}),
+                                "arguments": json.dumps(
+                                    {
+                                        "run_id": run_id,
+                                        "kernel_gap_id": "g_locate",
+                                        "kernel_gap_kind": "LOCATE_FAILURE",
+                                        "kernel_hypothesis_ids": [],
+                                        "kernel_new_hypotheses": [],
+                                    }
+                                ),
                             },
                         }
                     ],
@@ -422,8 +423,10 @@ async def test_openai_wire_kernel_intent_tool_return_fails_closed_on_bad_final(
     assert wire.paths[0] == "/v1/chat/completions"
     mixed_response = wire.requests[1]["messages"]
     assistant = next(message for message in mixed_response if message["role"] == "assistant")
-    assert json.loads(assistant["content"])["schema_version"] == "p1.kernel_intent.v1"
-    assert len(assistant["tool_calls"]) == 1
+    assert assistant["content"] is None
+    arguments = json.loads(assistant["tool_calls"][0]["function"]["arguments"])
+    assert arguments["kernel_gap_id"] == "g_locate"
+    assert arguments["kernel_gap_kind"] == "LOCATE_FAILURE"
     assert assistant["tool_calls"][0]["function"]["name"] == "get_dbt_run_results"
     assert isinstance(assistant["tool_calls"][0]["function"]["arguments"], str)
     assert any(message["role"] == "tool" for message in mixed_response)

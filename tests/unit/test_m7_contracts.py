@@ -10,7 +10,6 @@ import pytest
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
-    TextPart,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -31,6 +30,7 @@ from data_incident_gym.diagnosis import (
     DiagnosticStrategy,
     EvidenceGateTraceEvent,
     PolicyIdentity,
+    ToolTraceEvent,
 )
 from data_incident_gym.diagnostic_agent import DiagnosisRunner, ModelIdentity
 from data_incident_gym.evaluation import (
@@ -303,21 +303,26 @@ class _KernelEvidenceTools:
         return ()
 
 
-def _kernel_intent(gap_id: str, gap_kind: str, **extra: object) -> str:
-    return json.dumps(
-        {
-            "schema_version": "p1.kernel_intent.v1",
-            "gap_id": gap_id,
-            "gap_kind": gap_kind,
-            "hypothesis_ids": [],
-            "new_hypotheses": [],
-            **extra,
-        }
-    )
+def _kernel_intent(gap_id: str, gap_kind: str, **extra: object) -> dict[str, object]:
+    binding: dict[str, object] = {
+        "kernel_gap_id": gap_id,
+        "kernel_gap_kind": gap_kind,
+        "kernel_hypothesis_ids": [],
+        "kernel_new_hypotheses": [],
+    }
+    mapping = {
+        "hypothesis_ids": "kernel_hypothesis_ids",
+        "new_hypotheses": "kernel_new_hypotheses",
+    }
+    for key, value in extra.items():
+        binding[mapping.get(key, key)] = value
+    return binding
 
 
 @pytest.mark.asyncio
-async def test_kernel_uses_separate_intent_and_projects_confirmed_result(tmp_path: Path) -> None:
+async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result(
+    tmp_path: Path,
+) -> None:
     _write_public_context(tmp_path)
     records = _kernel_evidence()
     calls = (
@@ -420,11 +425,14 @@ async def test_kernel_uses_separate_intent_and_projects_confirmed_result(tmp_pat
             for part in message.parts
         )
         if tool_returns < len(calls):
-            name, arguments, intent = calls[tool_returns]
+            name, arguments, binding = calls[tool_returns]
             return ModelResponse(
                 parts=[
-                    TextPart(intent),
-                    ToolCallPart(name, arguments, tool_call_id=f"call-{tool_returns}"),
+                    ToolCallPart(
+                        name,
+                        {**arguments, **binding},
+                        tool_call_id=f"call-{tool_returns}",
+                    )
                 ]
             )
         return ModelResponse(
@@ -463,6 +471,174 @@ async def test_kernel_uses_separate_intent_and_projects_confirmed_result(tmp_pat
         for event in result.trace
         if event.event_type == "TOOL_CALL"
     )
+
+
+@pytest.mark.asyncio
+async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path) -> None:
+    _write_public_context(tmp_path)
+    records = _kernel_evidence()
+    run_results_call = (
+        "get_dbt_run_results",
+        {"run_id": RUN_ID},
+        _kernel_intent("g_locate", "LOCATE_FAILURE"),
+    )
+    node_error_call = (
+        "get_dbt_node_error",
+        {"run_id": RUN_ID, "node_id": "model.jaffle_shop.stg_payments"},
+        _kernel_intent("g_explain", "EXPLAIN_FAILURE"),
+    )
+    upstream_call = (
+        "get_dbt_lineage",
+        {"node_id": "model.jaffle_shop.stg_payments", "direction": "upstream"},
+        _kernel_intent("g_source", "DISCOVER_SOURCE_RELATION"),
+    )
+    schema_call = (
+        "get_relation_schema",
+        {"relation_name": "raw_payments"},
+        _kernel_intent(
+            "g_schema",
+            "DISCRIMINATE_SCHEMA",
+            hypothesis_ids=["h_rename", "h_type"],
+            new_hypotheses=[
+                {
+                    "hypothesis_id": "h_rename",
+                    "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
+                },
+                {
+                    "hypothesis_id": "h_type",
+                    "root_cause_code": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                },
+            ],
+        ),
+    )
+    downstream_call = (
+        "get_dbt_lineage",
+        {"node_id": "model.jaffle_shop.stg_payments", "direction": "downstream"},
+        _kernel_intent(
+            "g_impact",
+            "MAP_IMPACT",
+            hypothesis_ids=["h_rename", "h_type"],
+        ),
+    )
+    batches = (
+        (run_results_call, node_error_call),
+        (upstream_call, schema_call),
+        (downstream_call,),
+    )
+    final_payload = {
+        "schema_version": "p1.kernel_decision.v1",
+        "status": "CONFIRMED",
+        "run_id": RUN_ID,
+        "selected_hypothesis_id": "h_type",
+        "assessments": [
+            {
+                "hypothesis_id": "h_rename",
+                "verdict": "REFUTED",
+                "evidence_ids": [records[3].evidence_id],
+            },
+            {
+                "hypothesis_id": "h_type",
+                "verdict": "SUPPORTED",
+                "evidence_ids": [records[1].evidence_id, records[3].evidence_id],
+            },
+        ],
+        "claims": [
+            {
+                "kind": "ROOT_CAUSE",
+                "value": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                "evidence_ids": [records[1].evidence_id, records[3].evidence_id],
+            },
+            {
+                "kind": "AFFECTED_ASSET",
+                "value": "model.jaffle_shop.stg_payments",
+                "evidence_ids": [records[1].evidence_id],
+            },
+            {
+                "kind": "AFFECTED_ASSET",
+                "value": "model.jaffle_shop.orders",
+                "evidence_ids": [records[4].evidence_id],
+            },
+            {
+                "kind": "AFFECTED_ASSET",
+                "value": "model.jaffle_shop.customers",
+                "evidence_ids": [records[4].evidence_id],
+            },
+        ],
+        "unresolved_evidence": [],
+        "summary": "The payment amount source type changed.",
+        "recommended_actions": ["Restore the source contract before the next build."],
+        "confidence": 0.9,
+    }
+    tool_descriptions: list[str] = []
+
+    def scripted(
+        messages: list[ModelMessage],
+        agent_info: AgentInfo,
+    ) -> ModelResponse:
+        tool_descriptions.append(
+            "\n".join(
+                f"{tool.name}\n{tool.description or ''}"
+                for tool in agent_info.function_tools
+            )
+        )
+        completed = sum(
+            isinstance(part, ToolReturnPart)
+            for message in messages
+            for part in message.parts
+        )
+        emitted = 0
+        for batch in batches:
+            if completed == emitted:
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            name,
+                            {**arguments, **binding},
+                            tool_call_id=f"call-{emitted + offset}",
+                        )
+                        for offset, (name, arguments, binding) in enumerate(batch)
+                    ]
+                )
+            emitted += len(batch)
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    final_payload,
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    settings = SimpleNamespace(
+        model_base_url=MODEL_BASE_URL,
+        model_name="synthetic-model",
+        model_api_key=SimpleNamespace(get_secret_value=lambda: "synthetic-key"),
+    )
+    runner = DiagnosisRunner.for_run(
+        RUN_ID,
+        settings,
+        DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+        tmp_path,
+        model=FunctionModel(scripted),
+        tools=_KernelEvidenceTools(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+    )
+
+    result = await runner.diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
+    assert result.metrics.model_requests == 4
+    assert result.metrics.successful_tool_calls == 5
+    assert sum(isinstance(event, ToolTraceEvent) for event in result.trace) == 5
+    assert len(tool_descriptions) == 4
+    assert "CURRENT INVESTIGATION LEDGER" not in tool_descriptions[0]
+    assert '"g_locate"' in tool_descriptions[1]
+    assert '"CLOSED"' in tool_descriptions[1]
+    assert '"g_schema"' in tool_descriptions[2]
+    assert "incident_case_id" not in tool_descriptions[1]
+
+
 def test_m7_catalog_has_four_scenarios_and_actual_customer_failure() -> None:
     assert P1_M7_SCENARIO_IDS == (
         "schema_type_change_payment_amount",
@@ -503,7 +679,16 @@ def test_static_and_kernel_share_public_contracts(tmp_path: Path) -> None:
         model_identity=ModelIdentity("synthetic", "synthetic-model"),
     )
 
-    assert static.tool_schema_sha256 == kernel.tool_schema_sha256
+    assert static.tool_schema_sha256 != kernel.tool_schema_sha256
+    binding_fields = {"kernel_gap_id", "kernel_gap_kind"}
+    assert all(
+        not (binding_fields & set(item["parameters"].get("properties", {})))
+        for item in static._tool_schema_payload
+    )
+    assert all(
+        binding_fields <= set(item["parameters"].get("properties", {}))
+        for item in kernel._tool_schema_payload
+    )
     assert static.final_diagnosis_schema_sha256 == kernel.final_diagnosis_schema_sha256
     assert static.incident_brief == kernel.incident_brief
     assert static.budget == kernel.budget

@@ -10,7 +10,6 @@ import pytest
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
-    TextPart,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -156,17 +155,20 @@ def _tool_call(name: str, arguments: dict[str, object], call_id: str) -> ModelRe
     return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
 
 
-def _intent(gap_id: str, gap_kind: str, **values: object) -> str:
-    return json.dumps(
-        {
-            "schema_version": "p1.kernel_intent.v1",
-            "gap_id": gap_id,
-            "gap_kind": gap_kind,
-            "hypothesis_ids": [],
-            "new_hypotheses": [],
-            **values,
-        }
-    )
+def _intent(gap_id: str, gap_kind: str, **values: object) -> dict[str, object]:
+    binding: dict[str, object] = {
+        "kernel_gap_id": gap_id,
+        "kernel_gap_kind": gap_kind,
+        "kernel_hypothesis_ids": [],
+        "kernel_new_hypotheses": [],
+    }
+    mapping = {
+        "hypothesis_ids": "kernel_hypothesis_ids",
+        "new_hypotheses": "kernel_new_hypotheses",
+    }
+    for key, value in values.items():
+        binding[mapping.get(key, key)] = value
+    return binding
 
 
 def _source_relations(records: tuple[EvidenceRecord, ...]) -> tuple[str, ...]:
@@ -1873,13 +1875,22 @@ def _exact_duplicate_response(
 def _with_intent(
     response: ModelResponse,
     strategy: DiagnosticStrategy,
-    intent: str,
+    binding: dict[str, object],
 ) -> ModelResponse:
     if strategy is DiagnosticStrategy.STATIC_SKILL:
         return response
     if len(response.parts) != 1 or not isinstance(response.parts[0], ToolCallPart):
         raise AssertionError("business response must contain one tool call")
-    return ModelResponse(parts=[TextPart(intent), response.parts[0]])
+    part = response.parts[0]
+    arguments = part.args
+    if not isinstance(arguments, dict):
+        raise AssertionError("scripted tool call arguments must be a dict")
+    merged = {**arguments, **binding}
+    return ModelResponse(
+        parts=[
+            ToolCallPart(part.tool_name, merged, tool_call_id=part.tool_call_id)
+        ]
+    )
 
 
 def _runner(project_root: Path, strategy: DiagnosticStrategy) -> EvaluationRunner:

@@ -122,10 +122,6 @@ class InvestigationIntent(BaseModel):
         return self
 
 
-class InvestigationIntentTransport(InvestigationIntent):
-    """The exact text part paired with one Kernel business-tool call."""
-
-
 class EvidenceGap(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -1468,7 +1464,6 @@ __all__ = [
     "HypothesisAssessment",
     "HypothesisVerdict",
     "InvestigationIntent",
-    "InvestigationIntentTransport",
     "InvestigationState",
     "KernelDecision",
     "KernelError",

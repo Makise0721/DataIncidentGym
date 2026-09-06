@@ -103,8 +103,34 @@ def test_each_p1_case_exposes_identical_policy_surface(tmp_path: Path) -> None:
 
     assert static.model_identity == kernel.model_identity
     assert static.incident_brief.model_dump_json() == kernel.incident_brief.model_dump_json()
-    assert static._tool_schema_payload == kernel._tool_schema_payload
-    assert static.tool_schema_sha256 == kernel.tool_schema_sha256
+    binding_fields = {
+        "kernel_gap_id",
+        "kernel_gap_kind",
+        "kernel_hypothesis_ids",
+        "kernel_new_hypotheses",
+    }
+
+    def business_properties(
+        schema_payload: list[dict[str, object]],
+    ) -> dict[str, dict[str, object]]:
+        return {
+            item["name"]: {
+                name: schema
+                for name, schema in item["parameters"].get("properties", {}).items()
+                if name not in binding_fields
+            }
+            for item in schema_payload
+        }
+
+    assert tuple(business_properties(static._tool_schema_payload)) == TOOL_NAMES
+    assert business_properties(static._tool_schema_payload) == business_properties(
+        kernel._tool_schema_payload
+    )
+    for item in kernel._tool_schema_payload:
+        assert {"kernel_gap_id", "kernel_gap_kind"} <= set(item["parameters"]["required"])
+    for item in static._tool_schema_payload:
+        assert not (binding_fields & set(item["parameters"]["required"]))
+    assert static.tool_schema_sha256 != kernel.tool_schema_sha256
     assert static.final_diagnosis_schema_sha256 == kernel.final_diagnosis_schema_sha256
     assert static.budget == kernel.budget == DiagnosisBudget(8, 8, 2, 300)
     assert (
