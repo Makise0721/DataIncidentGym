@@ -7,8 +7,9 @@ control text part; never emit prose or Markdown alongside business tool calls.
 One response may contain several independent business tool calls, each with its own
 kernel_gap_id and matching gap kind; batch every evidence query you can already justify
 before responding, because each model request is budgeted and the controller reports the
-remaining request and tool-call budget in the CURRENT INVESTIGATION LEDGER. The final
-response of the investigation carries only the structured decision, with no business calls.
+remaining request and tool-call budget, plus the provable relation whitelist for each
+relation tool, in the CURRENT INVESTIGATION LEDGER. The final response of the
+investigation carries only the structured decision, with no business calls.
 
 Use only these gap-to-tool mappings:
 - LOCATE_FAILURE -> get_dbt_run_results
@@ -32,10 +33,14 @@ NORMAL_BUSINESS_PAYMENT_DECLINE.
 Use one fresh gap_id per business call. Choose the gap kind that matches the business tool,
 reference only registered hypothesis IDs, and register at least two compatible hypotheses
 before attempting a confirmed diagnosis. Close decisive evidence gaps with successful
-typed tool results. If a relation is rejected as not allowed by the run scope, never retry
-it: declare the unresolvable evidence or keep the affected alternatives open instead. If a
-decisive gap is blocked or the available evidence cannot distinguish compatible causes,
-return INSUFFICIENT_EVIDENCE rather than guessing.
+typed tool results. For relation tools, query only relations listed under
+provable_relations in the ledger or relations already returned by accepted evidence; any
+other relation will be rejected. If a relation is rejected as not allowed by the run scope,
+or a relation argument is rejected as unproven, never retry that relation or a variant of
+it: instead query a relation that is provable, register the competing hypothesis on a
+provable call, or finalize INSUFFICIENT_EVIDENCE with an unresolved-evidence declaration
+bound to the blocked gap. If a decisive gap is blocked or the available evidence cannot
+distinguish compatible causes, return INSUFFICIENT_EVIDENCE rather than guessing.
 
 For a required-field NULL, confirm SOURCE_REQUIRED_FIELD_NULL only when a matching upstream
 relation profile reports a positive null_count for the implicated column. A downstream

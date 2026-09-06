@@ -32,6 +32,7 @@ from data_incident_gym.diagnostic_agent import (
     DiagnosisBudget,
     DiagnosisRunner,
     ModelIdentity,
+    _kernel_retry_message,
     load_strategy_prompt,
 )
 from data_incident_gym.run_context import IncidentBrief
@@ -213,9 +214,9 @@ def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> No
 
     assert expected == P1_ROOT_CAUSE_CODES
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
-        "p1.kernel.v6",
+        "p1.kernel.v7",
         "p1.static.v5",
-        "p1.controller.v5",
+        "p1.controller.v6",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)
@@ -253,6 +254,7 @@ def test_kernel_prompt_exposes_the_exact_binding_transport_contract() -> None:
     assert "kernel_hypothesis_ids" in KERNEL_PROMPT
     assert "kernel_new_hypotheses" in KERNEL_PROMPT
     assert "CURRENT INVESTIGATION LEDGER" in KERNEL_PROMPT
+    assert "provable_relations" in KERNEL_PROMPT
     assert "LOCATE_FAILURE -> get_dbt_run_results" in KERNEL_PROMPT
     assert "EXPLAIN_FAILURE -> get_dbt_node_error" in KERNEL_PROMPT
     assert "DISCOVER_SOURCE_RELATION -> get_dbt_lineage upstream" in KERNEL_PROMPT
@@ -261,6 +263,23 @@ def test_kernel_prompt_exposes_the_exact_binding_transport_contract() -> None:
     assert "PROFILE_RELATION -> get_relation_data_profile" in KERNEL_PROMPT
     assert "COMPARE_HISTORY -> get_relation_history" in KERNEL_PROMPT
     assert '"root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"' in KERNEL_PROMPT
+
+
+def test_kernel_retry_message_carries_provable_relations_for_unproven_arguments() -> None:
+    plain = _kernel_retry_message("RELATION_ARGUMENT_NOT_PROVEN")
+    assert "Currently provable" not in plain
+
+    listed = _kernel_retry_message(
+        "RELATION_ARGUMENT_NOT_PROVEN",
+        provable_relations=("raw_payments", "raw_orders"),
+    )
+    assert "Currently provable for this tool: raw_payments, raw_orders." in listed
+
+    other = _kernel_retry_message(
+        "DUPLICATE_TOOL_CALL",
+        provable_relations=("raw_payments",),
+    )
+    assert "Currently provable" not in other
 
 
 class _FailingAgent:

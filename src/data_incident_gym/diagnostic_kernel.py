@@ -718,6 +718,18 @@ class DiagnosticKernel:
     def evidence_records(self) -> tuple[EvidenceRecord, ...]:
         return tuple(self._records)
 
+    def provable_relations_by_tool(self) -> dict[str, tuple[str, ...]]:
+        """Return the exact relation whitelist each relation tool would accept now."""
+
+        known = self._known_relation_names()
+        whitelist: dict[str, tuple[str, ...]] = {}
+        for tool_name, observable in self._observable_relations_by_tool.items():
+            accepted = set(observable) | known
+            if tool_name == "get_relation_history":
+                accepted |= self._incident_subjects
+            whitelist[tool_name] = tuple(sorted(accepted))
+        return whitelist
+
     def snapshot(self, *, model_requests_used: int) -> InvestigationState:
         if type(model_requests_used) is not int or not 0 <= model_requests_used <= (
             self._model_request_limit

@@ -70,10 +70,10 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v6"
+KERNEL_PROMPT_VERSION = "p1.kernel.v7"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v5"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v6"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -618,7 +618,7 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
         )
 
 
-def _kernel_state_summary(snapshot: InvestigationState) -> str:
+def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState) -> str:
     """Project the model-visible investigation ledger for the current request."""
 
     payload = {
@@ -634,6 +634,10 @@ def _kernel_state_summary(snapshot: InvestigationState) -> str:
             }
             for gap in snapshot.gaps
         ],
+        "provable_relations": {
+            tool_name: list(relations)
+            for tool_name, relations in kernel.provable_relations_by_tool().items()
+        },
         "model_requests_remaining": snapshot.model_requests_remaining,
         "tool_calls_remaining": snapshot.tool_calls_remaining,
     }
@@ -641,7 +645,8 @@ def _kernel_state_summary(snapshot: InvestigationState) -> str:
         "CURRENT INVESTIGATION LEDGER (controller-maintained; authoritative):\n"
         + _canonical_json(payload)
         + "\nUse a fresh gap_id for every business call; reference only these hypothesis IDs; "
-        "budget remaining requests conservatively."
+        "query only relations listed under provable_relations for that tool or relations "
+        "already returned by accepted evidence; budget remaining requests conservatively."
     )
 
 
@@ -658,11 +663,15 @@ def _kernel_state_prepare(
     if not snapshot.hypotheses and not snapshot.gaps:
         return tool_def
     description = tool_def.description or ""
-    ledger = _kernel_state_summary(snapshot)
+    ledger = _kernel_state_summary(kernel, snapshot)
     return replace(tool_def, description=f"{description}\n\n{ledger}" if description else ledger)
 
 
-def _kernel_retry_message(code: str) -> str:
+def _kernel_retry_message(
+    code: str,
+    *,
+    provable_relations: tuple[str, ...] | None = None,
+) -> str:
     messages = {
         "ARGUMENTS_INVALID": "Send only the business arguments for the selected tool.",
         "GAP_TOOL_MISMATCH": "Choose the business tool matching the declared evidence gap.",
@@ -676,7 +685,11 @@ def _kernel_retry_message(code: str) -> str:
         "DUPLICATE_TOOL_CALL": "Do not repeat an equivalent successful query.",
         "EVIDENCE_GAP_OPEN": "Close all decisive evidence gaps before confirming.",
     }
-    return f"{code}: {messages.get(code, 'Correct the structured investigation decision.')}"
+    message = messages.get(code, "Correct the structured investigation decision.")
+    if code == "RELATION_ARGUMENT_NOT_PROVEN" and provable_relations:
+        listed = ", ".join(provable_relations)
+        message += f" Currently provable for this tool: {listed}."
+    return f"{code}: {message}"
 
 
 def _usage_limit_reason(error: UsageLimitExceeded) -> str:
@@ -1136,7 +1149,13 @@ def _execute_evidence(
             error_code=_controller_error_code(error.code),
             started_at=started_at,
         )
-        raise ToolFailed(_kernel_retry_message(error.code)) from None
+        provable = None
+        if (
+            error.code == "RELATION_ARGUMENT_NOT_PROVEN"
+            and state.kernel is not None
+        ):
+            provable = state.kernel.provable_relations_by_tool().get(tool_name)
+        raise ToolFailed(_kernel_retry_message(error.code, provable_relations=provable)) from None
 
     try:
         records = tuple(call())

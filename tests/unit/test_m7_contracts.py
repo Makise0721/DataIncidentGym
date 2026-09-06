@@ -635,7 +635,9 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
     assert "CURRENT INVESTIGATION LEDGER" not in tool_descriptions[0]
     assert '"g_locate"' in tool_descriptions[1]
     assert '"CLOSED"' in tool_descriptions[1]
+    assert '"provable_relations"' in tool_descriptions[1]
     assert '"g_schema"' in tool_descriptions[2]
+    assert '"raw_payments"' in tool_descriptions[2]
     assert "incident_case_id" not in tool_descriptions[1]
 
 
