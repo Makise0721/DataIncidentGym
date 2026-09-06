@@ -121,7 +121,7 @@ $env:MIMO_API_KEY = '<your-api-key>'
 ```
 
 默认配置使用 OpenAI-compatible 的 `https://api.xiaomimimo.com/v1` 和
-`mimo-v2.5`。`.env.diagnostic` 已被 Git 忽略，密钥不得写入仓库。
+`mimo-v2.5-pro`。`.env.diagnostic` 已被 Git 忽略，密钥不得写入仓库。
 
 运行诊断前可执行环境检查：
 

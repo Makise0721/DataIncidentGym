@@ -98,7 +98,7 @@ DOCTOR_RECOMMENDATIONS_ZH = {
     "CHECK_PROFILE_READ_ONLY": "建议检查诊断账号的只读聚合读取和基线一致性。",
     "CHECK_PROFILE_BOUNDS": "建议检查 profile 输出上限和非法关系探针。",
     "CHECK_MODEL_ENDPOINT": "建议检查模型服务 endpoint 与 MIMO_API_KEY 配置。",
-    "CHECK_MIMO_MODEL_ACCESS": "建议确认 MiMo 账号可访问 mimo-v2.5。",
+    "CHECK_MIMO_MODEL_ACCESS": "建议确认 MiMo 账号可访问 mimo-v2.5-pro。",
     "CHECK_MODEL_TOOL_CALLING": "建议检查模型的工具调用和结构化输出能力。",
 }
 

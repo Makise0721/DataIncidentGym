@@ -66,6 +66,7 @@ def test_canonical_manifest_path_accepts_approved_rerun_identities() -> None:
         "p1-formal-v5",
         "p1-formal-v6",
         "p1-formal-v7",
+        "p1-formal-v8",
     ):
         resolved = _canonical_benchmark_manifest_path(
             Path(f"config/benchmark/{manifest_id}.json")

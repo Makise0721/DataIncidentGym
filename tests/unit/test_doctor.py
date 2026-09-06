@@ -77,7 +77,7 @@ def test_for_project_model_probe_uses_one_post_and_preserves_doctor_checks(
             return None
 
         def read(self, _limit: int) -> bytes:
-            return b'{"data":[{"id":"mimo-v2.5"}]}'
+            return b'{"data":[{"id":"mimo-v2.5-pro"}]}'
 
     monkeypatch.setattr(doctor_module, "OpenAIProvider", provider_factory)
     monkeypatch.setattr(
@@ -89,7 +89,7 @@ def test_for_project_model_probe_uses_one_post_and_preserves_doctor_checks(
     settings = DiagnosticSettings(
         _env_file=None,
         model_base_url="https://example.invalid/v1",
-        model_name="mimo-v2.5",
+        model_name="mimo-v2.5-pro",
         model_api_key="offline-test-key",
     )
     runner = DoctorRunner.for_project(settings, tmp_path)

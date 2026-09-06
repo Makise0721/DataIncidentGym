@@ -26,7 +26,7 @@ class DiagnosticSettings(BaseSettings):
     postgres_user: Literal["dig_reader"] = "dig_reader"
     postgres_password: SecretStr = SecretStr("dig_reader")
     model_base_url: StrictStr = "https://api.xiaomimimo.com/v1"
-    model_name: StrictStr = "mimo-v2.5"
+    model_name: StrictStr = "mimo-v2.5-pro"
     model_api_key: SecretStr = Field(
         default=SecretStr("mimo-api-key-required"),
         validation_alias=AliasChoices(

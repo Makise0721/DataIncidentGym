@@ -84,13 +84,13 @@ def test_manifest_rejects_unsafe_model_configuration() -> None:
     with pytest.raises(ValidationError):
         ManifestModelConfiguration(
             provider="openai-compatible",
-            model="mimo-v2.5",
+            model="mimo-v2.5-pro",
             base_url="https://user:password@example.invalid/v1",
         )
     with pytest.raises(ValidationError):
         ManifestModelConfiguration(
             provider="openai-compatible",
-            model="mimo-v2.5",
+            model="mimo-v2.5-pro",
             base_url="https://example.invalid/v1",
             settings_overrides={"temperature": 0},
         )
@@ -174,6 +174,7 @@ def test_manifest_path_is_derived_from_manifest_id() -> None:
     assert manifest_path_for("p1-formal-v5") == Path("config/benchmark/p1-formal-v5.json")
     assert manifest_path_for("p1-formal-v6") == Path("config/benchmark/p1-formal-v6.json")
     assert manifest_path_for("p1-formal-v7") == Path("config/benchmark/p1-formal-v7.json")
+    assert manifest_path_for("p1-formal-v8") == Path("config/benchmark/p1-formal-v8.json")
 
 
 def test_manifest_path_rejects_unversioned_identity() -> None:
@@ -182,7 +183,7 @@ def test_manifest_path_rejects_unversioned_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
         manifest_path_for("p2-formal-v1")
     with pytest.raises(BenchmarkManifestError):
-        manifest_path_for("p1-formal-v8")
+        manifest_path_for("p1-formal-v9")
 
 
 def test_build_manifest_accepts_approved_rerun_identities() -> None:
@@ -193,6 +194,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
         "p1-formal-v5",
         "p1-formal-v6",
         "p1-formal-v7",
+        "p1-formal-v8",
     ):
         manifest = build_manifest(
             "b" * 40,
@@ -207,7 +209,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
 
 def test_build_manifest_rejects_unapproved_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
-        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v8")
+        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v9")
 
 
 def test_freeze_manifest_writes_to_id_derived_path(tmp_path: Path) -> None:

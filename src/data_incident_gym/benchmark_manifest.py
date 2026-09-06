@@ -50,7 +50,7 @@ MANIFEST_SCHEMA_VERSION = "p1.benchmark_manifest.v1"
 MANIFEST_ID = "p1-formal-v1"
 MANIFEST_PATH = Path("config/benchmark/p1-formal-v1.json")
 DEFAULT_FORMAL_PROVIDER = "openai-compatible"
-DEFAULT_FORMAL_MODEL = "mimo-v2.5"
+DEFAULT_FORMAL_MODEL = "mimo-v2.5-pro"
 DEFAULT_FORMAL_BASE_URL = "https://api.xiaomimimo.com/v1"
 
 FORMAL_SCENARIO_IDS = (
@@ -87,6 +87,7 @@ APPROVED_MANIFEST_IDS = (
     "p1-formal-v5",
     "p1-formal-v6",
     "p1-formal-v7",
+    "p1-formal-v8",
 )
 
 
@@ -168,7 +169,7 @@ class ManifestModelConfiguration(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: Literal["openai-compatible"]
-    model: Literal["mimo-v2.5"]
+    model: Literal["mimo-v2.5-pro"]
     base_url: StrictStr
     settings_overrides: dict[str, Any] = Field(default_factory=dict)
 
@@ -520,7 +521,7 @@ def build_manifest(
             + ", ".join(APPROVED_MANIFEST_IDS)
         )
     if model_name != DEFAULT_FORMAL_MODEL:
-        raise BenchmarkManifestError("formal model must be mimo-v2.5")
+        raise BenchmarkManifestError("formal model must be mimo-v2.5-pro")
     return BenchmarkManifest(
         schema_version=MANIFEST_SCHEMA_VERSION,
         manifest_id=manifest_id,

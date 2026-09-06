@@ -38,7 +38,7 @@ def test_diagnostic_model_defaults_are_mimo_and_secret(
     settings = DiagnosticSettings(_env_file=None)
 
     assert settings.model_base_url == "https://api.xiaomimimo.com/v1"
-    assert settings.model_name == "mimo-v2.5"
+    assert settings.model_name == "mimo-v2.5-pro"
     assert isinstance(settings.model_api_key, SecretStr)
     assert settings.model_api_key.get_secret_value() == "mimo-api-key-required"
 

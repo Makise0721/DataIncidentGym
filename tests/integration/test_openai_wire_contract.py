@@ -41,7 +41,7 @@ def _chat_response(message: dict[str, Any], *, prompt_tokens: int = 101) -> dict
         "id": "chatcmpl-wire-contract",
         "object": "chat.completion",
         "created": 1_725_000_000,
-        "model": "mimo-v2.5",
+        "model": "mimo-v2.5-pro",
         "choices": [
             {
                 "index": 0,
@@ -191,7 +191,7 @@ def _diagnosis_runner(
     settings = DiagnosticSettings(
         _env_file=None,
         model_base_url=base_url,
-        model_name="mimo-v2.5",
+        model_name="mimo-v2.5-pro",
         model_api_key="wire-test-key",
     )
     client = AsyncOpenAI(
@@ -200,7 +200,7 @@ def _diagnosis_runner(
         http_client=httpx2.AsyncClient(trust_env=False),
     )
     model = OpenAIChatModel(
-        "mimo-v2.5",
+        "mimo-v2.5-pro",
         provider=OpenAIProvider(openai_client=client),
     )
     return (
@@ -211,7 +211,7 @@ def _diagnosis_runner(
             project_root,
             model=model,
             tools=_EvidenceTools(),
-            model_identity=ModelIdentity("openai-compatible", "mimo-v2.5"),
+            model_identity=ModelIdentity("openai-compatible", "mimo-v2.5-pro"),
         ),
         client,
     )
@@ -226,7 +226,7 @@ def _default_diagnosis_runner(
     settings = DiagnosticSettings(
         _env_file=None,
         model_base_url=base_url,
-        model_name="mimo-v2.5",
+        model_name="mimo-v2.5-pro",
         model_api_key="wire-test-key",
     )
     return DiagnosisRunner.for_run(
@@ -327,7 +327,7 @@ async def test_openai_wire_static_tool_return_final_contract(
     assert wire.errors == []
     assert len(wire.requests) == 2
     assert wire.paths == ["/v1/chat/completions", "/v1/chat/completions"]
-    assert all(request["model"] == "mimo-v2.5" for request in wire.requests)
+    assert all(request["model"] == "mimo-v2.5-pro" for request in wire.requests)
     assert all(request["stream"] is False for request in wire.requests)
     assert all(request["tools"] for request in wire.requests)
     assert all(

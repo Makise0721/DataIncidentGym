@@ -1023,7 +1023,7 @@ def test_runner_binds_manifest_model_configuration_to_runtime_settings(tmp_path:
 
     assert isinstance(evaluation_runner, EvaluationRunner)
     assert evaluation_runner._diagnostic_settings.model_base_url == "https://manifest.example/v1"
-    assert evaluation_runner._diagnostic_settings.model_name == "mimo-v2.5"
+    assert evaluation_runner._diagnostic_settings.model_name == "mimo-v2.5-pro"
 
 
 def test_setup_error_materialization_writes_the_canonical_six_files(tmp_path: Path) -> None:
