@@ -70,10 +70,10 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v7"
+KERNEL_PROMPT_VERSION = "p1.kernel.v8"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v6"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v7"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -206,6 +206,7 @@ _SAFE_CONTROLLER_ERRORS = {
     "NODE_ARGUMENT_NOT_PROVEN",
     "ONTOLOGY_CODE_UNKNOWN",
     "RELATION_ARGUMENT_NOT_PROVEN",
+    "RELATION_NOT_ALLOWED",
     "RUN_CONTEXT_MISMATCH",
 }
 
@@ -676,17 +677,15 @@ def _kernel_retry_message(
         "ARGUMENTS_INVALID": "Send only the business arguments for the selected tool.",
         "GAP_TOOL_MISMATCH": "Choose the business tool matching the declared evidence gap.",
         "KERNEL_INTENT_MISSING": "Every Kernel business call must carry its binding arguments.",
-        "RELATION_ARGUMENT_NOT_PROVEN": (
-            "Use an exact observable relation from context or accepted evidence."
-        ),
         "NODE_ARGUMENT_NOT_PROVEN": "Use a node identifier returned by accepted evidence.",
         "HYPOTHESIS_REFERENCE_UNKNOWN": "Reference only registered hypothesis IDs.",
         "DUPLICATE_GAP_ID": "Use a fresh gap_id for every business call.",
         "DUPLICATE_TOOL_CALL": "Do not repeat an equivalent successful query.",
         "EVIDENCE_GAP_OPEN": "Close all decisive evidence gaps before confirming.",
+        "RELATION_NOT_ALLOWED": "This relation is not queryable in this run.",
     }
     message = messages.get(code, "Correct the structured investigation decision.")
-    if code == "RELATION_ARGUMENT_NOT_PROVEN" and provable_relations:
+    if code == "RELATION_NOT_ALLOWED" and provable_relations:
         listed = ", ".join(provable_relations)
         message += f" Currently provable for this tool: {listed}."
     return f"{code}: {message}"
@@ -783,7 +782,12 @@ def _register_evidence_tools(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
             StrictStr,
-            Field(description="An exact observable relation name returned by evidence."),
+            Field(
+                description=(
+                    "An exact relation name from the run's observable relation list "
+                    "for this tool."
+                )
+            ),
         ],
     ) -> tuple[EvidenceRecord, ...]:
         return _execute_evidence(
@@ -811,7 +815,12 @@ def _register_evidence_tools(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
             StrictStr,
-            Field(description="An exact observable relation name returned by evidence."),
+            Field(
+                description=(
+                    "An exact relation name from the run's observable relation list "
+                    "for this tool."
+                )
+            ),
         ],
     ) -> tuple[EvidenceRecord, ...]:
         return _execute_evidence(
@@ -826,7 +835,12 @@ def _register_evidence_tools(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
             StrictStr,
-            Field(description="An exact observable relation name returned by evidence."),
+            Field(
+                description=(
+                    "An exact relation name from the run's observable relation list "
+                    "for this tool."
+                )
+            ),
         ],
     ) -> tuple[EvidenceRecord, ...]:
         return _execute_evidence(
@@ -906,7 +920,12 @@ def _register_kernel_evidence_tools(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
             StrictStr,
-            Field(description="An exact observable relation name returned by evidence."),
+            Field(
+                description=(
+                    "An exact relation name from the run's observable relation list "
+                    "for this tool."
+                )
+            ),
         ],
         kernel_gap_id: Annotated[
             StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
@@ -966,7 +985,12 @@ def _register_kernel_evidence_tools(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
             StrictStr,
-            Field(description="An exact observable relation name returned by evidence."),
+            Field(
+                description=(
+                    "An exact relation name from the run's observable relation list "
+                    "for this tool."
+                )
+            ),
         ],
         kernel_gap_id: Annotated[
             StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
@@ -997,7 +1021,12 @@ def _register_kernel_evidence_tools(
         ctx: RunContext[_RunState],
         relation_name: Annotated[
             StrictStr,
-            Field(description="An exact observable relation name returned by evidence."),
+            Field(
+                description=(
+                    "An exact relation name from the run's observable relation list "
+                    "for this tool."
+                )
+            ),
         ],
         kernel_gap_id: Annotated[
             StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
@@ -1150,10 +1179,7 @@ def _execute_evidence(
             started_at=started_at,
         )
         provable = None
-        if (
-            error.code == "RELATION_ARGUMENT_NOT_PROVEN"
-            and state.kernel is not None
-        ):
+        if error.code == "RELATION_NOT_ALLOWED" and state.kernel is not None:
             provable = state.kernel.provable_relations_by_tool().get(tool_name)
         raise ToolFailed(_kernel_retry_message(error.code, provable_relations=provable)) from None
 
@@ -1373,7 +1399,6 @@ class DiagnosisRunner:
 
     def _kernel(self, context: ObservableRunContext) -> DiagnosticKernel:
         observable = context.runtime["observable_relations"]
-        brief_subjects = set(context.incident_brief.subjects)
         return DiagnosticKernel.start(
             run_id=self._run_id,
             allowed_root_cause_codes=P1_ROOT_CAUSE_CODES,
@@ -1382,19 +1407,10 @@ class DiagnosisRunner:
             observable_schema_relations=tuple(
                 relation
                 for relation in observable["schema"]
-                if relation in brief_subjects
-                and self._strategy is not DiagnosticStrategy.KERNEL_NO_SCHEMA
+                if self._strategy is not DiagnosticStrategy.KERNEL_NO_SCHEMA
             ),
-            observable_profile_relations=tuple(
-                relation
-                for relation in observable["profile"]
-                if relation in brief_subjects
-            ),
-            observable_history_relations=tuple(
-                relation
-                for relation in observable["history"]
-                if relation in brief_subjects
-            ),
+            observable_profile_relations=tuple(observable["profile"]),
+            observable_history_relations=tuple(observable["history"]),
             incident_subjects=context.incident_brief.subjects,
             health_target_subjects=tuple(
                 observation.subject

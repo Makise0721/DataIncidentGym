@@ -34,13 +34,14 @@ Use one fresh gap_id per business call. Choose the gap kind that matches the bus
 reference only registered hypothesis IDs, and register at least two compatible hypotheses
 before attempting a confirmed diagnosis. Close decisive evidence gaps with successful
 typed tool results. For relation tools, query only relations listed under
-provable_relations in the ledger or relations already returned by accepted evidence; any
-other relation will be rejected. If a relation is rejected as not allowed by the run scope,
-or a relation argument is rejected as unproven, never retry that relation or a variant of
-it: instead query a relation that is provable, register the competing hypothesis on a
-provable call, or finalize INSUFFICIENT_EVIDENCE with an unresolved-evidence declaration
-bound to the blocked gap. If a decisive gap is blocked or the available evidence cannot
-distinguish compatible causes, return INSUFFICIENT_EVIDENCE rather than guessing.
+provable_relations for that tool in the ledger; that list is exact and complete, and any
+relation not on it will be rejected. If a relation is rejected as not allowed by the run
+scope, or a relation argument is rejected as unproven, never retry that relation or a
+variant of it: instead query a relation that is provable, register the competing
+hypothesis on a provable call, or finalize INSUFFICIENT_EVIDENCE with an
+unresolved-evidence declaration bound to the blocked gap. If a decisive gap is blocked or
+the available evidence cannot distinguish compatible causes, return INSUFFICIENT_EVIDENCE
+rather than guessing.
 
 For a required-field NULL, confirm SOURCE_REQUIRED_FIELD_NULL only when a matching upstream
 relation profile reports a positive null_count for the implicated column. A downstream

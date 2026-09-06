@@ -120,7 +120,7 @@ def test_kernel_closes_a_gap_only_after_compatible_evidence() -> None:
     assert state.tool_calls_used == 1
 
 
-def test_kernel_rejects_unproven_node_and_relation_arguments() -> None:
+def test_kernel_rejects_unproven_node_and_disallowed_relation_arguments() -> None:
     kernel = _kernel()
     node_intent = InvestigationIntent(gap_id="g_explain", gap_kind=EvidenceGapKind.EXPLAIN_FAILURE)
     with pytest.raises(KernelError, match="NODE_ARGUMENT_NOT_PROVEN"):
@@ -134,12 +134,17 @@ def test_kernel_rejects_unproven_node_and_relation_arguments() -> None:
         gap_id="g_schema",
         gap_kind=EvidenceGapKind.DISCRIMINATE_SCHEMA,
     )
-    with pytest.raises(KernelError, match="RELATION_ARGUMENT_NOT_PROVEN"):
+    with pytest.raises(KernelError, match="RELATION_NOT_ALLOWED"):
         kernel.prepare_tool(
             intent=relation_intent,
             tool_name="get_relation_schema",
             arguments={"relation_name": "raw_orders"},
         )
+    state = kernel.snapshot(model_requests_used=0)
+    assert state.gaps[0].status is EvidenceGapStatus.BLOCKED
+    assert state.gaps[0].error_code == "RELATION_NOT_ALLOWED"
+    assert state.gaps[0].subject == "raw_orders"
+    assert state.tool_calls_used == 1
 
 
 def test_kernel_rejects_duplicate_tool_attempt_before_state_change() -> None:
@@ -1504,25 +1509,25 @@ def test_kernel_binds_blocked_history_and_watermark_unresolved_evidence() -> Non
         tool_call_limit=8,
         incident_subjects=("raw_orders",),
     )
-    prepared = kernel.prepare_tool(
-        intent=InvestigationIntent(
-            gap_id="g_blocked_history",
-            gap_kind=EvidenceGapKind.COMPARE_HISTORY,
-            new_hypotheses=(
-                Hypothesis(
-                    hypothesis_id="h_permanent_orphan",
-                    root_cause_code="SOURCE_PERMANENT_ORPHAN_PAYMENT",
-                ),
-                Hypothesis(
-                    hypothesis_id="h_late_order",
-                    root_cause_code="NORMAL_LATE_ARRIVING_ORDER",
+    with pytest.raises(KernelError, match="RELATION_NOT_ALLOWED"):
+        kernel.prepare_tool(
+            intent=InvestigationIntent(
+                gap_id="g_blocked_history",
+                gap_kind=EvidenceGapKind.COMPARE_HISTORY,
+                new_hypotheses=(
+                    Hypothesis(
+                        hypothesis_id="h_permanent_orphan",
+                        root_cause_code="SOURCE_PERMANENT_ORPHAN_PAYMENT",
+                    ),
+                    Hypothesis(
+                        hypothesis_id="h_late_order",
+                        root_cause_code="NORMAL_LATE_ARRIVING_ORDER",
+                    ),
                 ),
             ),
-        ),
-        tool_name="get_relation_history",
-        arguments={"relation_name": "raw_orders"},
-    )
-    kernel.record_tool_failure(prepared, "RELATION_NOT_ALLOWED")
+            tool_name="get_relation_history",
+            arguments={"relation_name": "raw_orders"},
+        )
 
     outcome = kernel.finalize(
         KernelDecision(
@@ -1583,16 +1588,16 @@ def test_kernel_binds_m11_history_pair_and_watermark_unresolved_evidence() -> No
         ),
         ("raw_orders", "g_blocked_order_history", ()),
     ):
-        prepared = kernel.prepare_tool(
-            intent=InvestigationIntent(
-                gap_id=gap_id,
-                gap_kind=EvidenceGapKind.COMPARE_HISTORY,
-                new_hypotheses=hypotheses,
-            ),
-            tool_name="get_relation_history",
-            arguments={"relation_name": relation},
-        )
-        kernel.record_tool_failure(prepared, "RELATION_NOT_ALLOWED")
+        with pytest.raises(KernelError, match="RELATION_NOT_ALLOWED"):
+            kernel.prepare_tool(
+                intent=InvestigationIntent(
+                    gap_id=gap_id,
+                    gap_kind=EvidenceGapKind.COMPARE_HISTORY,
+                    new_hypotheses=hypotheses,
+                ),
+                tool_name="get_relation_history",
+                arguments={"relation_name": relation},
+            )
 
     outcome = kernel.finalize(
         KernelDecision(
@@ -1649,9 +1654,9 @@ def test_kernel_rejects_duplicate_claim_without_successful_run_evidence() -> Non
         kernel.finalize(_semantic_duplicate_decision(records))
 
 
-def test_kernel_rejects_profile_relation_not_named_by_public_incident() -> None:
+def test_kernel_rejects_profile_relation_outside_the_observable_list() -> None:
     kernel = _duplicate_kernel()
-    with pytest.raises(KernelError, match="RELATION_ARGUMENT_NOT_PROVEN"):
+    with pytest.raises(KernelError, match="RELATION_NOT_ALLOWED"):
         kernel.prepare_tool(
             intent=InvestigationIntent(
                 gap_id="g_private_profile",
@@ -1660,6 +1665,9 @@ def test_kernel_rejects_profile_relation_not_named_by_public_incident() -> None:
             tool_name="get_relation_data_profile",
             arguments={"relation_name": "raw_orders"},
         )
+    state = kernel.snapshot(model_requests_used=0)
+    assert state.gaps[0].status is EvidenceGapStatus.BLOCKED
+    assert state.gaps[0].error_code == "RELATION_NOT_ALLOWED"
 
 
 def test_kernel_accepts_distance_one_model_for_failed_test_asset_claim() -> None:

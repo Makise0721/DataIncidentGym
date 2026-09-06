@@ -214,9 +214,9 @@ def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> No
 
     assert expected == P1_ROOT_CAUSE_CODES
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
-        "p1.kernel.v7",
+        "p1.kernel.v8",
         "p1.static.v5",
-        "p1.controller.v6",
+        "p1.controller.v7",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)
@@ -265,12 +265,12 @@ def test_kernel_prompt_exposes_the_exact_binding_transport_contract() -> None:
     assert '"root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"' in KERNEL_PROMPT
 
 
-def test_kernel_retry_message_carries_provable_relations_for_unproven_arguments() -> None:
-    plain = _kernel_retry_message("RELATION_ARGUMENT_NOT_PROVEN")
+def test_kernel_retry_message_carries_provable_relations_for_disallowed_relations() -> None:
+    plain = _kernel_retry_message("RELATION_NOT_ALLOWED")
     assert "Currently provable" not in plain
 
     listed = _kernel_retry_message(
-        "RELATION_ARGUMENT_NOT_PROVEN",
+        "RELATION_NOT_ALLOWED",
         provable_relations=("raw_payments", "raw_orders"),
     )
     assert "Currently provable for this tool: raw_payments, raw_orders." in listed

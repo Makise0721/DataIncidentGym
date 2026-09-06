@@ -719,16 +719,12 @@ class DiagnosticKernel:
         return tuple(self._records)
 
     def provable_relations_by_tool(self) -> dict[str, tuple[str, ...]]:
-        """Return the exact relation whitelist each relation tool would accept now."""
+        """Return the exact relation whitelist each relation tool would accept."""
 
-        known = self._known_relation_names()
-        whitelist: dict[str, tuple[str, ...]] = {}
-        for tool_name, observable in self._observable_relations_by_tool.items():
-            accepted = set(observable) | known
-            if tool_name == "get_relation_history":
-                accepted |= self._incident_subjects
-            whitelist[tool_name] = tuple(sorted(accepted))
-        return whitelist
+        return {
+            tool_name: tuple(sorted(relations))
+            for tool_name, relations in self._observable_relations_by_tool.items()
+        }
 
     def snapshot(self, *, model_requests_used: int) -> InvestigationState:
         if type(model_requests_used) is not int or not 0 <= model_requests_used <= (
@@ -811,20 +807,6 @@ class DiagnosticKernel:
             )
         }
 
-    def _known_relation_names(self) -> set[str]:
-        return {
-            relation_name
-            for record in self._records
-            for relation_name in (
-                getattr(record.content, "relation_name", None),
-                *(
-                    node.name
-                    for node in getattr(record.content, "related_nodes", ())
-                ),
-            )
-            if isinstance(relation_name, str)
-        }
-
     def _validate_argument_provenance(
         self,
         tool_name: str,
@@ -844,13 +826,8 @@ class DiagnosticKernel:
             in {"get_relation_schema", "get_relation_data_profile", "get_relation_history"}
             and arguments["relation_name"]
             not in self._observable_relations_by_tool[tool_name]
-            and arguments["relation_name"] not in self._known_relation_names()
-            and not (
-                tool_name == "get_relation_history"
-                and arguments["relation_name"] in self._incident_subjects
-            )
         ):
-            self._error("RELATION_ARGUMENT_NOT_PROVEN", fingerprint)
+            self._error("RELATION_NOT_ALLOWED", fingerprint)
 
     def prepare_tool(
         self,
@@ -881,7 +858,12 @@ class DiagnosticKernel:
             hypothesis_id not in existing_ids for hypothesis_id in intent.hypothesis_ids
         ):
             self._error("HYPOTHESIS_REFERENCE_UNKNOWN", fingerprint)
-        self._validate_argument_provenance(tool_name, validated, fingerprint)
+        try:
+            self._validate_argument_provenance(tool_name, validated, fingerprint)
+        except KernelError as error:
+            if error.code == "RELATION_NOT_ALLOWED" and error.fingerprint == fingerprint:
+                self._record_blocked_relation_gap(intent, tool_name, validated, fingerprint)
+            raise
         prepared = PreparedToolCall(
             gap_id=intent.gap_id,
             tool_name=tool_name,
@@ -908,6 +890,30 @@ class DiagnosticKernel:
         )
         self._prepared_calls[fingerprint] = prepared
         return prepared
+
+    def _record_blocked_relation_gap(
+        self,
+        intent: InvestigationIntent,
+        tool_name: str,
+        validated: dict[str, str],
+        fingerprint: str,
+    ) -> None:
+        """Mirror the tool layer's verdict: the attempt counts and the gap blocks."""
+
+        self._fingerprints.append(fingerprint)
+        self._hypotheses.extend(intent.new_hypotheses)
+        self._gaps.append(
+            EvidenceGap(
+                gap_id=intent.gap_id,
+                gap_kind=intent.gap_kind,
+                hypothesis_ids=intent.hypothesis_ids,
+                tool_name=tool_name,
+                subject=validated.get("relation_name", tool_name),
+                status=EvidenceGapStatus.BLOCKED,
+                error_code="RELATION_NOT_ALLOWED",
+            )
+        )
+        self._revision += 1
 
     def _prepared_gap_index(self, prepared: PreparedToolCall) -> int:
         if self._prepared_calls.get(prepared.fingerprint) != prepared:
