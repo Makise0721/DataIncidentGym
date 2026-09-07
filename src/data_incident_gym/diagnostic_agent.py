@@ -48,6 +48,7 @@ from data_incident_gym.diagnosis import (
     PolicyIdentity,
     RootCauseClaim,
     ToolTraceEvent,
+    TraceEvent,
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.diagnostic_kernel import (
@@ -1606,10 +1607,79 @@ class DiagnosisRunner:
 
     async def diagnose(self) -> DiagnosisRunResult:
         try:
-            return await self._diagnose_once()
+            try:
+                return await self._diagnose_once()
+            except Exception:
+                # _diagnose_once handles everything after run-state construction;
+                # construction-time or teardown failures must still fail closed
+                # into a safe terminal instead of escaping into the harness.
+                return self._safe_terminal_result()
         finally:
             if self._owned_model_client is not None:
-                await self._owned_model_client.close()
+                with suppress(Exception):
+                    await self._owned_model_client.close()
+
+    def _safe_terminal_result(self) -> DiagnosisRunResult:
+        diagnosis = Diagnosis(
+            status=DiagnosisStatus.MODEL_ERROR,
+            run_id=self._run_id,
+            summary="MODEL_RUNTIME_ERROR",
+            confidence=0.0,
+        )
+        trace: tuple[TraceEvent, ...] = ()
+        kernel_state: InvestigationState | None = None
+        if _is_kernel_strategy(self._strategy):
+            kernel_state = InvestigationState(
+                schema_version="p1.investigation.v1",
+                run_id=self._run_id,
+                revision=0,
+                allowed_root_cause_codes=P1_ROOT_CAUSE_CODES,
+                hypotheses=(),
+                gaps=(),
+                assessments=(),
+                claims=(),
+                evidence_inventory=(),
+                tool_fingerprints=(),
+                model_request_limit=self._budget.model_request_limit,
+                model_requests_used=0,
+                model_requests_remaining=self._budget.model_request_limit,
+                tool_call_limit=self._budget.tool_call_limit,
+                tool_calls_used=0,
+                tool_calls_remaining=self._budget.tool_call_limit,
+                final_status=KernelFinalStatus.MODEL_ERROR,
+                gate_reason="MODEL_RUNTIME_ERROR",
+                selected_hypothesis_id=None,
+            )
+            trace = (
+                KernelStateTraceEvent(event_type="KERNEL_STATE", state=kernel_state),
+            )
+        trace = (
+            *trace,
+            DiagnosisTerminalTraceEvent(
+                event_type="DIAGNOSIS_TERMINAL",
+                strategy=self._strategy,
+                status=DiagnosisStatus.MODEL_ERROR,
+                evidence_inventory=(),
+            ),
+        )
+        return DiagnosisRunResult(
+            strategy=self._strategy,
+            policy_identity=self._policy_identity,
+            diagnosis=diagnosis,
+            evidence_records=(),
+            trace=trace,
+            metrics=DiagnosisMetrics(
+                provider=self._model_identity.provider,
+                model=self._model_identity.model,
+                model_requests=0,
+                input_tokens=0,
+                output_tokens=0,
+                tool_call_attempts=0,
+                successful_tool_calls=0,
+                elapsed_ms=0,
+            ),
+            kernel_state=kernel_state,
+        )
 
     async def _diagnose_once(self) -> DiagnosisRunResult:
         kernel = (

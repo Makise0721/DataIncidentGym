@@ -16,6 +16,7 @@ from data_incident_gym.diagnosis import (
     KERNEL_STRATEGIES,
     MODEL_STRATEGIES,
     Diagnosis,
+    DiagnosisStatus,
     DiagnosticStrategy,
 )
 from data_incident_gym.diagnostic_agent import (
@@ -322,6 +323,66 @@ async def test_static_model_schema_excludes_controller_generated_error(tmp_path:
 
     assert result.diagnosis.summary == "MODEL_REQUEST_LIMIT"
     assert '"MODEL_ERROR"' not in json.dumps(observed_schema, sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_kernel_diagnosis_failure_before_run_state_yields_safe_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_public_run(tmp_path)
+    runner = DiagnosisRunner.for_run(
+        RUN_ID,
+        _settings(),
+        DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+        tmp_path,
+        model=FunctionModel(lambda _messages, _info: None),
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+    )
+
+    def broken_kernel(_context: object) -> object:
+        raise RuntimeError("construction exploded")
+
+    monkeypatch.setattr(runner, "_kernel", broken_kernel)
+
+    result = await runner.diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    assert result.diagnosis.summary == "MODEL_RUNTIME_ERROR"
+    assert result.metrics.model_requests == 0
+    assert result.trace[-1].event_type == "DIAGNOSIS_TERMINAL"
+
+
+@pytest.mark.asyncio
+async def test_diagnose_swallows_owned_client_close_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_public_run(tmp_path)
+    runner = DiagnosisRunner.for_run(
+        RUN_ID,
+        _settings(),
+        DiagnosticStrategy.STATIC_SKILL,
+        tmp_path,
+        model=FunctionModel(lambda _messages, _info: None),
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+    )
+
+    class _BrokenClose:
+        async def close(self) -> None:
+            raise RuntimeError("teardown exploded")
+
+    runner._owned_model_client = _BrokenClose()  # type: ignore[assignment]
+
+    async def failing_once() -> object:
+        raise RuntimeError("once exploded")
+
+    monkeypatch.setattr(runner, "_diagnose_once", failing_once)
+
+    result = await runner.diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    assert result.diagnosis.summary == "MODEL_RUNTIME_ERROR"
 
 
 @pytest.mark.asyncio
