@@ -261,7 +261,7 @@ def _efficiency(items: list[dict[str, Any]]) -> dict[str, Any]:
         if not cited:
             continue
         kernel_states = [
-            event.event.state
+            InvestigationState.model_validate(event.event.state)
             for event in item["trace"]
             if isinstance(event.event, KernelStateTraceEvent)
         ]
