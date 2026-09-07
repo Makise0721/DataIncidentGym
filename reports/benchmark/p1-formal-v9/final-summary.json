@@ -1,0 +1,389 @@
+{
+  "cells": {
+    "fixed_rule": 12,
+    "model_backed": 94,
+    "total": 106
+  },
+  "checkout_revision": "493f4af384392c0c4a0843c0ecba4b9d999152e8",
+  "conclusion": {
+    "status": "INVALID",
+    "text": "正式样本存在环境或安全硬门失败，结果无效。"
+  },
+  "doctor": {
+    "status": "PASSED"
+  },
+  "hard_gates": {
+    "artifacts_complete": true,
+    "doctor_passed": true,
+    "evaluator_safety": false,
+    "fixed_rule_zero_model_usage": true,
+    "identity_aligned": true,
+    "kernel_state_valid": true,
+    "ledger_complete": true
+  },
+  "implementation_revision": "0c3cc61489e7a3c59023090a810981ea82b3662f",
+  "invalid_gates": [
+    {
+      "gate": "ENVIRONMENT_VERIFIED",
+      "reason_code": "ENVIRONMENT_VERIFIED_FAILED",
+      "run_id": "8fb1f2190e7d48d28cf3cb168b67c840"
+    }
+  ],
+  "main_metrics": {
+    "DIAGNOSTIC_KERNEL": {
+      "affected_assets_macro_f1": {
+        "label_universe": [
+          "model.jaffle_shop.customers",
+          "model.jaffle_shop.orders",
+          "model.jaffle_shop.stg_payments"
+        ],
+        "labels": 3,
+        "samples": 15,
+        "value": 0.18461538461538463
+      },
+      "claim_evidence_validity": {
+        "lower": 0.8241207763533425,
+        "rate": 1.0,
+        "successes": 18,
+        "total": 18,
+        "upper": 1.0
+      },
+      "no_incident_accuracy": {
+        "lower": 0.6096657120978346,
+        "rate": 1.0,
+        "successes": 6,
+        "total": 6,
+        "upper": 1.0
+      },
+      "paired_success": {
+        "lower": 0.0,
+        "rate": 0.0,
+        "successes": 0,
+        "total": 15,
+        "upper": 0.20388330103584862
+      },
+      "root_cause_accuracy": {
+        "lower": 0.10897453325692374,
+        "rate": 0.26666666666666666,
+        "successes": 4,
+        "total": 15,
+        "upper": 0.5195043405598057
+      },
+      "status_accuracy": {
+        "lower": 0.2021461882430531,
+        "rate": 0.3333333333333333,
+        "successes": 12,
+        "total": 36,
+        "upper": 0.4966600212884348
+      },
+      "unsupported_confirmation_rate": {
+        "lower": 0.03736125910306537,
+        "rate": 0.13333333333333333,
+        "successes": 2,
+        "total": 15,
+        "upper": 0.37881982832322364
+      }
+    },
+    "STATIC_SKILL": {
+      "affected_assets_macro_f1": {
+        "label_universe": [
+          "model.jaffle_shop.customers",
+          "model.jaffle_shop.orders",
+          "model.jaffle_shop.stg_payments"
+        ],
+        "labels": 3,
+        "samples": 15,
+        "value": 0.7979949874686717
+      },
+      "claim_evidence_validity": {
+        "lower": 0.11386511993385592,
+        "rate": 0.21621621621621623,
+        "successes": 8,
+        "total": 37,
+        "upper": 0.3719514839196916
+      },
+      "no_incident_accuracy": {
+        "lower": 0.09677141110578041,
+        "rate": 0.3333333333333333,
+        "successes": 2,
+        "total": 6,
+        "upper": 0.700006684861608
+      },
+      "paired_success": {
+        "lower": 0.011866895493268553,
+        "rate": 0.06666666666666667,
+        "successes": 1,
+        "total": 15,
+        "upper": 0.2981652987378003
+      },
+      "root_cause_accuracy": {
+        "lower": 0.41713547738519774,
+        "rate": 0.6666666666666666,
+        "successes": 10,
+        "total": 15,
+        "upper": 0.8482367556028526
+      },
+      "status_accuracy": {
+        "lower": 0.5033399787115652,
+        "rate": 0.6666666666666666,
+        "successes": 24,
+        "total": 36,
+        "upper": 0.7978538117569468
+      },
+      "unsupported_confirmation_rate": {
+        "lower": 0.0,
+        "rate": 0.0,
+        "successes": 0,
+        "total": 15,
+        "upper": 0.20388330103584862
+      }
+    }
+  },
+  "manifest_id": "p1-formal-v9",
+  "manifest_sha256": "698752e82f3a1865bfc25bd41a52a0f77210529ce50a94c76c944d7e5393cfba",
+  "schema_version": "p1.benchmark_summary.v1",
+  "strategies": {
+    "DIAGNOSTIC_KERNEL": {
+      "affected_assets_macro_f1": {
+        "label_universe": [
+          "model.jaffle_shop.customers",
+          "model.jaffle_shop.orders",
+          "model.jaffle_shop.stg_payments"
+        ],
+        "labels": 3,
+        "samples": 15,
+        "value": 0.18461538461538463
+      },
+      "cells": 36,
+      "claim_evidence_validity": {
+        "lower": 0.8241207763533425,
+        "rate": 1.0,
+        "successes": 18,
+        "total": 18,
+        "upper": 1.0
+      },
+      "completed": 10,
+      "efficiency": {
+        "budget_exhaustion_rate": {
+          "model_request_limit": {
+            "lower": 0.015369986664161853,
+            "rate": 0.05555555555555555,
+            "successes": 2,
+            "total": 36,
+            "upper": 0.18144657208647252
+          },
+          "model_tool_call_limit": {
+            "lower": 0.0,
+            "rate": 0.0,
+            "successes": 0,
+            "total": 36,
+            "upper": 0.09641862859446367
+          }
+        },
+        "elapsed_ms": {
+          "median": 108180.0,
+          "total": 1094565
+        },
+        "equivalent_calls": 0,
+        "exact_duplicate_calls": 3,
+        "model_error_rate": {
+          "lower": 0.395810617556973,
+          "rate": 0.5555555555555556,
+          "successes": 20,
+          "total": 36,
+          "upper": 0.7045873125991978
+        },
+        "passed_cells": 10,
+        "post_decisive_tool_calls_median": 0,
+        "post_decisive_tool_calls_reason": null,
+        "requests": {
+          "median": 4.0,
+          "total": 41
+        },
+        "successful_tools_median": 3.0,
+        "timeout_rate": {
+          "lower": 0.004920407139810443,
+          "rate": 0.027777777777777776,
+          "successes": 1,
+          "total": 36,
+          "upper": 0.14169718653273855
+        },
+        "tokens": {
+          "input_median": 42542.0,
+          "input_total": 408120,
+          "output_median": 5273.5,
+          "output_total": 54537
+        }
+      },
+      "failed": 26,
+      "no_incident_accuracy": {
+        "lower": 0.6096657120978346,
+        "rate": 1.0,
+        "successes": 6,
+        "total": 6,
+        "upper": 1.0
+      },
+      "paired_success": {
+        "lower": 0.0,
+        "rate": 0.0,
+        "successes": 0,
+        "total": 15,
+        "upper": 0.20388330103584862
+      },
+      "root_cause_accuracy": {
+        "lower": 0.10897453325692374,
+        "rate": 0.26666666666666666,
+        "successes": 4,
+        "total": 15,
+        "upper": 0.5195043405598057
+      },
+      "status_accuracy": {
+        "lower": 0.2021461882430531,
+        "rate": 0.3333333333333333,
+        "successes": 12,
+        "total": 36,
+        "upper": 0.4966600212884348
+      },
+      "unsupported_confirmation_rate": {
+        "lower": 0.03736125910306537,
+        "rate": 0.13333333333333333,
+        "successes": 2,
+        "total": 15,
+        "upper": 0.37881982832322364
+      }
+    },
+    "FIXED_RULE": {
+      "cells": 12,
+      "completed": 11,
+      "efficiency": null,
+      "failed": 1
+    },
+    "KERNEL_NO_LINEAGE": {
+      "cells": 5,
+      "completed": 0,
+      "efficiency": null,
+      "failed": 5
+    },
+    "KERNEL_NO_SCHEMA": {
+      "cells": 5,
+      "completed": 0,
+      "efficiency": null,
+      "failed": 5
+    },
+    "NO_TOOL": {
+      "cells": 12,
+      "completed": 0,
+      "efficiency": null,
+      "failed": 12
+    },
+    "STATIC_SKILL": {
+      "affected_assets_macro_f1": {
+        "label_universe": [
+          "model.jaffle_shop.customers",
+          "model.jaffle_shop.orders",
+          "model.jaffle_shop.stg_payments"
+        ],
+        "labels": 3,
+        "samples": 15,
+        "value": 0.7979949874686717
+      },
+      "cells": 36,
+      "claim_evidence_validity": {
+        "lower": 0.11386511993385592,
+        "rate": 0.21621621621621623,
+        "successes": 8,
+        "total": 37,
+        "upper": 0.3719514839196916
+      },
+      "completed": 4,
+      "efficiency": {
+        "budget_exhaustion_rate": {
+          "model_request_limit": {
+            "lower": 0.015369986664161853,
+            "rate": 0.05555555555555555,
+            "successes": 2,
+            "total": 36,
+            "upper": 0.18144657208647252
+          },
+          "model_tool_call_limit": {
+            "lower": 0.015369986664161853,
+            "rate": 0.05555555555555555,
+            "successes": 2,
+            "total": 36,
+            "upper": 0.18144657208647252
+          }
+        },
+        "elapsed_ms": {
+          "median": 102415.0,
+          "total": 436992
+        },
+        "equivalent_calls": 0,
+        "exact_duplicate_calls": 3,
+        "model_error_rate": {
+          "lower": 0.1800445159482992,
+          "rate": 0.3055555555555556,
+          "successes": 11,
+          "total": 36,
+          "upper": 0.4685627285051034
+        },
+        "passed_cells": 4,
+        "post_decisive_tool_calls_median": 2.0,
+        "post_decisive_tool_calls_reason": null,
+        "requests": {
+          "median": 4.0,
+          "total": 16
+        },
+        "successful_tools_median": 3.0,
+        "timeout_rate": {
+          "lower": 0.015369986664161853,
+          "rate": 0.05555555555555555,
+          "successes": 2,
+          "total": 36,
+          "upper": 0.18144657208647252
+        },
+        "tokens": {
+          "input_median": 23786.0,
+          "input_total": 98137,
+          "output_median": 4718.5,
+          "output_total": 18725
+        }
+      },
+      "failed": 32,
+      "no_incident_accuracy": {
+        "lower": 0.09677141110578041,
+        "rate": 0.3333333333333333,
+        "successes": 2,
+        "total": 6,
+        "upper": 0.700006684861608
+      },
+      "paired_success": {
+        "lower": 0.011866895493268553,
+        "rate": 0.06666666666666667,
+        "successes": 1,
+        "total": 15,
+        "upper": 0.2981652987378003
+      },
+      "root_cause_accuracy": {
+        "lower": 0.41713547738519774,
+        "rate": 0.6666666666666666,
+        "successes": 10,
+        "total": 15,
+        "upper": 0.8482367556028526
+      },
+      "status_accuracy": {
+        "lower": 0.5033399787115652,
+        "rate": 0.6666666666666666,
+        "successes": 24,
+        "total": 36,
+        "upper": 0.7978538117569468
+      },
+      "unsupported_confirmation_rate": {
+        "lower": 0.0,
+        "rate": 0.0,
+        "successes": 0,
+        "total": 15,
+        "upper": 0.20388330103584862
+      }
+    }
+  }
+}
