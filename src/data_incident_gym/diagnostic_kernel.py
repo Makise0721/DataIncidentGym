@@ -2,23 +2,38 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
-from enum import StrEnum
-from typing import Annotated, Literal, Self
+from datetime import datetime
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    StrictFloat,
-    StrictInt,
-    StrictStr,
-    model_validator,
+from pydantic import BaseModel
+
+from data_incident_gym import diagnostic_contracts as _contracts
+from data_incident_gym.diagnosis import KernelStateTraceEvent, UnresolvedEvidence
+from data_incident_gym.diagnostic_contracts import (
+    ClaimEvidence,
+    ClaimKind,
+    EvidenceGap,
+    EvidenceGapKind,
+    EvidenceGapStatus,
+    Hypothesis,
+    HypothesisAssessment,
+    HypothesisVerdict,
+    InvestigationIntent,
+    InvestigationState,
+    KernelDecision,
+    KernelError,
+    KernelFinalStatus,
+    KernelOutcome,
+    PreparedToolCall,
+    expected_tool_for_gap,
 )
-
-from data_incident_gym.diagnosis import (
-    KernelStateTraceEvent,
-    UnresolvedEvidence,
+from data_incident_gym.diagnostic_validation import (
+    ValidationContext,
+    validate_asset_claims,
+    validate_health_claim_shape,
+    validate_health_claims,
+    validate_health_run_evidence,
+    validate_root_cause_evidence,
+    validate_unresolved_declarations,
 )
 from data_incident_gym.evidence import (
     DbtLineageFact,
@@ -29,278 +44,15 @@ from data_incident_gym.evidence import (
     RelationHistoryFact,
     RelationSchemaFact,
 )
-from data_incident_gym.profiles import parse_watermark_value
 
-_RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
-_HYPOTHESIS_ID_PATTERN = r"^h_[a-z0-9_]{1,32}$"
-_GAP_ID_PATTERN = r"^g_[a-z0-9_]{1,32}$"
-_EVIDENCE_ID_PATTERN = r"^ev_[0-9a-f]{64}$"
-_FINGERPRINT_PATTERN = r"^[0-9a-f]{64}$"
-_ROOT_CAUSE_PATTERN = r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$"
+# Private pattern aliases preserved for existing importers (e.g. diagnostic_agent).
+_GAP_ID_PATTERN = _contracts._GAP_ID_PATTERN
+_HYPOTHESIS_ID_PATTERN = _contracts._HYPOTHESIS_ID_PATTERN
+_RUN_ID_PATTERN = _contracts._RUN_ID_PATTERN
+_EVIDENCE_ID_PATTERN = _contracts._EVIDENCE_ID_PATTERN
+_FINGERPRINT_PATTERN = _contracts._FINGERPRINT_PATTERN
+_ROOT_CAUSE_PATTERN = _contracts._ROOT_CAUSE_PATTERN
 
-
-class EvidenceGapKind(StrEnum):
-    LOCATE_FAILURE = "LOCATE_FAILURE"
-    EXPLAIN_FAILURE = "EXPLAIN_FAILURE"
-    DISCOVER_SOURCE_RELATION = "DISCOVER_SOURCE_RELATION"
-    DISCRIMINATE_SCHEMA = "DISCRIMINATE_SCHEMA"
-    MAP_IMPACT = "MAP_IMPACT"
-    PROFILE_RELATION = "PROFILE_RELATION"
-    COMPARE_HISTORY = "COMPARE_HISTORY"
-
-
-class EvidenceGapStatus(StrEnum):
-    OPEN = "OPEN"
-    CLOSED = "CLOSED"
-    BLOCKED = "BLOCKED"
-
-
-class HypothesisVerdict(StrEnum):
-    SUPPORTED = "SUPPORTED"
-    REFUTED = "REFUTED"
-
-
-class ClaimKind(StrEnum):
-    ROOT_CAUSE = "ROOT_CAUSE"
-    AFFECTED_ASSET = "AFFECTED_ASSET"
-    HEALTH_STATE = "HEALTH_STATE"
-
-
-class KernelFinalStatus(StrEnum):
-    CONFIRMED = "CONFIRMED"
-    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
-    NO_INCIDENT = "NO_INCIDENT"
-    MODEL_ERROR = "MODEL_ERROR"
-
-
-def _reject_duplicates(values: tuple[object, ...], field_name: str) -> None:
-    if len(values) != len(set(values)):
-        raise ValueError(f"{field_name} must not contain duplicates")
-
-
-class Hypothesis(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    hypothesis_id: StrictStr = Field(pattern=_HYPOTHESIS_ID_PATTERN)
-    root_cause_code: StrictStr = Field(pattern=_ROOT_CAUSE_PATTERN)
-
-
-class HypothesisAssessment(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    hypothesis_id: StrictStr = Field(pattern=_HYPOTHESIS_ID_PATTERN)
-    verdict: HypothesisVerdict
-    evidence_ids: tuple[Annotated[StrictStr, Field(pattern=_EVIDENCE_ID_PATTERN)], ...]
-
-    @model_validator(mode="after")
-    def reject_duplicate_evidence_ids(self) -> Self:
-        if not self.evidence_ids:
-            raise ValueError("assessment evidence_ids must not be empty")
-        _reject_duplicates(self.evidence_ids, "assessment evidence_ids")
-        return self
-
-
-class InvestigationIntent(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["p1.kernel_intent.v1"] = "p1.kernel_intent.v1"
-    gap_id: StrictStr = Field(pattern=_GAP_ID_PATTERN)
-    gap_kind: EvidenceGapKind
-    hypothesis_ids: tuple[
-        Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)],
-        ...,
-    ] = ()
-    new_hypotheses: tuple[Hypothesis, ...] = ()
-
-    @model_validator(mode="after")
-    def reject_duplicate_ids(self) -> Self:
-        _reject_duplicates(self.hypothesis_ids, "intent hypothesis_ids")
-        _reject_duplicates(
-            tuple(item.hypothesis_id for item in self.new_hypotheses),
-            "new hypothesis IDs",
-        )
-        return self
-
-
-class EvidenceGap(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    gap_id: StrictStr = Field(pattern=_GAP_ID_PATTERN)
-    gap_kind: EvidenceGapKind
-    hypothesis_ids: tuple[
-        Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)],
-        ...,
-    ]
-    tool_name: StrictStr
-    subject: StrictStr
-    status: EvidenceGapStatus
-    evidence_ids: tuple[
-        Annotated[StrictStr, Field(pattern=_EVIDENCE_ID_PATTERN)],
-        ...,
-    ] = ()
-    error_code: StrictStr | None = None
-
-    @model_validator(mode="after")
-    def reject_duplicate_ids(self) -> Self:
-        _reject_duplicates(self.hypothesis_ids, "gap hypothesis_ids")
-        _reject_duplicates(self.evidence_ids, "gap evidence_ids")
-        return self
-
-
-class ClaimEvidence(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    kind: ClaimKind
-    value: StrictStr
-    evidence_ids: tuple[
-        Annotated[StrictStr, Field(pattern=_EVIDENCE_ID_PATTERN)],
-        ...,
-    ]
-    relation_name: StrictStr | None = None
-    history_name: StrictStr | None = None
-    bucket: StrictStr | None = None
-    current_value: StrictInt | StrictFloat | None = None
-
-    @model_validator(mode="after")
-    def reject_duplicate_evidence_ids(self) -> Self:
-        _reject_duplicates(self.evidence_ids, "claim evidence_ids")
-        if self.kind is ClaimKind.HEALTH_STATE and (
-            not self.relation_name
-            or not self.history_name
-            or not self.bucket
-            or self.current_value is None
-        ):
-            raise ValueError("health claim requires relation/history/bucket/value")
-        return self
-
-
-class KernelDecision(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["p1.kernel_decision.v1"] = "p1.kernel_decision.v1"
-    status: Literal["CONFIRMED", "INSUFFICIENT_EVIDENCE", "NO_INCIDENT"]
-    run_id: StrictStr = Field(pattern=_RUN_ID_PATTERN)
-    selected_hypothesis_id: StrictStr | None = None
-    assessments: tuple[HypothesisAssessment, ...] = ()
-    claims: tuple[ClaimEvidence, ...] = ()
-    unresolved_evidence: tuple[UnresolvedEvidence, ...] = ()
-    summary: StrictStr
-    recommended_actions: tuple[StrictStr, ...]
-    confidence: Annotated[StrictFloat, Field(ge=0.0, le=1.0)]
-
-    @model_validator(mode="after")
-    def validate_shape(self) -> Self:
-        _reject_duplicates(
-            tuple(item.hypothesis_id for item in self.assessments),
-            "assessment hypothesis IDs",
-        )
-        _reject_duplicates(
-            tuple((item.kind, item.value) for item in self.claims),
-            "claim kind/value pairs",
-        )
-        _reject_duplicates(self.recommended_actions, "recommended_actions")
-        if not self.summary.strip() or any(not item.strip() for item in self.recommended_actions):
-            raise ValueError("decision text must not be blank")
-        if self.status == "CONFIRMED" and self.selected_hypothesis_id is None:
-            raise ValueError("CONFIRMED requires selected_hypothesis_id")
-        if self.status != "CONFIRMED" and self.selected_hypothesis_id is not None:
-            raise ValueError("non-confirmed decision cannot select a hypothesis")
-        if self.status == "INSUFFICIENT_EVIDENCE" and self.claims:
-            raise ValueError("INSUFFICIENT_EVIDENCE cannot contain claims")
-        if self.status != "INSUFFICIENT_EVIDENCE" and self.unresolved_evidence:
-            raise ValueError("only INSUFFICIENT_EVIDENCE can declare unresolved evidence")
-        if self.status == "NO_INCIDENT" and any(
-            item.kind is not ClaimKind.HEALTH_STATE for item in self.claims
-        ):
-            raise ValueError("NO_INCIDENT can contain only health claims")
-        return self
-
-
-class PreparedToolCall(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    gap_id: StrictStr = Field(pattern=_GAP_ID_PATTERN)
-    tool_name: StrictStr
-    arguments: dict[StrictStr, StrictStr]
-    fingerprint: StrictStr = Field(pattern=_FINGERPRINT_PATTERN)
-
-
-class InvestigationState(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    schema_version: Literal["p1.investigation.v1"]
-    run_id: StrictStr = Field(pattern=_RUN_ID_PATTERN)
-    revision: Annotated[StrictInt, Field(ge=0)]
-    allowed_root_cause_codes: tuple[StrictStr, ...]
-    hypotheses: tuple[Hypothesis, ...]
-    gaps: tuple[EvidenceGap, ...]
-    assessments: tuple[HypothesisAssessment, ...]
-    claims: tuple[ClaimEvidence, ...]
-    evidence_inventory: tuple[StrictStr, ...]
-    tool_fingerprints: tuple[StrictStr, ...]
-    model_request_limit: Annotated[StrictInt, Field(gt=0)]
-    model_requests_used: Annotated[StrictInt, Field(ge=0)]
-    model_requests_remaining: Annotated[StrictInt, Field(ge=0)]
-    tool_call_limit: Annotated[StrictInt, Field(gt=0)]
-    tool_calls_used: Annotated[StrictInt, Field(ge=0)]
-    tool_calls_remaining: Annotated[StrictInt, Field(ge=0)]
-    final_status: KernelFinalStatus | None
-    gate_reason: StrictStr | None
-    selected_hypothesis_id: StrictStr | None
-
-    @model_validator(mode="after")
-    def validate_invariants(self) -> Self:
-        _reject_duplicates(self.allowed_root_cause_codes, "ontology members")
-        _reject_duplicates(tuple(item.hypothesis_id for item in self.hypotheses), "hypothesis IDs")
-        _reject_duplicates(tuple(item.gap_id for item in self.gaps), "gap IDs")
-        _reject_duplicates(self.evidence_inventory, "evidence inventory IDs")
-        _reject_duplicates(self.tool_fingerprints, "tool fingerprints")
-        if self.model_requests_used > self.model_request_limit:
-            raise ValueError("model request usage exceeds limit")
-        if self.model_requests_remaining != self.model_request_limit - self.model_requests_used:
-            raise ValueError("model request remaining count is inconsistent")
-        if self.tool_calls_used > self.tool_call_limit:
-            raise ValueError("tool call usage exceeds limit")
-        if self.tool_calls_remaining != self.tool_call_limit - self.tool_calls_used:
-            raise ValueError("tool call remaining count is inconsistent")
-        if self.selected_hypothesis_id is not None and self.selected_hypothesis_id not in {
-            item.hypothesis_id for item in self.hypotheses
-        }:
-            raise ValueError("selected hypothesis must be registered")
-        return self
-
-
-class KernelOutcome(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    status: KernelFinalStatus
-    root_cause_code: StrictStr | None
-    affected_assets: tuple[StrictStr, ...]
-    evidence_ids: tuple[StrictStr, ...]
-    unresolved_evidence: tuple[UnresolvedEvidence, ...] = ()
-    summary: StrictStr
-    recommended_actions: tuple[StrictStr, ...]
-    confidence: Annotated[StrictFloat, Field(ge=0.0, le=1.0)]
-
-
-class KernelError(RuntimeError):
-    def __init__(self, code: str, *, fingerprint: str | None = None) -> None:
-        self.code = code
-        self.fingerprint = fingerprint
-        super().__init__(code)
-        self.__cause__ = None
-        self.__context__ = None
-
-
-_GAP_TOOL: dict[EvidenceGapKind, tuple[str, str | None]] = {
-    EvidenceGapKind.LOCATE_FAILURE: ("get_dbt_run_results", None),
-    EvidenceGapKind.EXPLAIN_FAILURE: ("get_dbt_node_error", None),
-    EvidenceGapKind.DISCOVER_SOURCE_RELATION: ("get_dbt_lineage", "upstream"),
-    EvidenceGapKind.DISCRIMINATE_SCHEMA: ("get_relation_schema", None),
-    EvidenceGapKind.MAP_IMPACT: ("get_dbt_lineage", "downstream"),
-    EvidenceGapKind.PROFILE_RELATION: ("get_relation_data_profile", None),
-    EvidenceGapKind.COMPARE_HISTORY: ("get_relation_history", None),
-}
 _SAFE_TOOL_ERRORS = {
     "EVIDENCE_TOOL_ERROR",
     "INVALID_ARTIFACT",
@@ -335,288 +87,6 @@ def _fingerprint(run_id: str, tool_name: str, arguments: dict[str, str]) -> str:
         sort_keys=True,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _duplicate_count(
-    profile: RelationDataProfileFact,
-    collection: str,
-    name: str,
-) -> int | None:
-    facts = getattr(profile.snapshot, collection)
-    fact = next((item for item in facts if item.name == name), None)
-    return None if fact is None else fact.duplicate_count
-
-
-def _duplicate_root_supported(
-    root_cause_code: str,
-    records: list[EvidenceRecord],
-    incident_subjects: set[str],
-) -> bool:
-    runs = [
-        record.content
-        for record in records
-        if isinstance(record.content, DbtRunResultsFact)
-    ]
-    profiles = [
-        record.content
-        for record in records
-        if isinstance(record.content, RelationDataProfileFact)
-        and record.content.relation_name in incident_subjects
-    ]
-    if len(runs) != 1 or len(profiles) != 1:
-        return False
-    profile = profiles[0]
-    key_count = _duplicate_count(profile, "business_key_duplicates", "id")
-    fingerprint_count = _duplicate_count(
-        profile,
-        "business_fingerprint_duplicates",
-        "order_payment_amount",
-    )
-    payment_method_group = next(
-        (item for item in profile.snapshot.groups if item.name == "payment_method"),
-        None,
-    )
-    if root_cause_code == "SOURCE_EXACT_PAYMENT_DUPLICATE":
-        return (
-            key_count is not None
-            and key_count > 0
-            and fingerprint_count is not None
-            and payment_method_group is not None
-        )
-    if root_cause_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE":
-        return (
-            runs[0].run_status == "SUCCEEDED"
-            and not runs[0].failed_nodes
-            and key_count == 0
-            and fingerprint_count is not None
-            and fingerprint_count > 0
-            and payment_method_group is not None
-        )
-    return False
-
-
-def _orphan_root_supported(
-    records: list[EvidenceRecord],
-    incident_subjects: set[str],
-) -> bool:
-    runs = [
-        record.content
-        for record in records
-        if isinstance(record.content, DbtRunResultsFact)
-    ]
-    if (
-        len(runs) != 1
-        or runs[0].run_status != "SUCCEEDED"
-        or runs[0].dbt_exit_code != 0
-        or runs[0].failed_nodes
-        or runs[0].skipped_nodes
-    ):
-        return False
-
-    profiles = [
-        record.content
-        for record in records
-        if isinstance(record.content, RelationDataProfileFact)
-        and record.content.relation_name in incident_subjects
-        and any(
-            item.name == "order_id_to_raw_orders_id"
-            and item.violation_count > 0
-            for item in record.content.snapshot.relationship_violations
-        )
-    ]
-    if len(profiles) != 1:
-        return False
-
-    histories = [
-        record.content
-        for record in records
-        if isinstance(record.content, RelationHistoryFact)
-        and record.content.relation_name in incident_subjects
-        and record.content.relation_name != profiles[0].relation_name
-    ]
-    if len(histories) != 1:
-        return False
-    series = next(
-        (
-            item
-            for item in histories[0].snapshot.histories
-            if item.name == "order_count_by_day"
-        ),
-        None,
-    )
-    if (
-        series is None
-        or not series.points
-        or series.watermark_column != "order_date"
-        or series.watermark_value is None
-    ):
-        return False
-    try:
-        datetime.fromisoformat(series.watermark_value)
-    except ValueError:
-        return False
-    return True
-
-
-def _public_observation(
-    observations: tuple[tuple[str, str, str], ...],
-    kind: str,
-) -> tuple[str, str] | None:
-    matches = tuple(
-        (subject, value)
-        for observation_kind, subject, value in observations
-        if observation_kind == kind
-    )
-    return matches[0] if len(matches) == 1 else None
-
-
-def _silent_drop_root_supported(
-    root_cause_code: str,
-    records: list[EvidenceRecord],
-    incident_subjects: set[str],
-    observations: tuple[tuple[str, str, str], ...],
-    supporting_records: tuple[EvidenceRecord, ...] = (),
-) -> bool:
-    if root_cause_code != "SOURCE_PAYMENT_INGESTION_LOSS":
-        return False
-    current = _public_observation(observations, "CURRENT_PERIOD_COUNT")
-    expected = _public_observation(observations, "EXPECTED_PERIOD_COUNT")
-    relation_count = _public_observation(observations, "CURRENT_RELATION_COUNT")
-    settled = _public_observation(observations, "SETTLED_PAYMENT_WINDOW_END")
-    if current is None or expected is None or relation_count is None or settled is None:
-        return False
-    current_subject, current_raw = current
-    expected_subject, expected_raw = expected
-    payment_relation, payment_history, bucket = current_subject.split("/") if (
-        current_subject.count("/") == 2
-    ) else ("", "", "")
-    count_relation, relation_count_raw = relation_count
-    order_relation, settled_value = settled
-    if (
-        expected_subject != current_subject
-        or payment_relation not in incident_subjects
-        or order_relation not in incident_subjects
-        or count_relation != payment_relation
-        or payment_history != "payment_count_by_order_date"
-        or bucket != settled_value
-    ):
-        return False
-    try:
-        current_count = int(current_raw)
-        expected_count = int(expected_raw)
-        current_relation_count = int(relation_count_raw)
-        parse_watermark_value(bucket)
-        settled_at = parse_watermark_value(settled_value)
-    except (TypeError, ValueError):
-        return False
-    if (
-        current_count < 0
-        or expected_count <= current_count
-        or current_relation_count < 0
-    ):
-        return False
-
-    runs = [
-        record.content
-        for record in records
-        if isinstance(record.content, DbtRunResultsFact)
-    ]
-    payment_profiles = [
-        record.content
-        for record in records
-        if isinstance(record.content, RelationDataProfileFact)
-        and record.content.relation_name == payment_relation
-    ]
-    order_profiles = [
-        record.content
-        for record in records
-        if isinstance(record.content, RelationDataProfileFact)
-        and record.content.relation_name == order_relation
-    ]
-    if len(runs) != 1 or len(payment_profiles) != 1 or len(order_profiles) != 1:
-        return False
-    run = runs[0]
-    payment_profile = payment_profiles[0]
-    order_profile = order_profiles[0]
-    if (
-        run.run_status != "SUCCEEDED"
-        or run.dbt_exit_code != 0
-        or run.failed_nodes
-        or run.skipped_nodes
-        or payment_profile.snapshot.relation_name != payment_relation
-        or order_profile.snapshot.relation_name != order_relation
-        or payment_profile.snapshot.row_count != current_relation_count
-    ):
-        return False
-    reverse_relationship = next(
-        (
-            item
-            for item in order_profile.snapshot.relationship_violations
-            if item.name == "id_to_raw_payments_order_id"
-        ),
-        None,
-    )
-    if (
-        reverse_relationship is None
-        or reverse_relationship.violation_count != expected_count - current_count
-    ):
-        return False
-
-    payment_histories = [
-        record.content
-        for record in records
-        if isinstance(record.content, RelationHistoryFact)
-        and record.content.relation_name == payment_relation
-    ]
-    order_histories = [
-        record.content
-        for record in records
-        if isinstance(record.content, RelationHistoryFact)
-        and record.content.relation_name == order_relation
-    ]
-    if len(payment_histories) != 1 or len(order_histories) != 1:
-        return False
-    payment_series = tuple(
-        item
-        for item in payment_histories[0].snapshot.histories
-        if item.name == payment_history
-    )
-    order_series = tuple(
-        item
-        for item in order_histories[0].snapshot.histories
-        if item.name == "order_count_by_day"
-    )
-    if len(payment_series) != 1 or len(order_series) != 1:
-        return False
-    payment_point = tuple(
-        point for point in payment_series[0].points if point.bucket == bucket
-    )
-    order_history = order_series[0]
-    if (
-        len(payment_point) != 1
-        or payment_point[0].value != current_count
-        or order_history.watermark_column != "order_date"
-        or order_history.watermark_value is None
-    ):
-        return False
-    try:
-        watermark = parse_watermark_value(order_history.watermark_value)
-    except (TypeError, ValueError):
-        return False
-    if watermark < settled_at:
-        return False
-
-    lineage_records = (*records, *supporting_records)
-    return any(
-        isinstance(record.content, DbtLineageFact)
-        and record.content.direction == "downstream"
-        and record.content.node_id in incident_subjects
-        and any(
-            node.resource_type == "model" and node.distance >= 1
-            for node in record.content.related_nodes
-        )
-        for record in lineage_records
-    )
 
 
 class DiagnosticKernel:
@@ -770,7 +240,7 @@ class DiagnosticKernel:
         arguments: dict[str, str],
         fingerprint: str,
     ) -> None:
-        expected_tool, expected_direction = _GAP_TOOL[intent.gap_kind]
+        expected_tool, expected_direction = expected_tool_for_gap(intent.gap_kind)
         if tool_name != expected_tool:
             self._error("GAP_TOOL_MISMATCH", fingerprint)
         if expected_direction is not None and arguments.get("direction") != expected_direction:
@@ -1065,106 +535,9 @@ class DiagnosticKernel:
         if root_claim.value != selected.root_cause_code:
             self._error("ROOT_CLAIM_MISMATCH")
         root_records = [inventory[evidence_id] for evidence_id in root_claim.evidence_ids]
-        node_errors = tuple(
-            record.content
-            for record in root_records
-            if isinstance(record.content, DbtNodeErrorFact)
-        )
-        has_node_error = bool(node_errors)
-        has_relation_fact = any(
-            isinstance(record.content, (RelationSchemaFact, RelationDataProfileFact))
-            for record in root_records
-        )
-        duplicate_root = root_claim.value in {
-            "SOURCE_EXACT_PAYMENT_DUPLICATE",
-            "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
-        }
-        silent_drop_root = root_claim.value == "SOURCE_PAYMENT_INGESTION_LOSS"
-        orphan_root = root_claim.value == "SOURCE_PERMANENT_ORPHAN_PAYMENT"
-        if silent_drop_root:
-            if not _silent_drop_root_supported(
-                root_claim.value,
-                root_records,
-                self._incident_subjects,
-                self._incident_observations,
-                tuple(self._records),
-            ):
-                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
-        elif orphan_root:
-            if not _orphan_root_supported(root_records, self._incident_subjects):
-                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
-        elif duplicate_root:
-            if not _duplicate_root_supported(
-                root_claim.value,
-                root_records,
-                self._incident_subjects,
-            ):
-                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
-            if root_claim.value == "SOURCE_EXACT_PAYMENT_DUPLICATE":
-                if self._incident_subjects and not any(
-                    error.node_id in self._incident_subjects for error in node_errors
-                ):
-                    self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
-                upstream_relations = {
-                    node.name
-                    for record in self._records
-                    if isinstance(record.content, DbtLineageFact)
-                    and record.content.direction == "upstream"
-                    and record.content.node_id in {error.node_id for error in node_errors}
-                    for node in record.content.related_nodes
-                }
-                if not has_node_error or not has_relation_fact or not any(
-                    getattr(record.content, "relation_name", None) in upstream_relations
-                    for record in root_records
-                    if isinstance(record.content, (RelationSchemaFact, RelationDataProfileFact))
-                ):
-                    self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
-        else:
-            if self._incident_subjects and not any(
-                error.node_id in self._incident_subjects for error in node_errors
-            ):
-                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
-            upstream_relations = {
-                node.name
-                for record in self._records
-                if isinstance(record.content, DbtLineageFact)
-                and record.content.direction == "upstream"
-                and record.content.node_id in {error.node_id for error in node_errors}
-                for node in record.content.related_nodes
-            }
-            if not has_node_error or not has_relation_fact or not any(
-                getattr(record.content, "relation_name", None) in upstream_relations
-                for record in root_records
-                if isinstance(record.content, (RelationSchemaFact, RelationDataProfileFact))
-            ):
-                self._error("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE")
-        for claim in asset_claims:
-            records = [inventory[evidence_id] for evidence_id in claim.evidence_ids]
-            if not any(
-                isinstance(record.content, DbtNodeErrorFact)
-                and record.content.node_id == claim.value
-                for record in records
-            ) and not any(
-                isinstance(record.content, DbtLineageFact)
-                and record.content.direction == "downstream"
-                and any(
-                    node.node_id == claim.value or node.name == claim.value
-                    for node in record.content.related_nodes
-                )
-                for record in records
-            ) and not any(
-                isinstance(record.content, DbtLineageFact)
-                and record.content.direction == "upstream"
-                and record.content.node_id in {error.node_id for error in node_errors}
-                and any(
-                    node.node_id == claim.value
-                    and node.resource_type == "model"
-                    and node.distance == 1
-                    for node in record.content.related_nodes
-                )
-                for record in records
-            ):
-                self._error("ASSET_CLAIM_EVIDENCE_INCOMPATIBLE")
+        context = self._validation_context()
+        validate_root_cause_evidence(context, root_claim.value, root_records)
+        validate_asset_claims(context, asset_claims, root_records, inventory)
         evidence_ids = tuple(
             dict.fromkeys(
                 evidence_id for claim in decision.claims for evidence_id in claim.evidence_ids
@@ -1189,120 +562,16 @@ class DiagnosticKernel:
     def _validate_health(self, decision: KernelDecision) -> KernelOutcome:
         if any(gap.status is not EvidenceGapStatus.CLOSED for gap in self._gaps):
             self._error("EVIDENCE_GAP_OPEN")
-        run_records = [
-            record for record in self._records if isinstance(record.content, DbtRunResultsFact)
-        ]
-        if not run_records or any(
-            record.content.run_status != "SUCCEEDED"
-            or record.content.dbt_exit_code != 0
-            or record.content.failed_nodes
-            or record.content.skipped_nodes
-            for record in run_records
-        ):
-            self._error("HEALTH_RUN_NOT_PROVEN")
+        context = self._validation_context()
+        validate_health_run_evidence(context)
         health_claims = tuple(
             item for item in decision.claims if item.kind is ClaimKind.HEALTH_STATE
         )
-        if not health_claims or len(health_claims) != len(decision.claims):
-            self._error("HEALTH_CLAIM_REQUIRED")
+        validate_health_claim_shape(decision, health_claims)
         inventory = self._closed_records(
             tuple(evidence_id for claim in health_claims for evidence_id in claim.evidence_ids)
         )
-        for claim in health_claims:
-            records = [inventory[evidence_id] for evidence_id in claim.evidence_ids]
-            profile = next(
-                (
-                    record.content
-                    for record in records
-                    if isinstance(record.content, RelationDataProfileFact)
-                    and record.content.relation_name == claim.relation_name
-                ),
-                None,
-            )
-            history = next(
-                (
-                    record.content
-                    for record in records
-                    if isinstance(record.content, RelationHistoryFact)
-                    and record.content.relation_name == claim.relation_name
-                ),
-                None,
-            )
-            if profile is None or history is None:
-                self._error("HEALTH_EVIDENCE_INCOMPATIBLE")
-            history_series = next(
-                (
-                    series
-                    for series in history.snapshot.histories
-                    if series.name == claim.history_name
-                ),
-                None,
-            )
-            if history_series is None:
-                self._error("HEALTH_HISTORY_NOT_DECLARED")
-            if self._health_target_subjects and (
-                f"{claim.relation_name}/{claim.history_name}/{claim.bucket}"
-                not in self._health_target_subjects
-            ):
-                self._error("HEALTH_POINT_NOT_ALERT_TARGET")
-            current = next(
-                (
-                    point
-                    for series in (history_series,)
-                    for point in series.points
-                    if point.bucket == claim.bucket
-                ),
-                None,
-            )
-            if current is None or current.value != claim.current_value:
-                self._error("HEALTH_POINT_MISMATCH")
-            if (
-                history.snapshot.relation_name != profile.snapshot.relation_name
-                or history.snapshot.relation_name != claim.relation_name
-            ):
-                self._error("HEALTH_RELATION_MISMATCH")
-            if (
-                history_series.watermark_column != "order_date"
-                or history_series.watermark_value is None
-            ):
-                self._error("HEALTH_WATERMARK_NOT_PROVEN")
-            is_current_partition = current.bucket == history_series.watermark_value
-            try:
-                watermark = parse_watermark_value(history_series.watermark_value)
-            except (TypeError, ValueError):
-                self._error("HEALTH_WATERMARK_INVALID")
-            if is_current_partition:
-                if history_series.sla_seconds is None:
-                    self._error("HEALTH_SLA_NOT_DECLARED")
-                if (
-                    self._incident_logical_observed_at is None
-                    or self._incident_logical_observed_at.tzinfo is None
-                    or self._incident_logical_observed_at.utcoffset() is None
-                ):
-                    self._error("HEALTH_WATERMARK_INVALID")
-                lag = (
-                    self._incident_logical_observed_at.astimezone(UTC)
-                    - watermark
-                ).total_seconds()
-                if lag < 0 or lag > history_series.sla_seconds:
-                    self._error("HEALTH_SLA_NOT_SATISFIED")
-            else:
-                try:
-                    current_bucket = parse_watermark_value(current.bucket)
-                except (TypeError, ValueError):
-                    self._error("HEALTH_WATERMARK_INVALID")
-                if current_bucket > watermark:
-                    self._error("HEALTH_POINT_AFTER_WATERMARK")
-            if not is_current_partition:
-                prior = [
-                    point.value
-                    for series in history.snapshot.histories
-                    if series.name == claim.history_name
-                    for point in series.points
-                    if point.periodic_key == current.periodic_key and point.bucket < current.bucket
-                ]
-                if len(prior) < 4 or not min(prior) <= current.value <= max(prior):
-                    self._error("HEALTH_RANGE_NOT_PROVEN")
+        validate_health_claims(context, health_claims, inventory)
         evidence_ids = tuple(
             dict.fromkeys(
                 evidence_id for claim in health_claims for evidence_id in claim.evidence_ids
@@ -1322,77 +591,33 @@ class DiagnosticKernel:
             confidence=decision.confidence,
         )
 
+    def _validation_context(self) -> ValidationContext:
+        return ValidationContext(
+            incident_subjects=frozenset(self._incident_subjects),
+            health_target_subjects=frozenset(self._health_target_subjects),
+            incident_logical_observed_at=self._incident_logical_observed_at,
+            incident_observations=self._incident_observations,
+            all_records=tuple(self._records),
+        )
+
     def _validate_unresolved_declarations(
         self,
         declarations: tuple[UnresolvedEvidence, ...],
     ) -> None:
-        _reject_duplicates(
-            tuple(
-                (item.evidence_kind, item.subject, item.reason_code)
-                for item in declarations
-            ),
-            "unresolved evidence declarations",
+        def blocked_gaps(gap_kind: EvidenceGapKind) -> frozenset[tuple[str, str]]:
+            return frozenset(
+                (gap.subject, gap.error_code)
+                for gap in self._gaps
+                if gap.gap_kind is gap_kind and gap.status is EvidenceGapStatus.BLOCKED
+            )
+
+        validate_unresolved_declarations(
+            self._validation_context(),
+            declarations,
+            blocked_schema=blocked_gaps(EvidenceGapKind.DISCRIMINATE_SCHEMA),
+            blocked_profiles=blocked_gaps(EvidenceGapKind.PROFILE_RELATION),
+            blocked_histories=blocked_gaps(EvidenceGapKind.COMPARE_HISTORY),
         )
-        blocked_schema = {
-            (gap.subject, gap.error_code)
-            for gap in self._gaps
-            if (
-                gap.gap_kind is EvidenceGapKind.DISCRIMINATE_SCHEMA
-                and gap.status is EvidenceGapStatus.BLOCKED
-            )
-        }
-        blocked_profiles = {
-            (gap.subject, gap.error_code)
-            for gap in self._gaps
-            if (
-                gap.gap_kind is EvidenceGapKind.PROFILE_RELATION
-                and gap.status is EvidenceGapStatus.BLOCKED
-            )
-        }
-        blocked_histories = {
-            (gap.subject, gap.error_code)
-            for gap in self._gaps
-            if (
-                gap.gap_kind is EvidenceGapKind.COMPARE_HISTORY
-                and gap.status is EvidenceGapStatus.BLOCKED
-            )
-        }
-        known_subjects = {
-            node_id
-            for record in self._records
-            for node_id in (
-                getattr(record.content, "node_id", None),
-                *(
-                    item.node_id
-                    for item in getattr(record.content, "related_nodes", ())
-                ),
-            )
-            if isinstance(node_id, str)
-        }
-        known_subjects.update(
-            node_id
-            for record in self._records
-            if isinstance(record.content, DbtRunResultsFact)
-            for node_id in (*record.content.failed_nodes, *record.content.skipped_nodes)
-        )
-        for item in declarations:
-            if item.evidence_kind == "RELATION_SCHEMA":
-                if (item.subject, item.reason_code) not in blocked_schema:
-                    self._error("UNRESOLVED_EVIDENCE_UNBOUND")
-            elif item.evidence_kind == "RELATION_DATA_PROFILE":
-                if (item.subject, item.reason_code) not in blocked_profiles:
-                    self._error("UNRESOLVED_EVIDENCE_UNBOUND")
-            elif item.evidence_kind == "RELATION_HISTORY":
-                if (item.subject, item.reason_code) not in blocked_histories:
-                    self._error("UNRESOLVED_EVIDENCE_UNBOUND")
-            elif item.evidence_kind in {"INGESTION_WATERMARK", "PAYMENT_EVENT_IDENTITY"}:
-                if (
-                    item.reason_code != "NOT_OBSERVABLE"
-                    or item.subject not in self._incident_subjects
-                ):
-                    self._error("UNRESOLVED_EVIDENCE_UNBOUND")
-            elif item.subject not in known_subjects:
-                self._error("UNRESOLVED_EVIDENCE_UNBOUND")
 
     def finalize(self, decision: KernelDecision) -> KernelOutcome:
         if self._final_status is not None:

@@ -14,9 +14,11 @@ from data_incident_gym.diagnostic_kernel import (
     HypothesisAssessment,
     HypothesisVerdict,
     InvestigationIntent,
+    InvestigationState,
     KernelDecision,
     KernelError,
     KernelFinalStatus,
+    KernelOutcome,
 )
 from data_incident_gym.evidence import (
     DbtLineageFact,
@@ -1828,3 +1830,228 @@ def test_kernel_accepts_distance_one_model_for_failed_test_asset_claim() -> None
     )
 
     assert outcome.affected_assets == (model_id,)
+
+
+def _confirmed_kernel_with_closed_gap() -> tuple[DiagnosticKernel, EvidenceRecord]:
+    kernel = _kernel()
+    intent = InvestigationIntent(gap_id="g_locate", gap_kind=EvidenceGapKind.LOCATE_FAILURE)
+    prepared = kernel.prepare_tool(
+        intent=intent,
+        tool_name="get_dbt_run_results",
+        arguments={"run_id": RUN_ID},
+    )
+    record = _run_results()
+    kernel.record_tool_result(prepared, (record,))
+    return kernel, record
+
+
+def test_kernel_keeps_first_error_code_when_tool_mapping_and_scope_both_fail() -> None:
+    kernel = _kernel()
+    intent = InvestigationIntent(gap_id="g_locate", gap_kind=EvidenceGapKind.LOCATE_FAILURE)
+    before = kernel.snapshot(model_requests_used=0)
+
+    with pytest.raises(KernelError) as error:
+        kernel.prepare_tool(
+            intent=intent,
+            tool_name="get_dbt_node_error",
+            arguments={"run_id": "b" * 32, "node_id": "model.unknown"},
+        )
+
+    assert error.value.code == "GAP_TOOL_MISMATCH"
+    assert kernel.snapshot(model_requests_used=0) == before
+
+
+def test_kernel_keeps_revision_and_status_when_finalize_is_rejected() -> None:
+    kernel, _ = _confirmed_kernel_with_closed_gap()
+    before = kernel.snapshot(model_requests_used=0)
+    decision = KernelDecision(
+        status="CONFIRMED",
+        run_id=RUN_ID,
+        selected_hypothesis_id="h_missing",
+        assessments=(),
+        summary="Missing hypotheses must not commit state.",
+        recommended_actions=(),
+        confidence=0.1,
+    )
+
+    with pytest.raises(KernelError) as error:
+        kernel.finalize(decision)
+
+    assert error.value.code == "ALTERNATIVE_HYPOTHESIS_REQUIRED"
+    after = kernel.snapshot(model_requests_used=0)
+    assert after == before
+    assert after.final_status is None
+    assert after.gate_reason is None
+
+
+def test_kernel_rejects_second_finalize_after_confirmed_outcome() -> None:
+    kernel = _duplicate_kernel()
+    records = _duplicate_records()
+    _close_duplicate_records(kernel, records)
+    outcome = kernel.finalize(_semantic_duplicate_decision(records))
+    assert outcome.status is KernelFinalStatus.CONFIRMED
+    before = kernel.snapshot(model_requests_used=0)
+
+    with pytest.raises(KernelError) as error:
+        kernel.finalize(_semantic_duplicate_decision(records))
+
+    assert error.value.code == "KERNEL_FINALIZED"
+    assert kernel.snapshot(model_requests_used=0) == before
+
+
+def test_kernel_confirmed_outcome_projection_keeps_evidence_order() -> None:
+    kernel = _duplicate_kernel()
+    records = _duplicate_records()
+    _close_duplicate_records(kernel, records)
+
+    outcome = kernel.finalize(_semantic_duplicate_decision(records))
+    run, lineage, _, profile = records
+
+    assert isinstance(outcome, KernelOutcome)
+    assert outcome.status is KernelFinalStatus.CONFIRMED
+    assert outcome.root_cause_code == "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"
+    assert outcome.evidence_ids == (
+        run.evidence_id,
+        profile.evidence_id,
+        lineage.evidence_id,
+    )
+    state = kernel.snapshot(model_requests_used=0)
+    assert state.final_status is KernelFinalStatus.CONFIRMED
+    assert state.gate_reason == "CONFIRMED"
+    assert state.selected_hypothesis_id == "h_semantic_duplicate"
+
+
+def test_kernel_model_error_outcome_keeps_revision_and_blocks_further_calls() -> None:
+    kernel, _ = _confirmed_kernel_with_closed_gap()
+    before_revision = kernel.snapshot(model_requests_used=0).revision
+
+    outcome = kernel.terminate_model_error("MODEL_TIMEOUT")
+
+    assert outcome.status is KernelFinalStatus.MODEL_ERROR
+    assert outcome.root_cause_code is None
+    assert outcome.affected_assets == ()
+    assert outcome.evidence_ids == ()
+    assert outcome.confidence == 0.0
+    state = kernel.snapshot(model_requests_used=0)
+    assert state.final_status is KernelFinalStatus.MODEL_ERROR
+    assert state.gate_reason == "MODEL_TIMEOUT"
+    assert state.revision == before_revision + 1
+    with pytest.raises(KernelError, match="KERNEL_FINALIZED"):
+        kernel.terminate_model_error("MODEL_TIMEOUT")
+
+
+def test_kernel_public_contract_schema_shape_is_stable() -> None:
+    decision_schema = KernelDecision.model_json_schema()
+    state_schema = InvestigationState.model_json_schema()
+    outcome_schema = KernelOutcome.model_json_schema()
+
+    assert decision_schema["properties"]["schema_version"] == {
+        "const": "p1.kernel_decision.v1",
+        "default": "p1.kernel_decision.v1",
+        "title": "Schema Version",
+        "type": "string",
+    }
+    assert state_schema["properties"]["schema_version"] == {
+        "const": "p1.investigation.v1",
+        "title": "Schema Version",
+        "type": "string",
+    }
+    assert outcome_schema["required"] == [
+        "status",
+        "root_cause_code",
+        "affected_assets",
+        "evidence_ids",
+        "summary",
+        "recommended_actions",
+        "confidence",
+    ]
+    assert set(KernelDecision.model_fields) == {
+        "assessments",
+        "claims",
+        "confidence",
+        "recommended_actions",
+        "run_id",
+        "schema_version",
+        "selected_hypothesis_id",
+        "status",
+        "summary",
+        "unresolved_evidence",
+    }
+
+
+def test_kernel_domain_rejection_does_not_commit_final_state() -> None:
+    kernel = _duplicate_kernel()
+    records = _duplicate_records(
+        id_duplicates=0,
+        fingerprint_duplicates=0,
+        run_status="SUCCEEDED",
+    )
+    _close_duplicate_records(kernel, records)
+    before = kernel.snapshot(model_requests_used=0)
+
+    with pytest.raises(KernelError, match="ROOT_CLAIM_EVIDENCE_INCOMPATIBLE"):
+        kernel.finalize(_semantic_duplicate_decision(records))
+
+    after = kernel.snapshot(model_requests_used=0)
+    assert after == before
+    assert after.final_status is None
+    assert after.gate_reason is None
+    assert after.claims == ()
+    assert after.selected_hypothesis_id is None
+
+
+def test_kernel_health_domain_rejection_does_not_commit_final_state() -> None:
+    kernel, records = _health_kernel(
+        logical_observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        sla_seconds=86400,
+    )
+    before = kernel.snapshot(model_requests_used=0)
+
+    with pytest.raises(KernelError, match="HEALTH_SLA_NOT_SATISFIED"):
+        kernel.finalize(_health_decision(records))
+
+    after = kernel.snapshot(model_requests_used=0)
+    assert after == before
+    assert after.final_status is None
+
+
+def test_payment_rules_do_not_mutate_their_inputs() -> None:
+    from data_incident_gym.diagnostic_payment_rules import (
+        duplicate_root_supported,
+        orphan_root_supported,
+        silent_drop_root_supported,
+    )
+
+    duplicate = list(_duplicate_records())
+    duplicate_before = [record.model_copy(deep=True) for record in duplicate]
+    assert duplicate_root_supported(
+        "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+        duplicate,
+        {"seed.jaffle_shop.raw_payments", "raw_payments"},
+    )
+    assert duplicate == duplicate_before
+
+    orphan = list(_orphan_records())
+    orphan_before = [record.model_copy(deep=True) for record in orphan]
+    assert orphan_root_supported(
+        orphan,
+        {"seed.jaffle_shop.raw_payments", "raw_payments", "raw_orders"},
+    )
+    assert orphan == orphan_before
+
+    silent = list(_silent_records())
+    silent_before = [record.model_copy(deep=True) for record in silent]
+    observations = (
+        ("CURRENT_PERIOD_COUNT", "raw_payments/payment_count_by_order_date/2018-04-07", "1"),
+        ("EXPECTED_PERIOD_COUNT", "raw_payments/payment_count_by_order_date/2018-04-07", "2"),
+        ("CURRENT_RELATION_COUNT", "raw_payments", "112"),
+        ("SETTLED_PAYMENT_WINDOW_END", "raw_orders", "2018-04-07"),
+    )
+    assert silent_drop_root_supported(
+        "SOURCE_PAYMENT_INGESTION_LOSS",
+        silent,
+        {"seed.jaffle_shop.raw_payments", "raw_payments", "raw_orders"},
+        observations,
+        tuple(silent),
+    )
+    assert silent == silent_before
