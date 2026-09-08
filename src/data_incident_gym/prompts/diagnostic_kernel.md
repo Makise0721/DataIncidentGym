@@ -1,24 +1,14 @@
-Every business tool call carries its investigation binding inside its own arguments:
-kernel_gap_id (a fresh gap identifier), kernel_gap_kind (the gap kind this call opens),
-optional kernel_hypothesis_ids (hypotheses this call serves), and optional
-kernel_new_hypotheses (candidates registered with this call). There is no separate
-control text part; never emit prose or Markdown alongside business tool calls.
+Business tool calls carry only their business arguments plus the hypothesis binding:
+optional kernel_hypothesis_ids (hypotheses this call serves) and optional
+kernel_new_hypotheses (candidates registered with this call). The controller allocates
+gap identifiers and records gap kinds itself; never invent gap fields. There is no
+separate control text part; never emit prose or Markdown alongside business tool calls.
 
-One response may contain several independent business tool calls, each with its own
-kernel_gap_id and matching gap kind; batch every evidence query you can already justify
-before responding, because each model request is budgeted and the controller reports the
-remaining request and tool-call budget, plus the provable relation whitelist for each
-relation tool, in the CURRENT INVESTIGATION LEDGER. The final response of the
-investigation carries only the structured decision, with no business calls.
-
-Use only these gap-to-tool mappings:
-- LOCATE_FAILURE -> get_dbt_run_results
-- EXPLAIN_FAILURE -> get_dbt_node_error
-- DISCOVER_SOURCE_RELATION -> get_dbt_lineage upstream
-- DISCRIMINATE_SCHEMA -> get_relation_schema
-- MAP_IMPACT -> get_dbt_lineage downstream
-- PROFILE_RELATION -> get_relation_data_profile
-- COMPARE_HISTORY -> get_relation_history
+One response may contain several independent business tool calls; batch every evidence
+query you can already justify before responding, because each model request is budgeted
+and the controller reports the remaining request and tool-call budget, plus the provable
+relation whitelist for each relation tool, in the CURRENT INVESTIGATION LEDGER. The final
+response of the investigation carries only the structured decision, with no business calls.
 
 Each kernel_new_hypotheses item has exactly hypothesis_id and root_cause_code, for example:
 {"hypothesis_id":"h_source_type","root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"}
@@ -30,15 +20,14 @@ LEGITIMATE_SPLIT_PAYMENT, SOURCE_PERMANENT_ORPHAN_PAYMENT,
 NORMAL_LATE_ARRIVING_ORDER, SOURCE_PAYMENT_INGESTION_LOSS, and
 NORMAL_BUSINESS_PAYMENT_DECLINE.
 
-Use one fresh gap_id per business call. Choose the gap kind that matches the business tool,
-reference only registered hypothesis IDs, and register at least two compatible hypotheses
-before attempting a confirmed diagnosis. Close decisive evidence gaps with successful
-typed tool results. For relation tools, query only relations listed under
-provable_relations for that tool in the ledger; that list is exact and complete, and any
-relation not on it will be rejected. If a relation is rejected as not allowed by the run
-scope, or a relation argument is rejected as unproven, never retry that relation or a
-variant of it: instead query a relation that is provable, register the competing
-hypothesis on a provable call, or finalize INSUFFICIENT_EVIDENCE with an
+Reference only registered hypothesis IDs, and register at least two compatible hypotheses
+before attempting a confirmed diagnosis. Every opened evidence gap must close with a
+successful typed tool result before you confirm a diagnosis. For relation tools, query
+only relations listed under provable_relations for that tool in the ledger; that list is
+exact and complete, and any relation not on it will be rejected. If a relation is rejected
+as not allowed by the run scope, or a relation argument is rejected as unproven, never
+retry that relation or a variant of it: instead query a relation that is provable, register
+the competing hypothesis on a provable call, or finalize INSUFFICIENT_EVIDENCE with an
 unresolved-evidence declaration bound to the blocked gap. If a decisive gap is blocked or
 the available evidence cannot distinguish compatible causes, return INSUFFICIENT_EVIDENCE
 rather than guessing.

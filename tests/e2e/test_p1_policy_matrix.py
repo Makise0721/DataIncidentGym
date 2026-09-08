@@ -155,10 +155,8 @@ def _tool_call(name: str, arguments: dict[str, object], call_id: str) -> ModelRe
     return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
 
 
-def _intent(gap_id: str, gap_kind: str, **values: object) -> dict[str, object]:
+def _intent(**values: object) -> dict[str, object]:
     binding: dict[str, object] = {
-        "kernel_gap_id": gap_id,
-        "kernel_gap_kind": gap_kind,
         "kernel_hypothesis_ids": [],
         "kernel_new_hypotheses": [],
     }
@@ -440,10 +438,7 @@ def _silent_payment_response(
                 "silent-lineage",
             ),
             strategy,
-            _intent(
-                "g_silent_lineage",
-                "MAP_IMPACT",
-                new_hypotheses=_silent_hypotheses(),
+            _intent(new_hypotheses=_silent_hypotheses(),
             ),
         )
     schemas = tuple(
@@ -459,10 +454,7 @@ def _silent_payment_response(
                 "silent-schema",
             ),
             strategy,
-            _intent(
-                "g_silent_schema",
-                "DISCRIMINATE_SCHEMA",
-                hypothesis_ids=_silent_hypothesis_ids(),
+            _intent(hypothesis_ids=_silent_hypothesis_ids(),
             ),
         )
     profiles = _returned_records(messages, "get_relation_data_profile")
@@ -477,10 +469,7 @@ def _silent_payment_response(
                 "silent-payment-profile",
             ),
             strategy,
-            _intent(
-                "g_silent_payment_profile",
-                "PROFILE_RELATION",
-                hypothesis_ids=_silent_hypothesis_ids(),
+            _intent(hypothesis_ids=_silent_hypothesis_ids(),
             ),
         )
     if not any(
@@ -494,10 +483,7 @@ def _silent_payment_response(
                 "silent-order-profile",
             ),
             strategy,
-            _intent(
-                "g_silent_order_profile",
-                "PROFILE_RELATION",
-                hypothesis_ids=_silent_hypothesis_ids(),
+            _intent(hypothesis_ids=_silent_hypothesis_ids(),
             ),
         )
     histories = _returned_records(messages, "get_relation_history")
@@ -519,10 +505,7 @@ def _silent_payment_response(
                     "silent-payment-history",
                 ),
                 strategy,
-                _intent(
-                    "g_silent_payment_history",
-                    "COMPARE_HISTORY",
-                    hypothesis_ids=_silent_hypothesis_ids(),
+                _intent(hypothesis_ids=_silent_hypothesis_ids(),
                 ),
             )
         if attempts == 1:
@@ -533,10 +516,7 @@ def _silent_payment_response(
                     "silent-order-history",
                 ),
                 strategy,
-                _intent(
-                    "g_silent_order_history",
-                    "COMPARE_HISTORY",
-                    hypothesis_ids=_silent_hypothesis_ids(),
+                _intent(hypothesis_ids=_silent_hypothesis_ids(),
                 ),
             )
         return _silent_insufficient_response(
@@ -555,10 +535,7 @@ def _silent_payment_response(
                 "silent-payment-history",
             ),
             strategy,
-            _intent(
-                "g_silent_payment_history",
-                "COMPARE_HISTORY",
-                hypothesis_ids=_silent_hypothesis_ids(),
+            _intent(hypothesis_ids=_silent_hypothesis_ids(),
             ),
         )
     if not order_history:
@@ -569,10 +546,7 @@ def _silent_payment_response(
                 "silent-order-history",
             ),
             strategy,
-            _intent(
-                "g_silent_order_history",
-                "COMPARE_HISTORY",
-                hypothesis_ids=_silent_hypothesis_ids(),
+            _intent(hypothesis_ids=_silent_hypothesis_ids(),
             ),
         )
     return _silent_confirmed_response(
@@ -607,7 +581,7 @@ def _model_response(
 
     if not run_records:
         tool = _tool_call("get_dbt_run_results", {"run_id": run_id}, "run-results")
-        return _with_intent(tool, strategy, _intent("g_locate", "LOCATE_FAILURE"))
+        return _with_intent(tool, strategy, _intent())
 
     run_fact = run_records[-1].content
     if isinstance(run_fact, DbtRunResultsFact) and run_fact.run_status == "SUCCEEDED":
@@ -647,14 +621,14 @@ def _model_response(
                 {"relation_name": "raw_orders"},
                 "profile",
             )
-            return _with_intent(tool, strategy, _intent("g_profile", "PROFILE_RELATION"))
+            return _with_intent(tool, strategy, _intent())
         if not histories:
             tool = _tool_call(
                 "get_relation_history",
                 {"relation_name": "raw_orders"},
                 "history",
             )
-            return _with_intent(tool, strategy, _intent("g_history", "COMPARE_HISTORY"))
+            return _with_intent(tool, strategy, _intent())
         if alert_bucket is None:
             raise AssertionError("health control is missing a current-period observation")
         bucket, value = _health_point(histories[-1], alert_bucket)
@@ -715,7 +689,7 @@ def _model_response(
             {"run_id": run_id, "node_id": node_id},
             "node-error",
         )
-        return _with_intent(tool, strategy, _intent("g_explain", "EXPLAIN_FAILURE"))
+        return _with_intent(tool, strategy, _intent())
 
     failure_node = node_errors[-1].content.node_id
     if failure_node.endswith("unique_stg_payments_payment_id.3744510712"):
@@ -746,7 +720,7 @@ def _model_response(
             {"node_id": failure_node, "direction": "upstream"},
             "upstream",
         )
-        return _with_intent(tool, strategy, _intent("g_source", "DISCOVER_SOURCE_RELATION"))
+        return _with_intent(tool, strategy, _intent())
 
     source_relations = _source_relations(upstream)
     schema_attempts = _tool_attempts(messages, "get_relation_schema")
@@ -780,10 +754,7 @@ def _model_response(
             return _with_intent(
                 tool,
                 strategy,
-                _intent(
-                    "g_schema_null",
-                    "DISCRIMINATE_SCHEMA",
-                    new_hypotheses=new_hypotheses,
+                _intent(new_hypotheses=new_hypotheses,
                 ),
             )
 
@@ -808,10 +779,7 @@ def _model_response(
             return _with_intent(
                 tool,
                 strategy,
-                _intent(
-                    "g_distractor_profile",
-                    "PROFILE_RELATION",
-                    hypothesis_ids=["h_source_null", "h_transform_null"],
+                _intent(hypothesis_ids=["h_source_null", "h_transform_null"],
                 ),
             )
 
@@ -826,10 +794,7 @@ def _model_response(
             return _with_intent(
                 tool,
                 strategy,
-                _intent(
-                    "g_source_profile",
-                    "PROFILE_RELATION",
-                    hypothesis_ids=["h_source_null", "h_transform_null"],
+                _intent(hypothesis_ids=["h_source_null", "h_transform_null"],
                 ),
             )
 
@@ -990,8 +955,6 @@ def _model_response(
             tool,
             strategy,
             _intent(
-                f"g_schema_{schema_attempts + 1}",
-                "DISCRIMINATE_SCHEMA",
                 **(
                     {"new_hypotheses": new_hypotheses}
                     if schema_attempts == 0
@@ -1014,10 +977,7 @@ def _model_response(
             return _with_intent(
                 tool,
                 strategy,
-                _intent(
-                    "g_profile",
-                    "PROFILE_RELATION",
-                    hypothesis_ids=["h_rename", "h_type", "h_cast"],
+                _intent(hypothesis_ids=["h_rename", "h_type", "h_cast"],
                 ),
             )
         if not histories:
@@ -1029,10 +989,7 @@ def _model_response(
             return _with_intent(
                 tool,
                 strategy,
-                _intent(
-                    "g_history",
-                    "COMPARE_HISTORY",
-                    hypothesis_ids=["h_rename", "h_type", "h_cast"],
+                _intent(hypothesis_ids=["h_rename", "h_type", "h_cast"],
                 ),
             )
         evidence_ids = [
@@ -1086,10 +1043,7 @@ def _model_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_impact",
-                "MAP_IMPACT",
-                hypothesis_ids=["h_rename", "h_type", "h_cast"],
+            _intent(hypothesis_ids=["h_rename", "h_type", "h_cast"],
             ),
         )
 
@@ -1405,10 +1359,7 @@ def _orphan_payment_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_orphan_lineage",
-                "MAP_IMPACT",
-                new_hypotheses=_orphan_hypotheses(),
+            _intent(new_hypotheses=_orphan_hypotheses(),
             ),
         )
     if not any(
@@ -1423,10 +1374,7 @@ def _orphan_payment_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_orphan_schema",
-                "DISCRIMINATE_SCHEMA",
-                hypothesis_ids=_orphan_hypothesis_ids(),
+            _intent(hypothesis_ids=_orphan_hypothesis_ids(),
             ),
         )
     if not any(
@@ -1442,10 +1390,7 @@ def _orphan_payment_response(
             return _with_intent(
                 tool,
                 strategy,
-                _intent(
-                    "g_orphan_profile",
-                    "PROFILE_RELATION",
-                    hypothesis_ids=_orphan_hypothesis_ids(),
+                _intent(hypothesis_ids=_orphan_hypothesis_ids(),
                 ),
             )
         return _orphan_insufficient_response(
@@ -1465,10 +1410,7 @@ def _orphan_payment_response(
             return _with_intent(
                 tool,
                 strategy,
-                _intent(
-                    "g_orphan_history",
-                    "COMPARE_HISTORY",
-                    hypothesis_ids=_orphan_hypothesis_ids(),
+                _intent(hypothesis_ids=_orphan_hypothesis_ids(),
                 ),
             )
         return _orphan_insufficient_response(
@@ -1710,10 +1652,7 @@ def _duplicate_payment_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_payment_lineage",
-                "MAP_IMPACT",
-                new_hypotheses=_duplicate_hypotheses(exact=False),
+            _intent(new_hypotheses=_duplicate_hypotheses(exact=False),
             ),
         )
     schemas = tuple(
@@ -1730,10 +1669,7 @@ def _duplicate_payment_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_payment_schema",
-                "DISCRIMINATE_SCHEMA",
-                hypothesis_ids=_duplicate_hypothesis_ids(exact=False),
+            _intent(hypothesis_ids=_duplicate_hypothesis_ids(exact=False),
             ),
         )
     profiles = tuple(
@@ -1751,10 +1687,7 @@ def _duplicate_payment_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_payment_profile",
-                "PROFILE_RELATION",
-                hypothesis_ids=_duplicate_hypothesis_ids(exact=False),
+            _intent(hypothesis_ids=_duplicate_hypothesis_ids(exact=False),
             ),
         )
     if not profiles and (
@@ -1802,10 +1735,7 @@ def _exact_duplicate_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_payment_source",
-                "DISCOVER_SOURCE_RELATION",
-                new_hypotheses=hypotheses,
+            _intent(new_hypotheses=hypotheses,
             ),
         )
     source_relations = _source_relations(lineages)
@@ -1837,10 +1767,7 @@ def _exact_duplicate_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_payment_schema",
-                "DISCRIMINATE_SCHEMA",
-                hypothesis_ids=hypothesis_ids,
+            _intent(hypothesis_ids=hypothesis_ids,
             ),
         )
     profiles = tuple(
@@ -1857,10 +1784,7 @@ def _exact_duplicate_response(
         return _with_intent(
             tool,
             strategy,
-            _intent(
-                "g_payment_profile",
-                "PROFILE_RELATION",
-                hypothesis_ids=hypothesis_ids,
+            _intent(hypothesis_ids=hypothesis_ids,
             ),
         )
     return _duplicate_confirmed_response(

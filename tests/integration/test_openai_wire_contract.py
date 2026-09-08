@@ -376,8 +376,6 @@ async def test_openai_wire_kernel_binding_tool_return_fails_closed_on_bad_final(
                                 "arguments": json.dumps(
                                     {
                                         "run_id": run_id,
-                                        "kernel_gap_id": "g_locate",
-                                        "kernel_gap_kind": "LOCATE_FAILURE",
                                         "kernel_hypothesis_ids": [],
                                         "kernel_new_hypotheses": [],
                                     }
@@ -425,8 +423,11 @@ async def test_openai_wire_kernel_binding_tool_return_fails_closed_on_bad_final(
     assistant = next(message for message in mixed_response if message["role"] == "assistant")
     assert assistant["content"] is None
     arguments = json.loads(assistant["tool_calls"][0]["function"]["arguments"])
-    assert arguments["kernel_gap_id"] == "g_locate"
-    assert arguments["kernel_gap_kind"] == "LOCATE_FAILURE"
+    assert arguments == {
+        "run_id": run_id,
+        "kernel_hypothesis_ids": [],
+        "kernel_new_hypotheses": [],
+    }
     assert assistant["tool_calls"][0]["function"]["name"] == "get_dbt_run_results"
     assert isinstance(assistant["tool_calls"][0]["function"]["arguments"], str)
     assert any(message["role"] == "tool" for message in mixed_response)

@@ -115,7 +115,8 @@ def test_shared_tool_surface_and_budget_are_policy_neutral(tmp_path: Path) -> No
         "get_relation_data_profile",
         "get_relation_history",
     )
-    binding_fields = {"kernel_gap_id", "kernel_gap_kind"}
+    binding_fields = {"kernel_hypothesis_ids", "kernel_new_hypotheses"}
+    auto_fields = {"kernel_gap_id", "kernel_gap_kind"}
     static_schemas = {
         item["name"]: set(item["parameters"].get("properties", {}))
         for item in static._tool_schema_payload
@@ -125,8 +126,13 @@ def test_shared_tool_surface_and_budget_are_policy_neutral(tmp_path: Path) -> No
         for item in kernel._tool_schema_payload
     }
     assert static.tool_schema_sha256 != kernel.tool_schema_sha256
-    assert all(not (binding_fields & fields) for fields in static_schemas.values())
-    assert all(binding_fields <= fields for fields in kernel_schemas.values())
+    assert all(
+        not (binding_fields | auto_fields) & fields for fields in static_schemas.values()
+    )
+    assert all(
+        binding_fields <= fields and not (auto_fields & fields)
+        for fields in kernel_schemas.values()
+    )
     assert static.budget == kernel.budget == DiagnosisBudget(8, 8, 2, 300)
     assert static.policy_identity.strategy_prompt_sha256 != (
         kernel.policy_identity.strategy_prompt_sha256
@@ -176,8 +182,9 @@ def test_static_prompt_is_generic_and_kernel_binding_is_typed_arguments() -> Non
     assert "schema_type_change" not in STATIC_PROMPT
     assert "incident_case_id" not in STATIC_PROMPT
     assert "p1.kernel_intent.v1" not in KERNEL_PROMPT
-    assert "kernel_gap_id" in KERNEL_PROMPT
-    assert "kernel_gap_kind" in KERNEL_PROMPT
+    assert "kernel_gap_id" not in KERNEL_PROMPT
+    assert "kernel_gap_kind" not in KERNEL_PROMPT
+    assert "never invent gap fields" in KERNEL_PROMPT
     assert "kernel_gap_id" not in STATIC_PROMPT
     assert "kernel_gap_kind" not in STATIC_PROMPT
     assert BASE_PROMPT.strip()
@@ -215,9 +222,9 @@ def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> No
 
     assert expected == P1_ROOT_CAUSE_CODES
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
-        "p1.kernel.v8",
+        "p1.kernel.v9",
         "p1.static.v5",
-        "p1.controller.v7",
+        "p1.controller.v8",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)
@@ -250,19 +257,13 @@ def test_both_prompts_require_history_boundary_for_permanent_orphans() -> None:
 
 
 def test_kernel_prompt_exposes_the_exact_binding_transport_contract() -> None:
-    assert "kernel_gap_id" in KERNEL_PROMPT
-    assert "kernel_gap_kind" in KERNEL_PROMPT
     assert "kernel_hypothesis_ids" in KERNEL_PROMPT
     assert "kernel_new_hypotheses" in KERNEL_PROMPT
     assert "CURRENT INVESTIGATION LEDGER" in KERNEL_PROMPT
     assert "provable_relations" in KERNEL_PROMPT
-    assert "LOCATE_FAILURE -> get_dbt_run_results" in KERNEL_PROMPT
-    assert "EXPLAIN_FAILURE -> get_dbt_node_error" in KERNEL_PROMPT
-    assert "DISCOVER_SOURCE_RELATION -> get_dbt_lineage upstream" in KERNEL_PROMPT
-    assert "DISCRIMINATE_SCHEMA -> get_relation_schema" in KERNEL_PROMPT
-    assert "MAP_IMPACT -> get_dbt_lineage downstream" in KERNEL_PROMPT
-    assert "PROFILE_RELATION -> get_relation_data_profile" in KERNEL_PROMPT
-    assert "COMPARE_HISTORY -> get_relation_history" in KERNEL_PROMPT
+    assert "The controller allocates" in KERNEL_PROMPT
+    assert "never invent gap fields" in KERNEL_PROMPT
+    assert "Every opened evidence gap must close" in KERNEL_PROMPT
     assert '"root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"' in KERNEL_PROMPT
 
 

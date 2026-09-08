@@ -35,10 +35,8 @@ def _returned_records(
     return tuple(returned)
 
 
-def _intent(gap_id: str, gap_kind: str, **values: object) -> dict[str, object]:
+def _intent(**values: object) -> dict[str, object]:
     binding: dict[str, object] = {
-        "kernel_gap_id": gap_id,
-        "kernel_gap_kind": gap_kind,
         "kernel_hypothesis_ids": [],
         "kernel_new_hypotheses": [],
     }
@@ -81,7 +79,7 @@ def _scripted_diagnosis(
             parts=[
                 ToolCallPart(
                     "get_dbt_run_results",
-                    {**{"run_id": run_id}, **_intent("g_locate", "LOCATE_FAILURE")},
+                    {**{"run_id": run_id}, **_intent()},
                     tool_call_id="run-results",
                 ),
             ]
@@ -93,7 +91,7 @@ def _scripted_diagnosis(
                     "get_dbt_node_error",
                     {
                         **{"run_id": run_id, "node_id": FAILURE_NODE},
-                        **_intent("g_explain", "EXPLAIN_FAILURE"),
+                        **_intent(),
                     },
                     tool_call_id="node-error",
                 ),
@@ -106,7 +104,7 @@ def _scripted_diagnosis(
                     "get_dbt_lineage",
                     {
                         **{"node_id": FAILURE_NODE, "direction": "upstream"},
-                        **_intent("g_source", "DISCOVER_SOURCE_RELATION"),
+                        **_intent(),
                     },
                     tool_call_id="upstream",
                 ),
@@ -119,10 +117,7 @@ def _scripted_diagnosis(
                     "get_relation_schema",
                     {
                         **{"relation_name": "raw_payments"},
-                        **_intent(
-                            "g_schema",
-                            "DISCRIMINATE_SCHEMA",
-                            new_hypotheses=[
+                        **_intent(new_hypotheses=[
                                 {
                                     "hypothesis_id": "h_rename",
                                     "root_cause_code": "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -145,10 +140,7 @@ def _scripted_diagnosis(
                     "get_dbt_lineage",
                     {
                         **{"node_id": FAILURE_NODE, "direction": "downstream"},
-                        **_intent(
-                            "g_impact",
-                            "MAP_IMPACT",
-                            hypothesis_ids=["h_rename", "h_type"],
+                        **_intent(hypothesis_ids=["h_rename", "h_type"],
                         ),
                     },
                     tool_call_id="downstream",

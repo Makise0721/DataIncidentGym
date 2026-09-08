@@ -303,10 +303,8 @@ class _KernelEvidenceTools:
         return ()
 
 
-def _kernel_intent(gap_id: str, gap_kind: str, **extra: object) -> dict[str, object]:
+def _kernel_binding(**extra: object) -> dict[str, object]:
     binding: dict[str, object] = {
-        "kernel_gap_id": gap_id,
-        "kernel_gap_kind": gap_kind,
         "kernel_hypothesis_ids": [],
         "kernel_new_hypotheses": [],
     }
@@ -329,24 +327,22 @@ async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result
         (
             "get_dbt_run_results",
             {"run_id": RUN_ID},
-            _kernel_intent("g_locate", "LOCATE_FAILURE"),
+            _kernel_binding(),
         ),
         (
             "get_dbt_node_error",
             {"run_id": RUN_ID, "node_id": "model.jaffle_shop.stg_payments"},
-            _kernel_intent("g_explain", "EXPLAIN_FAILURE"),
+            _kernel_binding(),
         ),
         (
             "get_dbt_lineage",
             {"node_id": "model.jaffle_shop.stg_payments", "direction": "upstream"},
-            _kernel_intent("g_source", "DISCOVER_SOURCE_RELATION"),
+            _kernel_binding(),
         ),
         (
             "get_relation_schema",
             {"relation_name": "raw_payments"},
-            _kernel_intent(
-                "g_schema",
-                "DISCRIMINATE_SCHEMA",
+            _kernel_binding(
                 hypothesis_ids=["h_rename", "h_type"],
                 new_hypotheses=[
                     {
@@ -363,9 +359,7 @@ async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result
         (
             "get_dbt_lineage",
             {"node_id": "model.jaffle_shop.stg_payments", "direction": "downstream"},
-            _kernel_intent(
-                "g_impact",
-                "MAP_IMPACT",
+            _kernel_binding(
                 hypothesis_ids=["h_rename", "h_type"],
             ),
         ),
@@ -463,7 +457,24 @@ async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result
     result = await runner.diagnose()
 
     assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
+    assert result.diagnosis.summary == "The payment amount source type changed."
+    assert result.diagnosis.root_cause_code == "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"
+    assert result.diagnosis.affected_assets == (
+        "model.jaffle_shop.stg_payments",
+        "model.jaffle_shop.orders",
+        "model.jaffle_shop.customers",
+    )
+    assert result.diagnosis.evidence_ids == tuple(record.evidence_id for record in records)
     assert result.kernel_state is not None
+    assert result.kernel_state.final_status.value == "CONFIRMED"
+    assert result.kernel_state.selected_hypothesis_id == "h_type"
+    assert [gap.gap_id for gap in result.kernel_state.gaps] == [
+        "g_auto_1",
+        "g_auto_2",
+        "g_auto_3",
+        "g_auto_4",
+        "g_auto_5",
+    ]
     assert result.trace[-2].event_type == "KERNEL_STATE"
     assert result.trace[-1].event_type == "DIAGNOSIS_TERMINAL"
     assert all(
@@ -480,24 +491,22 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
     run_results_call = (
         "get_dbt_run_results",
         {"run_id": RUN_ID},
-        _kernel_intent("g_locate", "LOCATE_FAILURE"),
+        _kernel_binding(),
     )
     node_error_call = (
         "get_dbt_node_error",
         {"run_id": RUN_ID, "node_id": "model.jaffle_shop.stg_payments"},
-        _kernel_intent("g_explain", "EXPLAIN_FAILURE"),
+        _kernel_binding(),
     )
     upstream_call = (
         "get_dbt_lineage",
         {"node_id": "model.jaffle_shop.stg_payments", "direction": "upstream"},
-        _kernel_intent("g_source", "DISCOVER_SOURCE_RELATION"),
+        _kernel_binding(),
     )
     schema_call = (
         "get_relation_schema",
         {"relation_name": "raw_payments"},
-        _kernel_intent(
-            "g_schema",
-            "DISCRIMINATE_SCHEMA",
+        _kernel_binding(
             hypothesis_ids=["h_rename", "h_type"],
             new_hypotheses=[
                 {
@@ -514,9 +523,7 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
     downstream_call = (
         "get_dbt_lineage",
         {"node_id": "model.jaffle_shop.stg_payments", "direction": "downstream"},
-        _kernel_intent(
-            "g_impact",
-            "MAP_IMPACT",
+        _kernel_binding(
             hypothesis_ids=["h_rename", "h_type"],
         ),
     )
@@ -633,10 +640,10 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
     assert sum(isinstance(event, ToolTraceEvent) for event in result.trace) == 5
     assert len(tool_descriptions) == 4
     assert "CURRENT INVESTIGATION LEDGER" not in tool_descriptions[0]
-    assert '"g_locate"' in tool_descriptions[1]
+    assert '"g_auto_1"' in tool_descriptions[1]
     assert '"CLOSED"' in tool_descriptions[1]
     assert '"provable_relations"' in tool_descriptions[1]
-    assert '"g_schema"' in tool_descriptions[2]
+    assert '"g_auto_4"' in tool_descriptions[2]
     assert '"raw_payments"' in tool_descriptions[2]
     assert "incident_case_id" not in tool_descriptions[1]
 
@@ -682,13 +689,15 @@ def test_static_and_kernel_share_public_contracts(tmp_path: Path) -> None:
     )
 
     assert static.tool_schema_sha256 != kernel.tool_schema_sha256
-    binding_fields = {"kernel_gap_id", "kernel_gap_kind"}
+    auto_fields = {"kernel_gap_id", "kernel_gap_kind"}
+    binding_fields = {"kernel_hypothesis_ids", "kernel_new_hypotheses"}
     assert all(
-        not (binding_fields & set(item["parameters"].get("properties", {})))
+        not (auto_fields & set(item["parameters"].get("properties", {})))
         for item in static._tool_schema_payload
     )
     assert all(
-        binding_fields <= set(item["parameters"].get("properties", {}))
+        not (auto_fields & set(item["parameters"].get("properties", {})))
+        and binding_fields <= set(item["parameters"].get("properties", {}))
         for item in kernel._tool_schema_payload
     )
     assert static.final_diagnosis_schema_sha256 == kernel.final_diagnosis_schema_sha256

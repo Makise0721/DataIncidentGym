@@ -51,12 +51,11 @@ from data_incident_gym.diagnosis import (
     TraceEvent,
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.diagnostic_contracts import gap_kind_for_tool
 from data_incident_gym.diagnostic_kernel import (
-    _GAP_ID_PATTERN,
     _HYPOTHESIS_ID_PATTERN,
     ClaimKind,
     DiagnosticKernel,
-    EvidenceGapKind,
     Hypothesis,
     InvestigationIntent,
     InvestigationState,
@@ -71,10 +70,10 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v8"
+KERNEL_PROMPT_VERSION = "p1.kernel.v9"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v7"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v8"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -344,6 +343,26 @@ class _RunState:
     last_observation: tuple[tuple[str, ...], tuple[str, ...], bool] | None = None
     protocol_failure: tuple[str, str, str | None] | None = None
     protocol_trace_recorded: bool = False
+    next_gap_number: int = 1
+
+    def allocate_kernel_intent(
+        self,
+        tool_name: str,
+        arguments: dict[str, str],
+        hypothesis_ids: tuple[str, ...],
+        new_hypotheses: tuple[Hypothesis, ...],
+    ) -> InvestigationIntent:
+        """Allocate the next run-scoped auto gap ID and derive the gap kind."""
+
+        gap_kind = gap_kind_for_tool(tool_name, arguments)
+        gap_id = f"g_auto_{self.next_gap_number}"
+        self.next_gap_number += 1
+        return InvestigationIntent(
+            gap_id=gap_id,
+            gap_kind=gap_kind,
+            hypothesis_ids=hypothesis_ids,
+            new_hypotheses=new_hypotheses,
+        )
 
     def record_model_response(
         self,
@@ -632,6 +651,8 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
             {
                 "gap_id": gap.gap_id,
                 "gap_kind": gap.gap_kind.value,
+                "tool_name": gap.tool_name,
+                "subject": gap.subject,
                 "status": gap.status.value,
             }
             for gap in snapshot.gaps
@@ -646,9 +667,10 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
     return (
         "CURRENT INVESTIGATION LEDGER (controller-maintained; authoritative):\n"
         + _canonical_json(payload)
-        + "\nUse a fresh gap_id for every business call; reference only these hypothesis IDs; "
-        "query only relations listed under provable_relations for that tool or relations "
-        "already returned by accepted evidence; budget remaining requests conservatively."
+        + "\nGap identifiers and kinds are allocated by the controller; reference the gaps "
+        "above by their gap_id; query only relations listed under provable_relations for "
+        "that tool; the list is exact and complete and relations returned by evidence do "
+        "not extend it; budget remaining requests conservatively."
     )
 
 
@@ -680,9 +702,12 @@ def _kernel_retry_message(
         "KERNEL_INTENT_MISSING": "Every Kernel business call must carry its binding arguments.",
         "NODE_ARGUMENT_NOT_PROVEN": "Use a node identifier returned by accepted evidence.",
         "HYPOTHESIS_REFERENCE_UNKNOWN": "Reference only registered hypothesis IDs.",
-        "DUPLICATE_GAP_ID": "Use a fresh gap_id for every business call.",
+        "DUPLICATE_GAP_ID": "Gap identifiers are controller-allocated; retry the call as-is.",
         "DUPLICATE_TOOL_CALL": "Do not repeat an equivalent successful query.",
-        "EVIDENCE_GAP_OPEN": "Close all decisive evidence gaps before confirming.",
+        "EVIDENCE_GAP_OPEN": (
+            "Every opened evidence gap must close with a successful typed tool result "
+            "before confirming."
+        ),
         "RELATION_NOT_ALLOWED": "This relation is not queryable in this run.",
     }
     message = messages.get(code, "Correct the structured investigation decision.")
@@ -707,28 +732,6 @@ def _tool_schema_payload(agent: Agent[Any, Any]) -> list[dict[str, object]]:
         }
         for name, tool in tools.items()
     ]
-
-
-_GAP_ID_FIELD_DESCRIPTION = (
-    "A fresh evidence-gap identifier unique across this investigation; never reuse a gap_id."
-)
-_GAP_KIND_FIELD_DESCRIPTION = (
-    "The kind of evidence gap this business call opens; it must match the business tool."
-)
-
-
-def _kernel_intent(
-    gap_id: str,
-    gap_kind: EvidenceGapKind,
-    hypothesis_ids: tuple[str, ...],
-    new_hypotheses: tuple[Hypothesis, ...],
-) -> InvestigationIntent:
-    return InvestigationIntent(
-        gap_id=gap_id,
-        gap_kind=gap_kind,
-        hypothesis_ids=hypothesis_ids,
-        new_hypotheses=new_hypotheses,
-    )
 
 
 def _register_evidence_tools(
@@ -856,16 +859,12 @@ def _register_kernel_evidence_tools(
     agent: Agent[_RunState, Any],
     register: Callable[[str], Callable[[Any], Any]],
 ) -> None:
+    """Register kernel tools; the controller allocates gap IDs and kinds."""
+
     @register("get_dbt_run_results")
     def get_dbt_run_results(
         ctx: RunContext[_RunState],
         run_id: Annotated[StrictStr, Field(description="The exact verified run identifier.")],
-        kernel_gap_id: Annotated[
-            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
-        ],
-        kernel_gap_kind: Annotated[
-            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
-        ],
         kernel_hypothesis_ids: tuple[
             Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
         ] = (),
@@ -876,12 +875,8 @@ def _register_kernel_evidence_tools(
             "get_dbt_run_results",
             {"run_id": run_id},
             lambda: ctx.deps.tools.get_dbt_run_results(run_id),
-            kernel_intent=_kernel_intent(
-                kernel_gap_id,
-                kernel_gap_kind,
-                kernel_hypothesis_ids,
-                kernel_new_hypotheses,
-            ),
+            kernel_hypothesis_ids=kernel_hypothesis_ids,
+            kernel_new_hypotheses=kernel_new_hypotheses,
         )
 
     @register("get_dbt_node_error")
@@ -891,12 +886,6 @@ def _register_kernel_evidence_tools(
         node_id: Annotated[
             StrictStr,
             Field(description="A node identifier returned by run evidence."),
-        ],
-        kernel_gap_id: Annotated[
-            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
-        ],
-        kernel_gap_kind: Annotated[
-            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
         ],
         kernel_hypothesis_ids: tuple[
             Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
@@ -908,12 +897,8 @@ def _register_kernel_evidence_tools(
             "get_dbt_node_error",
             {"run_id": run_id, "node_id": node_id},
             lambda: ctx.deps.tools.get_dbt_node_error(run_id, node_id),
-            kernel_intent=_kernel_intent(
-                kernel_gap_id,
-                kernel_gap_kind,
-                kernel_hypothesis_ids,
-                kernel_new_hypotheses,
-            ),
+            kernel_hypothesis_ids=kernel_hypothesis_ids,
+            kernel_new_hypotheses=kernel_new_hypotheses,
         )
 
     @register("get_relation_schema")
@@ -928,12 +913,6 @@ def _register_kernel_evidence_tools(
                 )
             ),
         ],
-        kernel_gap_id: Annotated[
-            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
-        ],
-        kernel_gap_kind: Annotated[
-            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
-        ],
         kernel_hypothesis_ids: tuple[
             Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
         ] = (),
@@ -944,12 +923,8 @@ def _register_kernel_evidence_tools(
             "get_relation_schema",
             {"relation_name": relation_name},
             lambda: ctx.deps.tools.get_relation_schema(relation_name),
-            kernel_intent=_kernel_intent(
-                kernel_gap_id,
-                kernel_gap_kind,
-                kernel_hypothesis_ids,
-                kernel_new_hypotheses,
-            ),
+            kernel_hypothesis_ids=kernel_hypothesis_ids,
+            kernel_new_hypotheses=kernel_new_hypotheses,
         )
 
     @register("get_dbt_lineage")
@@ -957,12 +932,6 @@ def _register_kernel_evidence_tools(
         ctx: RunContext[_RunState],
         node_id: Annotated[StrictStr, Field(description="A node identifier returned by evidence.")],
         direction: Literal["upstream", "downstream"],
-        kernel_gap_id: Annotated[
-            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
-        ],
-        kernel_gap_kind: Annotated[
-            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
-        ],
         kernel_hypothesis_ids: tuple[
             Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
         ] = (),
@@ -973,12 +942,8 @@ def _register_kernel_evidence_tools(
             "get_dbt_lineage",
             {"node_id": node_id, "direction": direction},
             lambda: ctx.deps.tools.get_dbt_lineage(node_id, direction),
-            kernel_intent=_kernel_intent(
-                kernel_gap_id,
-                kernel_gap_kind,
-                kernel_hypothesis_ids,
-                kernel_new_hypotheses,
-            ),
+            kernel_hypothesis_ids=kernel_hypothesis_ids,
+            kernel_new_hypotheses=kernel_new_hypotheses,
         )
 
     @register("get_relation_data_profile")
@@ -993,12 +958,6 @@ def _register_kernel_evidence_tools(
                 )
             ),
         ],
-        kernel_gap_id: Annotated[
-            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
-        ],
-        kernel_gap_kind: Annotated[
-            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
-        ],
         kernel_hypothesis_ids: tuple[
             Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
         ] = (),
@@ -1009,12 +968,8 @@ def _register_kernel_evidence_tools(
             "get_relation_data_profile",
             {"relation_name": relation_name},
             lambda: ctx.deps.tools.get_relation_data_profile(relation_name),
-            kernel_intent=_kernel_intent(
-                kernel_gap_id,
-                kernel_gap_kind,
-                kernel_hypothesis_ids,
-                kernel_new_hypotheses,
-            ),
+            kernel_hypothesis_ids=kernel_hypothesis_ids,
+            kernel_new_hypotheses=kernel_new_hypotheses,
         )
 
     @register("get_relation_history")
@@ -1029,12 +984,6 @@ def _register_kernel_evidence_tools(
                 )
             ),
         ],
-        kernel_gap_id: Annotated[
-            StrictStr, Field(pattern=_GAP_ID_PATTERN, description=_GAP_ID_FIELD_DESCRIPTION)
-        ],
-        kernel_gap_kind: Annotated[
-            EvidenceGapKind, Field(description=_GAP_KIND_FIELD_DESCRIPTION)
-        ],
         kernel_hypothesis_ids: tuple[
             Annotated[StrictStr, Field(pattern=_HYPOTHESIS_ID_PATTERN)], ...
         ] = (),
@@ -1045,12 +994,8 @@ def _register_kernel_evidence_tools(
             "get_relation_history",
             {"relation_name": relation_name},
             lambda: ctx.deps.tools.get_relation_history(relation_name),
-            kernel_intent=_kernel_intent(
-                kernel_gap_id,
-                kernel_gap_kind,
-                kernel_hypothesis_ids,
-                kernel_new_hypotheses,
-            ),
+            kernel_hypothesis_ids=kernel_hypothesis_ids,
+            kernel_new_hypotheses=kernel_new_hypotheses,
         )
 
 
@@ -1159,16 +1104,25 @@ def _execute_evidence(
     arguments: dict[str, str],
     call: Callable[[], tuple[EvidenceRecord, ...]],
     *,
-    kernel_intent: InvestigationIntent | None = None,
+    kernel_hypothesis_ids: tuple[str, ...] | None = None,
+    kernel_new_hypotheses: tuple[Hypothesis, ...] = (),
 ) -> tuple[EvidenceRecord, ...]:
     state = ctx.deps
     started_at = monotonic()
+    intent: InvestigationIntent | None = None
+    if kernel_hypothesis_ids is not None:
+        intent = state.allocate_kernel_intent(
+            tool_name,
+            arguments,
+            kernel_hypothesis_ids,
+            kernel_new_hypotheses,
+        )
     try:
         prepared = state.adapter.prepare(
             tool_name=tool_name,
             arguments=arguments,
             observation=state.last_response,
-            intent=kernel_intent,
+            intent=intent,
         )
     except _PolicyError as error:
         fingerprint = error.fingerprint or _fingerprint(state.run_id, tool_name, arguments)

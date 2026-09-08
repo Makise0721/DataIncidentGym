@@ -104,8 +104,6 @@ def test_each_p1_case_exposes_identical_policy_surface(tmp_path: Path) -> None:
     assert static.model_identity == kernel.model_identity
     assert static.incident_brief.model_dump_json() == kernel.incident_brief.model_dump_json()
     binding_fields = {
-        "kernel_gap_id",
-        "kernel_gap_kind",
         "kernel_hypothesis_ids",
         "kernel_new_hypotheses",
     }
@@ -126,8 +124,11 @@ def test_each_p1_case_exposes_identical_policy_surface(tmp_path: Path) -> None:
     assert business_properties(static._tool_schema_payload) == business_properties(
         kernel._tool_schema_payload
     )
+    auto_fields = {"kernel_gap_id", "kernel_gap_kind"}
     for item in kernel._tool_schema_payload:
-        assert {"kernel_gap_id", "kernel_gap_kind"} <= set(item["parameters"]["required"])
+        assert not (auto_fields & set(item["parameters"]["properties"]))
+        assert not (auto_fields & set(item["parameters"]["required"]))
+        assert binding_fields <= set(item["parameters"]["properties"])
     for item in static._tool_schema_payload:
         assert not (binding_fields & set(item["parameters"]["required"]))
     assert static.tool_schema_sha256 != kernel.tool_schema_sha256
