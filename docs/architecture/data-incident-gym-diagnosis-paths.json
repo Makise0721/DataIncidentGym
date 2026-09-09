@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "DataIncidentGym 诊断流程：Static Skill 与 Diagnostic Kernel 两条路径",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "trunk", "label": "共用调查循环", "focus": ["entry", "tools", "result"], "note": "两模式共享入口、6 个只读工具循环与六文件产物。" },
+      { "id": "staticpath", "label": "Static 路径", "focus": ["tools", "s_guard", "s_final", "result"], "note": "模型直接写诊断，控制器只做薄守卫与 evidence_id 校验。" },
+      { "id": "kernelpath", "label": "Kernel 路径", "focus": ["tools", "k_call", "k_finalize", "result"], "note": "每步绑 intent + 参数溯源，finalize 过合同门后投影。" }
+    ]
+  },
+  "lanes": [
+    { "id": "static", "label": "Static Skill 路径" },
+    { "id": "shared", "label": "共用骨架" },
+    { "id": "kernel", "label": "Diagnostic Kernel 路径" }
+  ],
+  "phases": [
+    { "id": "loop", "label": "调查循环", "fromCol": 0, "toCol": 1 },
+    { "id": "diverge", "label": "两模式分歧", "fromCol": 2, "toCol": 4, "variant": "emphasis" },
+    { "id": "project", "label": "产物投影", "fromCol": 5, "toCol": 5 }
+  ],
+  "mainPath": ["entry", "tools", "k_call", "k_finalize", "result"],
+  "nodes": [
+    { "id": "entry", "lane": "shared", "col": 0, "type": "external", "label": "调查启动", "sublabel": "run_id + brief" },
+    { "id": "tools", "lane": "shared", "col": 1, "type": "database", "label": "调查循环", "sublabel": "6 工具 ≤8/8/300s" },
+    { "id": "result", "lane": "shared", "col": 5, "type": "database", "label": "六文件产物", "sublabel": "DiagnosisRunResult" },
+    { "id": "s_guard", "lane": "static", "col": 2, "type": "security", "label": "薄守卫", "sublabel": "去重/参数/run" },
+    { "id": "s_final", "lane": "static", "col": 3, "type": "cloud", "label": "写诊断 + 门", "sublabel": "_StaticDecision" },
+    { "id": "k_call", "lane": "kernel", "col": 2, "type": "security", "label": "[K] 每步申报", "sublabel": "prepare/record 溯源" },
+    { "id": "k_finalize", "lane": "kernel", "col": 3, "type": "security", "label": "[K] finalize", "sublabel": "≥2 假设/反驳/弃权" }
+  ],
+  "edges": [
+    { "id": "e1", "from": "entry", "to": "tools", "variant": "emphasis" },
+    { "id": "e2", "from": "tools", "to": "s_guard", "label": "static 模式", "variant": "default", "role": "branch" },
+    { "id": "e3", "from": "s_guard", "to": "s_final", "variant": "default", "role": "branch" },
+    { "id": "e4", "from": "s_final", "to": "result", "variant": "default", "role": "branch" },
+    { "id": "e5", "from": "tools", "to": "k_call", "label": "kernel 模式", "variant": "emphasis" },
+    { "id": "e6", "from": "k_call", "to": "k_finalize", "variant": "emphasis" },
+    { "id": "e7", "from": "k_finalize", "to": "result", "variant": "emphasis" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "共用骨架（两模式一致）",
+      "items": [
+        "同一 Agent 调查循环：模型在 6 个只读工具间自主选择，循环至给出终态",
+        "预算 8 请求 / 8 工具 / 2 输出重试 / 300s；工具受场景 allowlist 约束",
+        "user_prompt 只给 run_id + incident_brief + runtime，不含 Ground Truth",
+        "超时 / 超预算 / 协议错都落到 MODEL_ERROR 终态；任何跑过的诊断必产出六文件"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Static Skill：模型当作者",
+      "items": [
+        "适配器薄守卫 prepare/accept：只查 预算 / 去重 / 参数形状 / run 范围，不维护假设台账",
+        "模型直接输出 _StaticDecision（=Diagnosis）",
+        "终态门仅校验引用的 evidence_id 真实存在 + run_id 匹配，无强制弃权"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Diagnostic Kernel：模型申报，内核裁决（[K] 标记）",
+      "items": [
+        "prepare_tool：每次工具调用绑 intent（新 gap_id + 假设），参数溯源到 allowlist / 已接受证据",
+        "record_tool_result：关闭 gap、登记证据；内核每轮回注 InvestigationState ledger（假设/缺口/provable_relations/剩余预算）",
+        "finalize 合同门：≥2 假设 + 支持/反驳 + claim 绑证据 + 缺口关闭或显式弃权",
+        "内核只验证 / 拒绝 / 投影，从不替模型生成答案；另存 KERNEL_STATE 终态事件"
+      ]
+    }
+  ]
+}

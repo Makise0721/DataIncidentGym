@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "DataIncidentGym：真实运行时结构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": {"url": "https://github.com/Makise0721/DataIncidentGym.git", "revision": "d680a09b7b8a6cae247b3059e3817930d8ae41a3"},
+    "viewBox": [1320, 840],
+    "views": [
+      {"id": "entry", "label": "从命令进入", "focus": ["cli", "baseline", "lab", "agent"], "note": "CLI 将构建、实验和诊断分派到不同模块。"},
+      {"id": "safety", "label": "权限边界", "focus": ["lab", "postgres", "tools", "agent"], "note": "注入使用管理面；诊断仅通过受限只读工具取得事实。"},
+      {"id": "output", "label": "可审计闭环", "focus": ["agent", "evaluator", "artifacts", "benchmark"], "note": "诊断、证据、轨迹与确定性评分共同形成六文件产物。"}
+    ]
+  },
+  "components": [
+    {"id": "cli", "type": "frontend", "label": "Python CLI", "sublabel": "command groups", "pos": [55, 335], "size": [200, 82], "sources": [{"path": "src/data_incident_gym/cli.py", "line": 33, "end_line": 41, "label": "Typer entrypoints"}]},
+    {"id": "baseline", "type": "backend", "label": "Healthy Baseline", "sublabel": "seed + dbt build", "pos": [330, 90], "size": [175, 66], "sources": [{"path": "src/data_incident_gym/cli.py", "line": 153, "end_line": 166, "label": "pipeline build"}]},
+    {"id": "lab", "type": "backend", "label": "Incident Lab", "sublabel": "reset · inject · verify", "pos": [330, 270], "size": [175, 66], "sources": [{"path": "src/data_incident_gym/cli.py", "line": 368, "end_line": 403, "label": "lab commands"}]},
+    {"id": "dbt", "type": "backend", "label": "dbt / Jaffle Shop", "sublabel": "pinned fixture + run artifacts", "pos": [585, 90], "size": [180, 66], "sources": [{"path": "config/upstream/jaffle_shop.json", "label": "pinned fixture record"}]},
+    {"id": "postgres", "type": "database", "label": "PostgreSQL", "sublabel": "Compose · separate credentials", "pos": [585, 330], "size": [180, 66], "sources": [{"path": "compose.yaml", "line": 3, "end_line": 18, "label": "postgres service"}]},
+    {"id": "agent", "type": "backend", "label": "Diagnosis Agent", "sublabel": "Static Skill or Diagnostic Kernel", "pos": [850, 220], "size": [185, 66], "sources": [{"path": "src/data_incident_gym/cli.py", "line": 169, "end_line": 213, "label": "diagnose command"}]},
+    {"id": "tools", "type": "security", "label": "Typed Evidence Tools", "sublabel": "allowlisted, read-only", "pos": [850, 435], "size": [185, 66], "sources": [{"path": "src/data_incident_gym/evidence_tools.py", "label": "evidence tool boundary"}]},
+    {"id": "evaluator", "type": "backend", "label": "Deterministic Evaluator", "sublabel": "scores frozen run", "pos": [1100, 220], "size": [170, 66], "sources": [{"path": "src/data_incident_gym/evaluation_runner.py", "label": "evaluation workflow"}]},
+    {"id": "artifacts", "type": "database", "label": "Run Artifacts", "sublabel": "six-file audit trail", "pos": [1100, 465], "size": [170, 66], "sources": [{"path": "src/data_incident_gym/artifacts.py", "label": "six-file writer"}]},
+    {"id": "benchmark", "type": "external", "label": "P1 Benchmark Harness", "sublabel": "Manifest · ledger · report", "pos": [850, 665], "size": [185, 66], "sources": [{"path": "src/data_incident_gym/benchmark_runner.py", "label": "formal runner"}]}
+  ],
+  "boundaries": [
+    {"kind": "region", "label": "管理平面：可重置的 dbt 实验环境", "wraps": ["baseline", "lab", "dbt", "postgres"], "pad": 28},
+    {"kind": "security-group", "label": "诊断平面：不持有管理连接串", "wraps": ["agent", "tools"], "pad": 28}
+  ],
+  "connections": [
+    {"from": "cli", "to": "baseline", "variant": "emphasis"},
+    {"from": "cli", "to": "lab", "variant": "emphasis"},
+    {"from": "baseline", "to": "dbt"},
+    {"from": "lab", "to": "dbt"},
+    {"from": "dbt", "to": "postgres", "fromSide": "bottom", "toSide": "top"},
+    {"from": "cli", "to": "agent", "variant": "emphasis", "fromSide": "right", "toSide": "left", "via": [[280, 376], [280, 600], [840, 600], [840, 253]]},
+    {"from": "agent", "to": "tools", "variant": "security", "fromSide": "bottom", "toSide": "top"},
+    {"from": "agent", "to": "evaluator"},
+    {"from": "evaluator", "to": "artifacts", "fromSide": "bottom", "toSide": "top"},
+    {"from": "agent", "to": "artifacts", "fromSide": "right", "toSide": "left"},
+    {"from": "benchmark", "to": "agent", "variant": "dashed", "fromSide": "left", "toSide": "right", "via": [[820, 698], [820, 760], [1060, 760], [1060, 253]]},
+    {"from": "benchmark", "to": "artifacts", "variant": "dashed", "fromSide": "right", "toSide": "bottom"}
+  ],
+  "cards": [
+    {"dot": "rose", "title": "安全契约", "items": ["故障注入只存在于管理平面", "Agent 没有 Shell、写工具或管理连接串", "诊断事实经 allowlist 只读工具取得"]},
+    {"dot": "emerald", "title": "可复现性", "items": ["健康基线可重建", "每个固定案例可 reset → inject → build", "Ground Truth 与模型输入隔离"]},
+    {"dot": "cyan", "title": "评测边界", "items": ["Evaluator 不依赖模型裁判", "单次运行固定为六类 artifact", "P1 benchmark 以 Manifest、ledger 和 suite report 约束"]}
+  ]
+}

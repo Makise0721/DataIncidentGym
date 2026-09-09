@@ -1,0 +1,523 @@
+{
+  "source_root": "C:\\Users\\29913\\.config\\superpowers\\worktrees\\DataIncidentGym\\p1-v8-kernel-smoke-20260908",
+  "analysis_date": "2026-09-09",
+  "scope": "read-only analysis; subset smoke; not a formal benchmark report",
+  "rows": [
+    {
+      "sequence": 22,
+      "repeat_index": 1,
+      "run_id": "25d55c9e566f4478765c32a77ced30b4",
+      "incident_case_id": "order_volume_pattern_a",
+      "expected_status": "NO_INCIDENT",
+      "actual_status": "NO_INCIDENT",
+      "evaluation_status": "PASSED",
+      "metrics": {
+        "provider": "openai-compatible",
+        "model": "mimo-v2.5-pro",
+        "model_requests": 2,
+        "input_tokens": 14193,
+        "output_tokens": 3708,
+        "tool_call_attempts": 3,
+        "successful_tool_calls": 3,
+        "elapsed_ms": 77750
+      },
+      "recovery_status": "HEALTHY",
+      "workspace_dirty": false,
+      "code_revision": "21250df9d556eae85e56e638a7b255b351d823d5",
+      "failed_checks": [],
+      "gate_events": [
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "NO_INCIDENT",
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "sequence": 37,
+      "repeat_index": 2,
+      "run_id": "69c334e05b79c044ebdc88e71ae60f3c",
+      "incident_case_id": "order_volume_pattern_a",
+      "expected_status": "NO_INCIDENT",
+      "actual_status": "NO_INCIDENT",
+      "evaluation_status": "PASSED",
+      "metrics": {
+        "provider": "openai-compatible",
+        "model": "mimo-v2.5-pro",
+        "model_requests": 4,
+        "input_tokens": 40081,
+        "output_tokens": 4294,
+        "tool_call_attempts": 3,
+        "successful_tool_calls": 3,
+        "elapsed_ms": 79827
+      },
+      "recovery_status": "HEALTHY",
+      "workspace_dirty": false,
+      "code_revision": "21250df9d556eae85e56e638a7b255b351d823d5",
+      "failed_checks": [],
+      "gate_events": [
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "NO_INCIDENT",
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "sequence": 44,
+      "repeat_index": 2,
+      "run_id": "5b15275680b26753a3f4e9ccadfcdb50",
+      "incident_case_id": "schema_type_change_order_customer_b",
+      "expected_status": "INSUFFICIENT_EVIDENCE",
+      "actual_status": "MODEL_ERROR",
+      "evaluation_status": "FAILED",
+      "metrics": {
+        "provider": "openai-compatible",
+        "model": "mimo-v2.5-pro",
+        "model_requests": 7,
+        "input_tokens": 78540,
+        "output_tokens": 7865,
+        "tool_call_attempts": 8,
+        "successful_tool_calls": 8,
+        "elapsed_ms": 159266
+      },
+      "recovery_status": "HEALTHY",
+      "workspace_dirty": false,
+      "code_revision": "21250df9d556eae85e56e638a7b255b351d823d5",
+      "failed_checks": [
+        "STATUS_EXACT",
+        "REQUIRED_EVIDENCE_TYPES_PRESENT",
+        "INSUFFICIENCY_GAP_DECLARED"
+      ],
+      "gate_events": [
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "ASSET_CLAIM_EVIDENCE_INCOMPATIBLE",
+          "accepted": false
+        },
+        {
+          "event_type": "MODEL_PROTOCOL",
+          "stage": "OUTPUT_SCHEMA_VALIDATION",
+          "tool_name": "final_result",
+          "category": "OUTPUT_SCHEMA_REJECTED"
+        },
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "MODEL_PROTOCOL_ERROR",
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "sequence": 50,
+      "repeat_index": 3,
+      "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+      "incident_case_id": "silent_payment_drop_partition_a",
+      "expected_status": "CONFIRMED",
+      "actual_status": "MODEL_ERROR",
+      "evaluation_status": "FAILED",
+      "metrics": {
+        "provider": "openai-compatible",
+        "model": "mimo-v2.5-pro",
+        "model_requests": 4,
+        "input_tokens": 59158,
+        "output_tokens": 12269,
+        "tool_call_attempts": 8,
+        "successful_tool_calls": 7,
+        "elapsed_ms": 300094
+      },
+      "recovery_status": "HEALTHY",
+      "workspace_dirty": false,
+      "code_revision": "21250df9d556eae85e56e638a7b255b351d823d5",
+      "failed_checks": [
+        "STATUS_EXACT",
+        "ROOT_CAUSE_ACCEPTED",
+        "AFFECTED_ASSETS_EXACT",
+        "REQUIRED_EVIDENCE_TYPES_PRESENT",
+        "CLAIM_EVIDENCE_COMPATIBLE"
+      ],
+      "gate_events": [
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "EVIDENCE_GAP_OPEN",
+          "accepted": false
+        },
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "MODEL_TIMEOUT",
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "sequence": 59,
+      "repeat_index": 3,
+      "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+      "incident_case_id": "schema_type_change_order_customer_b",
+      "expected_status": "INSUFFICIENT_EVIDENCE",
+      "actual_status": "CONFIRMED",
+      "evaluation_status": "FAILED",
+      "metrics": {
+        "provider": "openai-compatible",
+        "model": "mimo-v2.5-pro",
+        "model_requests": 6,
+        "input_tokens": 73039,
+        "output_tokens": 10314,
+        "tool_call_attempts": 7,
+        "successful_tool_calls": 7,
+        "elapsed_ms": 282561
+      },
+      "recovery_status": "HEALTHY",
+      "workspace_dirty": false,
+      "code_revision": "21250df9d556eae85e56e638a7b255b351d823d5",
+      "failed_checks": [
+        "STATUS_EXACT",
+        "REQUIRED_EVIDENCE_TYPES_PRESENT",
+        "INSUFFICIENCY_GAP_DECLARED"
+      ],
+      "gate_events": [
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "ROOT_CLAIM_MISMATCH",
+          "accepted": false
+        },
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "CONFIRMED",
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "sequence": 62,
+      "repeat_index": 3,
+      "run_id": "e76a208509a5677bf9c28f11798c464d",
+      "incident_case_id": "required_null_order_customer_a",
+      "expected_status": "CONFIRMED",
+      "actual_status": "CONFIRMED",
+      "evaluation_status": "PASSED",
+      "metrics": {
+        "provider": "openai-compatible",
+        "model": "mimo-v2.5-pro",
+        "model_requests": 3,
+        "input_tokens": 26233,
+        "output_tokens": 3085,
+        "tool_call_attempts": 7,
+        "successful_tool_calls": 7,
+        "elapsed_ms": 60639
+      },
+      "recovery_status": "HEALTHY",
+      "workspace_dirty": false,
+      "code_revision": "21250df9d556eae85e56e638a7b255b351d823d5",
+      "failed_checks": [],
+      "gate_events": [
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "CONFIRMED",
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "sequence": 66,
+      "repeat_index": 3,
+      "run_id": "993980ccfb30feff662b5412ff59d8ff",
+      "incident_case_id": "duplicate_payment_coupon_a",
+      "expected_status": "CONFIRMED",
+      "actual_status": "INSUFFICIENT_EVIDENCE",
+      "evaluation_status": "FAILED",
+      "metrics": {
+        "provider": "openai-compatible",
+        "model": "mimo-v2.5-pro",
+        "model_requests": 7,
+        "input_tokens": 64927,
+        "output_tokens": 5926,
+        "tool_call_attempts": 6,
+        "successful_tool_calls": 3,
+        "elapsed_ms": 133592
+      },
+      "recovery_status": "HEALTHY",
+      "workspace_dirty": false,
+      "code_revision": "21250df9d556eae85e56e638a7b255b351d823d5",
+      "failed_checks": [
+        "STATUS_EXACT",
+        "ROOT_CAUSE_ACCEPTED",
+        "AFFECTED_ASSETS_EXACT",
+        "REQUIRED_EVIDENCE_TYPES_PRESENT",
+        "CLAIM_EVIDENCE_COMPATIBLE"
+      ],
+      "gate_events": [
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "UNRESOLVED_EVIDENCE_UNBOUND",
+          "accepted": false
+        },
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "INSUFFICIENT_EVIDENCE",
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "sequence": 67,
+      "repeat_index": 3,
+      "run_id": "c9f54f9edcd39d277583c282e788efb7",
+      "incident_case_id": "duplicate_payment_coupon_b",
+      "expected_status": "INSUFFICIENT_EVIDENCE",
+      "actual_status": "MODEL_ERROR",
+      "evaluation_status": "FAILED",
+      "metrics": {
+        "provider": "openai-compatible",
+        "model": "mimo-v2.5-pro",
+        "model_requests": 7,
+        "input_tokens": 62845,
+        "output_tokens": 5003,
+        "tool_call_attempts": 4,
+        "successful_tool_calls": 3,
+        "elapsed_ms": 108030
+      },
+      "recovery_status": "HEALTHY",
+      "workspace_dirty": false,
+      "code_revision": "21250df9d556eae85e56e638a7b255b351d823d5",
+      "failed_checks": [
+        "STATUS_EXACT",
+        "REQUIRED_EVIDENCE_TYPES_PRESENT",
+        "INSUFFICIENCY_GAP_DECLARED"
+      ],
+      "gate_events": [
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "UNRESOLVED_EVIDENCE_UNBOUND",
+          "accepted": false
+        },
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "UNRESOLVED_EVIDENCE_UNBOUND",
+          "accepted": false
+        },
+        {
+          "event_type": "MODEL_PROTOCOL",
+          "stage": "OUTPUT_SCHEMA_VALIDATION",
+          "tool_name": "final_result",
+          "category": "OUTPUT_SCHEMA_REJECTED"
+        },
+        {
+          "event_type": "EVIDENCE_GATE",
+          "reason_code": "MODEL_PROTOCOL_ERROR",
+          "accepted": true
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "artifacts/25d55c9e566f4478765c32a77ced30b4/diagnosis.json",
+      "sha256": "a391d6bef77ef30cc4e2701a17119295016f467923c1fe8b3bb2be2308f2cf3e"
+    },
+    {
+      "path": "artifacts/25d55c9e566f4478765c32a77ced30b4/evaluation.json",
+      "sha256": "cb7ad25463953e4a5527216aaa2c0f3abad01e011498a57ce408fdcca6bd8de6"
+    },
+    {
+      "path": "artifacts/25d55c9e566f4478765c32a77ced30b4/evidence.json",
+      "sha256": "1ae8a829f2c98e17bf14846edcac0b32510f5bfa87703d17858c52eccf1029d4"
+    },
+    {
+      "path": "artifacts/25d55c9e566f4478765c32a77ced30b4/metadata.json",
+      "sha256": "dff2eb38ea3a644b4a9ee3044bbf125ad7ef03a951f31666cf65f00477da1bf6"
+    },
+    {
+      "path": "artifacts/25d55c9e566f4478765c32a77ced30b4/report.md",
+      "sha256": "cab755b62920adcce96e505fcfd641aa1bac168545be96996883772a03f99c00"
+    },
+    {
+      "path": "artifacts/25d55c9e566f4478765c32a77ced30b4/trace.jsonl",
+      "sha256": "20516547c0625eb1507687d5c08a3f518ca29ed569f8fb55d0892339684f6174"
+    },
+    {
+      "path": "artifacts/69c334e05b79c044ebdc88e71ae60f3c/diagnosis.json",
+      "sha256": "6699b5805dd64dca02ea33001d7aca156e3695c46f8092d3eeeb4ef22d61096b"
+    },
+    {
+      "path": "artifacts/69c334e05b79c044ebdc88e71ae60f3c/evaluation.json",
+      "sha256": "6383ebc57d6aed043152ad88faff11a90bf06763fd7ff9a4631c4bf6fc3d4ca4"
+    },
+    {
+      "path": "artifacts/69c334e05b79c044ebdc88e71ae60f3c/evidence.json",
+      "sha256": "d21d17fde358b3b271e790d0b1a77cbf899dc904eed547d39452bedc49e97327"
+    },
+    {
+      "path": "artifacts/69c334e05b79c044ebdc88e71ae60f3c/metadata.json",
+      "sha256": "003499a152d1c966f44102c45a7f2872fed7fdbc5ff66253d266113c3ae6e81e"
+    },
+    {
+      "path": "artifacts/69c334e05b79c044ebdc88e71ae60f3c/report.md",
+      "sha256": "dcc6e1fe78324ded07e132bac20b59520b5ba48c941283f61a044ba52f4fdd45"
+    },
+    {
+      "path": "artifacts/69c334e05b79c044ebdc88e71ae60f3c/trace.jsonl",
+      "sha256": "d4f251ca745699c07ec948c8f29a10344273275b031146d1747f3300814f1800"
+    },
+    {
+      "path": "artifacts/5b15275680b26753a3f4e9ccadfcdb50/diagnosis.json",
+      "sha256": "79d9a6ae5b76d973b48d4fd7b32c4bed6d9fd26636468ccf3f09ad0af4c27a69"
+    },
+    {
+      "path": "artifacts/5b15275680b26753a3f4e9ccadfcdb50/evaluation.json",
+      "sha256": "cdcd9fd3beee554b46818c735dc2d067e06fc4972dc83379f9b252b7a62c1d18"
+    },
+    {
+      "path": "artifacts/5b15275680b26753a3f4e9ccadfcdb50/evidence.json",
+      "sha256": "c83dae46a728ea73a655dfb527781b64e74bc732d4e18b61781e43541d7cd69a"
+    },
+    {
+      "path": "artifacts/5b15275680b26753a3f4e9ccadfcdb50/metadata.json",
+      "sha256": "7a73c195632d59d81fc0180955bd67b008b3554b1ff268d85ad6285684ddefb5"
+    },
+    {
+      "path": "artifacts/5b15275680b26753a3f4e9ccadfcdb50/report.md",
+      "sha256": "0629eb28831f00b52bf428b6ab5a57990f529eba53d934d7d7aac81ca3cf6d10"
+    },
+    {
+      "path": "artifacts/5b15275680b26753a3f4e9ccadfcdb50/trace.jsonl",
+      "sha256": "25d7f2551fd60659c026fec2d07f238d76494ec05854dbeb4039d9a7d7b8f76a"
+    },
+    {
+      "path": "artifacts/870de53cf8e67a39cbcc97c0d42884e7/diagnosis.json",
+      "sha256": "732434c0d00d6033a1173b886d6349aa2b9945602e73685d279b6b5fd6c4f394"
+    },
+    {
+      "path": "artifacts/870de53cf8e67a39cbcc97c0d42884e7/evaluation.json",
+      "sha256": "75ef5e6e2bc7ad49512515b18eb73842990e1c14906002b466f529b5f85f258e"
+    },
+    {
+      "path": "artifacts/870de53cf8e67a39cbcc97c0d42884e7/evidence.json",
+      "sha256": "00fa85fb16e74ffc481da16229fc8105d46cc7977de8f6ec5c4aab4553a26cec"
+    },
+    {
+      "path": "artifacts/870de53cf8e67a39cbcc97c0d42884e7/metadata.json",
+      "sha256": "be69f9614cb9821b1c1bf2624547eac5f1703ebd24a7562966997a13c2133213"
+    },
+    {
+      "path": "artifacts/870de53cf8e67a39cbcc97c0d42884e7/report.md",
+      "sha256": "280e088c025fdae80c4329567574010fa03e5b65dc24709d1e7e302e42fa0e69"
+    },
+    {
+      "path": "artifacts/870de53cf8e67a39cbcc97c0d42884e7/trace.jsonl",
+      "sha256": "d8268d895e96abd63c63a5d74c06428daf5ca55c7187dc0ecd6a0c5cc52bceb7"
+    },
+    {
+      "path": "artifacts/d2abcf132c6a3e4d97256035e806c89e/diagnosis.json",
+      "sha256": "b057ae0024e3a65d9f33de65b2723d56e2a7a146e5b729e1680ee60b2c5c1c74"
+    },
+    {
+      "path": "artifacts/d2abcf132c6a3e4d97256035e806c89e/evaluation.json",
+      "sha256": "645d442ad7f7296fb14aab268526d42bd0753ef682a0cd2794733dc39239cd49"
+    },
+    {
+      "path": "artifacts/d2abcf132c6a3e4d97256035e806c89e/evidence.json",
+      "sha256": "2aeaa99286eabe54d7d8417b0750358a5901bc736a03fb2ee910ba1c10f545d8"
+    },
+    {
+      "path": "artifacts/d2abcf132c6a3e4d97256035e806c89e/metadata.json",
+      "sha256": "86620dba2957594282414c7a4099a71ef5bc4bbac6799a37b053d215cee17cb5"
+    },
+    {
+      "path": "artifacts/d2abcf132c6a3e4d97256035e806c89e/report.md",
+      "sha256": "b03ae8fc3de1ec48d98f10633f69d26f13cb9321e7264ce21b384db74fee867e"
+    },
+    {
+      "path": "artifacts/d2abcf132c6a3e4d97256035e806c89e/trace.jsonl",
+      "sha256": "8bdeccda85d52c1b1aef2c5a03c443d242fd3700f15a4b24166fad5457b76199"
+    },
+    {
+      "path": "artifacts/e76a208509a5677bf9c28f11798c464d/diagnosis.json",
+      "sha256": "2e64ca7be3e266b6723a8569b1498f42c52b8b7575cac0b3eedc282e09b8d148"
+    },
+    {
+      "path": "artifacts/e76a208509a5677bf9c28f11798c464d/evaluation.json",
+      "sha256": "f4ee69f1cb28776de6fef5cc6076f28d4410c452bdeb31c95a04f01a906db0c6"
+    },
+    {
+      "path": "artifacts/e76a208509a5677bf9c28f11798c464d/evidence.json",
+      "sha256": "9a6c9581dc1c0bfcbd53c2b35157932c1af5e8014f3fac42553ba99c25758e38"
+    },
+    {
+      "path": "artifacts/e76a208509a5677bf9c28f11798c464d/metadata.json",
+      "sha256": "91c07e0adc5d0ad62c6305a1a3b76e22e43d896cb7e831143eb282b09fbf249c"
+    },
+    {
+      "path": "artifacts/e76a208509a5677bf9c28f11798c464d/report.md",
+      "sha256": "f1dda216540c17d30a7c537f623c6d92e9887ff82491e5094d0ed4a1e86c3cc5"
+    },
+    {
+      "path": "artifacts/e76a208509a5677bf9c28f11798c464d/trace.jsonl",
+      "sha256": "ff31fc663c817ec5be1769dffc6e4beb8a7a35f48828ed0944f44f5ee20ecfb8"
+    },
+    {
+      "path": "artifacts/993980ccfb30feff662b5412ff59d8ff/diagnosis.json",
+      "sha256": "956f3950b151ab7a7d9dccf31f5394ca1b3d82f5a3559f1dba0d09e76bc8f7af"
+    },
+    {
+      "path": "artifacts/993980ccfb30feff662b5412ff59d8ff/evaluation.json",
+      "sha256": "9d73e3b3443211a9908282ec4c8367c9f25778b9522b9d6af8ff861edb5d4e90"
+    },
+    {
+      "path": "artifacts/993980ccfb30feff662b5412ff59d8ff/evidence.json",
+      "sha256": "db1d0f4121b37430a5383dfb5c1f6029b7f3f412dfc9455661fb017ab09db789"
+    },
+    {
+      "path": "artifacts/993980ccfb30feff662b5412ff59d8ff/metadata.json",
+      "sha256": "62987133447bd0feb0a25da8df7e43a90de904a08a9f051e6fa052d357785f97"
+    },
+    {
+      "path": "artifacts/993980ccfb30feff662b5412ff59d8ff/report.md",
+      "sha256": "0a33803b9c71a014a541998f078a89eb7cd8eaf0780246e32721f1fdef248535"
+    },
+    {
+      "path": "artifacts/993980ccfb30feff662b5412ff59d8ff/trace.jsonl",
+      "sha256": "3b4734fcc414c5a581edfd663ff7bb435cae2d5016593689756ae7a2b7bf6dd2"
+    },
+    {
+      "path": "artifacts/c9f54f9edcd39d277583c282e788efb7/diagnosis.json",
+      "sha256": "c2d5f35219d06793a17b2764b8e5ba0e501c5ecf452fd12801cacb8e454a5331"
+    },
+    {
+      "path": "artifacts/c9f54f9edcd39d277583c282e788efb7/evaluation.json",
+      "sha256": "ccd238bf2ded47e4bfb57c75619688cfc3442e51d0bb3ed33a57e8e6fd2de8a5"
+    },
+    {
+      "path": "artifacts/c9f54f9edcd39d277583c282e788efb7/evidence.json",
+      "sha256": "6dcb391e744672b6d204ce055b0e5b5e2bc9818b328f047f927728e92a33517f"
+    },
+    {
+      "path": "artifacts/c9f54f9edcd39d277583c282e788efb7/metadata.json",
+      "sha256": "7c7e3e063d1318d48450d835cace42e35296f074c69c46906d3a62afb5525706"
+    },
+    {
+      "path": "artifacts/c9f54f9edcd39d277583c282e788efb7/report.md",
+      "sha256": "f702bc9a81336659046c94ccc56bf0f33bfaf52a48ed65c800c83c6b9d7663c1"
+    },
+    {
+      "path": "artifacts/c9f54f9edcd39d277583c282e788efb7/trace.jsonl",
+      "sha256": "72428796c7dbd87d55d21f74051b1b481328ca084b98c95ffa75b9c51a8391f7"
+    },
+    {
+      "path": "config/benchmark/p1-formal-v8.json",
+      "sha256": "e7c52d4065ed2e6872b40530c38c6821a93140fb54ad7cd2db1c83277998bfac"
+    },
+    {
+      "path": "artifacts/benchmarks/p1-formal-v8/subset.json",
+      "sha256": "899b4bb0fbb3b4af89fa115dafadb5122560ff67124e3f5b6c9340a4db2c83eb"
+    },
+    {
+      "path": "artifacts/benchmarks/p1-formal-v8/ledger.jsonl",
+      "sha256": "afad45495009cc0249a0324bbf3d081d8c683044041052bfde4607d5efd650a7"
+    },
+    {
+      "path": "artifacts/benchmarks/p1-formal-v8/doctor.json",
+      "sha256": "6a8054247c841b53622bd7eb06ef9050ca1d280d146fdc02a2809a85f115247b"
+    }
+  ]
+}

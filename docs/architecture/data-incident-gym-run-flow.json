@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "DataIncidentGym：一次任务如何流转",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1220, 720],
+    "views": [
+      {"id": "ordinary-run", "label": "普通评测闭环", "focus": ["baseline", "inject", "reproduce", "diagnose", "evaluate", "artifacts"], "note": "每个案例从健康状态开始，以冻结的六文件产物结束。"},
+      {"id": "formal-gate", "label": "正式 benchmark 门禁", "focus": ["manifest", "preflight", "formal", "closure"], "note": "Manifest 绑定检查在运行前完成；开始后的批次不可替换或重跑。"}
+    ]
+  },
+  "lanes": [
+    {"id": "management", "label": "管理平面：可写实验环境"},
+    {"id": "diagnosis", "label": "诊断平面：只读调查"},
+    {"id": "audit", "label": "确定性评测"},
+    {"id": "output", "label": "可审计产物"},
+    {"id": "formal", "label": "P1 正式批次（历史封存）", "variant": "exception"}
+  ],
+  "phases": [
+    {"id": "prepare", "label": "准备", "fromCol": 0, "toCol": 1},
+    {"id": "reproduce", "label": "复现", "fromCol": 2, "toCol": 3, "variant": "emphasis"},
+    {"id": "judge", "label": "调查与留证", "fromCol": 4, "toCol": 5, "variant": "dashed"}
+  ],
+  "groups": [
+    {"id": "formal-gate", "label": "固定 Manifest 流程", "lane": "formal", "fromCol": 0, "toCol": 3, "variant": "security"}
+  ],
+  "mainPath": ["baseline", "reset", "inject", "reproduce", "diagnose", "evaluate", "artifacts"],
+  "nodes": [
+    {"id": "baseline", "lane": "management", "col": 0, "width": 74, "type": "backend", "label": "健康基线", "sublabel": "build"},
+    {"id": "reset", "lane": "management", "col": 1, "width": 48, "type": "backend", "label": "重置", "sublabel": "reset"},
+    {"id": "inject", "lane": "management", "col": 2, "width": 48, "type": "database", "label": "注入", "sublabel": "inject"},
+    {"id": "reproduce", "lane": "management", "col": 3, "width": 70, "type": "backend", "label": "复现失败", "sublabel": "lab build"},
+    {"id": "diagnose", "lane": "diagnosis", "col": 4, "width": 78, "type": "security", "label": "只读诊断", "sublabel": "Skill / Kernel"},
+    {"id": "evaluate", "lane": "audit", "col": 5, "width": 78, "type": "backend", "label": "确定性评测", "sublabel": "frozen run"},
+    {"id": "artifacts", "lane": "output", "col": 5, "width": 78, "type": "database", "label": "六文件产物", "sublabel": "audit trail"},
+    {"id": "manifest", "lane": "formal", "col": 0, "width": 60, "type": "external", "label": "冻结", "sublabel": "Manifest"},
+    {"id": "preflight", "lane": "formal", "col": 1, "width": 48, "type": "security", "label": "检查", "sublabel": "clean"},
+    {"id": "formal", "lane": "formal", "col": 2, "width": 56, "type": "backend", "label": "唯一批次", "sublabel": "94 calls", "tag": "no retry"},
+    {"id": "closure", "lane": "formal", "col": 3, "width": 82, "type": "database", "label": "封存 INVALID", "sublabel": "no rerun", "tag": "closed"}
+  ],
+  "edges": [
+    {"from": "baseline", "to": "reset", "role": "main"},
+    {"from": "reset", "to": "inject", "role": "main"},
+    {"from": "inject", "to": "reproduce", "role": "main"},
+    {"from": "reproduce", "to": "diagnose", "role": "main", "route": "drop", "fromSide": "bottom", "toSide": "top"},
+    {"from": "diagnose", "to": "evaluate", "role": "main", "route": "drop", "fromSide": "bottom", "toSide": "top"},
+    {"from": "evaluate", "to": "artifacts", "role": "main", "route": "drop", "fromSide": "bottom", "toSide": "top"},
+    {"from": "manifest", "to": "preflight", "variant": "security"},
+    {"from": "preflight", "to": "formal", "variant": "security"},
+    {"from": "formal", "to": "closure", "variant": "security", "role": "error"}
+  ],
+  "cards": [
+    {"dot": "emerald", "title": "普通运行", "items": ["先恢复健康状态，再注入一个已知故障", "dbt 预期失败后，Agent 只能调用类型化只读工具", "评测器对冻结的结果评分；不会在恢复后混入新事实"]},
+    {"dot": "rose", "title": "正式批次的特殊规则", "items": ["doctor 与 Manifest 绑定，但不计入正式 cell", "一旦写入 STARTED，失败也不能替换样本", "该仓库的 P1 批次已永久标记 INVALID_HARNESS"]}
+  ]
+}
