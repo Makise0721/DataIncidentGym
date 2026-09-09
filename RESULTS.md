@@ -8,7 +8,7 @@
 - Manifest `p1-formal-v9`（SHA-256 `698752e82f3a1865bfc25bd41a52a0f77210529ce50a94c76c944d7e5393cfba`），
   106 格 = 94 model-backed + 12 FIXED_RULE；模型 `mimo-v2.5-pro`；预算 8/8/2/300。
 - implementation revision `0c3cc61489e7a3c59023090a810981ea82b3662f`；checkout `493f4af`（包装提交）。
-- 执行形态：**两段式**——首段 86 格后 fail-stop（seq86 注入未生效 → BUILD_FAILED）；经用户明确豁免
+- 执行形态：**两段式**——首段 86 格后 fail-stop（seq86 dbt 子进程崩溃[宿主硬件故障] → BUILD_FAILED）；经用户明确豁免
   一次性纪律后，同 Manifest 同目录恢复，完成剩余 20 格。两段均为同一冻结 Manifest 与实现。
 
 ## 四态结论（reporter 原文）
@@ -16,7 +16,8 @@
 **INVALID —— 正式样本存在环境或安全硬门失败，结果无效。**
 
 - 唯一硬门失败：seq86（run `8fb1f219…`）`ENVIRONMENT_VERIFIED`
-  （`expected=RUN_SETUP_COMPLETE / actual=BUILD_FAILED`：注入未在构建执行时生效）。
+  （`expected=RUN_SETUP_COMPLETE / actual=BUILD_FAILED`）。根因更正：宿主硬件故障导致 dbt 子进程崩溃
+  （非「注入未生效」；该硬件故障现已解决）。
 - 其余硬门全部通过：artifacts_complete、doctor_passed、fixed_rule_zero_model_usage、
   identity_aligned、kernel_state_valid、ledger_complete。
 
@@ -36,9 +37,11 @@
 
 1. 结论为 INVALID：cell 86 的环境硬门失败使本批次按冻结规则整体无效；任何准确率数字不得外推。
 2. 两段式执行（用户豁免）：86 格与 20 格分属两个进程日，segment 间存在时间差；严格一次性口径已偏离，
-   偏离本身经用户明确授权并记录于 decision.md。
+   偏离本身经用户明确授权并记录于 decision.md。恢复段**只补齐终态数量（106/106），并未消除 cell 86 的硬门失败**；
+   reporter 按冻结规则判 INVALID 是正确行为。
 3. 样本量：每策略 15 个配对格，Wilson 区间极宽（如 Kernel paired success 上界 20.4%）。
-4. seq86 的「注入未生效」根因未定位；在定位前，任何后续正式批次都存在同类风险。
+4. seq86 根因已更正为**宿主硬件故障导致 dbt 子进程崩溃**（非「注入未生效」），该硬件故障现已解决；
+   此前「根因未定位、后续批次存在同类风险」的表述作废。
 5. 独占归档已在 86 格部分状态消耗（aggregate `0c158240…`，86 格）；完成态（106 格 + summary/report）
    的聚合见证为 suite 内 `summary.json` 与本文件，未再生成第二份归档。
 

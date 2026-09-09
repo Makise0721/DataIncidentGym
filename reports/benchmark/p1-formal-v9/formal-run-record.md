@@ -14,14 +14,14 @@
 
 - 触发格：sequence 86（`schema_type_change_order_customer_a`，KERNEL_NO_SCHEMA），ledger 终态 `RUN_SETUP_ERROR`。
 - 该格 `ENVIRONMENT_VERIFIED` 门 `expected=[RUN_SETUP_COMPLETE] / actual=[BUILD_FAILED]`，恢复 HEALTHY。
-- 现场 dbt 日志：故障构建 **PASS=25 / ERROR=0 全部成功**——即注入的类型变更在构建执行时未生效，verifier 对意外健康构建 fail-closed。这与 v2 批次的失效模式（seq32 diagnosis 阶段异常）**不同类**。
-- 前序上下文：83–85 格（NO_TOOL×2 + KERNEL_NO_LINEAGE，同族场景）全部以 HEALTHY 恢复收尾；随后 86 的注入未在构建中生效。触发条件未知：可能是特定顺序上下文下的 inject 路径问题（全部 smoke 与 e2e 均未覆盖此序列上下文），也可能是瞬态；数据库状态已被恢复覆盖，无法事后区分。
+- 现场 dbt 日志：故障构建 **PASS=25 / ERROR=0**，注入的类型变更未反映到构建结果，verifier 对意外健康构建 fail-closed。**根因更正（2026-09-07）：现有证据指向宿主硬件故障导致 dbt 子进程崩溃**，上述异常日志为崩溃现场表征，而非「注入未生效」的 inject 路径缺陷。这与 v2 批次的失效模式（seq32 diagnosis 阶段异常）**不同类**。
+- 前序上下文：83–85 格（NO_TOOL×2 + KERNEL_NO_LINEAGE，同族场景）全部以 HEALTHY 恢复收尾；随后 86 格 dbt 子进程崩溃。根因为宿主硬件故障（WHEA APIC parity / segfault 类，见 `.dig/crash-debug-20260904`），**现已解决**；此前「特定顺序上下文 inject 问题 / 瞬态、触发条件未知、数据库已恢复无法事后区分」的解读已推翻，无需 83→86 离线重放取证。
 
 ## 与 v2 批次的对照（修复有效性证明）
 
 - v2 批次：seq32（orphan_payment_coupon_b / KERNEL）diagnosis 阶段异常逃逸 → fail-stop。
 - v9 批次：**同一格 seq32 顺利通过**，批次推进 54 格至 seq86——`eb01a68` 的 diagnosis 顶层 fail-closed 修复按设计生效。
-- v9 的新失效点是另一类（BUILD_FAILED / 注入未生效），两批合计证明：fail-stop 机制本身工作正常，但当前环境/协议在 106 格长跑下存在约每 50–86 格一次的偶发异常率。
+- v9 的新失效点是另一类（BUILD_FAILED，根因为宿主硬件故障导致 dbt 子进程崩溃），两批合计证明：fail-stop 机制本身工作正常；约每 50–86 格一次的偶发异常源于宿主硬件不稳定（现已解决），而非环境/协议本身。
 
 ## 结论（按计划处理表）
 
@@ -30,4 +30,5 @@
 ## 后续约束
 
 - p1-formal-v9 身份已消耗，永不复用；v1–v8 全部封存证据未动。
-- 下一次正式批次（需新身份 `p1-formal-v10+` 与用户授权）前，必须先完成两项取证：seq86 型「注入未生效」（可用 FunctionModel + 真实 lab 按 83→86 顺序离线重放，确定性验证）与残余的偶发异常率评估。
+- seq86 根因已更正为**宿主硬件故障导致 dbt 子进程崩溃**（非「注入未生效」，现已解决），无需 83→86 离线重放取证。
+- **standing 约束（2026-09-07 起）：后续不再运行任何真实模型，包括 doctor 模型探针**；因此不再启动 v10+ 正式批次（含 94 个 model-backed 格必然触发真实模型请求），正式评测线封闭在 INVALID / NOT_ESTABLISHED。
