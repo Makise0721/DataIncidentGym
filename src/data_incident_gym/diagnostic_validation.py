@@ -36,6 +36,10 @@ from data_incident_gym.evidence import (
 from data_incident_gym.profiles import parse_watermark_value
 
 _DUPLICATE_ROOTS = {"SOURCE_EXACT_PAYMENT_DUPLICATE", "SOURCE_SEMANTIC_PAYMENT_DUPLICATE"}
+_SCHEMA_SOURCE_ROOTS = {
+    "SOURCE_SCHEMA_COLUMN_RENAMED",
+    "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+}
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,17 @@ class ValidationContext:
 
 def _incompatible() -> None:
     raise KernelError("ROOT_CLAIM_EVIDENCE_INCOMPATIBLE") from None
+
+
+def _upstream_relations(context: ValidationContext, node_errors: tuple) -> set[str]:
+    return {
+        node.name
+        for record in context.all_records
+        if isinstance(record.content, DbtLineageFact)
+        and record.content.direction == "upstream"
+        and record.content.node_id in {error.node_id for error in node_errors}
+        for node in record.content.related_nodes
+    }
 
 
 def _require_incident_node_and_upstream_evidence(
@@ -70,14 +85,7 @@ def _require_incident_node_and_upstream_evidence(
         error.node_id in context.incident_subjects for error in node_errors
     ):
         _incompatible()
-    upstream_relations = {
-        node.name
-        for record in context.all_records
-        if isinstance(record.content, DbtLineageFact)
-        and record.content.direction == "upstream"
-        and record.content.node_id in {error.node_id for error in node_errors}
-        for node in record.content.related_nodes
-    }
+    upstream_relations = _upstream_relations(context, node_errors)
     if not node_errors or not has_relation_fact or not any(
         getattr(record.content, "relation_name", None) in upstream_relations
         for record in root_records
@@ -86,10 +94,41 @@ def _require_incident_node_and_upstream_evidence(
         _incompatible()
 
 
+def _require_schema_source_target_schema(
+    context: ValidationContext,
+    root_records: list[EvidenceRecord],
+    relation_name: str | None,
+) -> None:
+    """A source schema root cause must cite the declared target relation's schema.
+
+    The declared relation must be upstream of the failed node and the cited
+    evidence must include a schema fact for that same relation; schema facts
+    or aggregate profiles of other relations cannot substitute it.
+    """
+
+    if not relation_name:
+        _incompatible()
+    node_errors = tuple(
+        record.content
+        for record in root_records
+        if isinstance(record.content, DbtNodeErrorFact)
+    )
+    if relation_name not in _upstream_relations(context, node_errors):
+        _incompatible()
+    if not any(
+        isinstance(record.content, RelationSchemaFact)
+        and record.content.relation_name == relation_name
+        for record in root_records
+    ):
+        _incompatible()
+
+
 def validate_root_cause_evidence(
     context: ValidationContext,
     root_cause_code: str,
     root_records: list[EvidenceRecord],
+    *,
+    relation_name: str | None = None,
 ) -> None:
     """Dispatch the cited root-cause evidence to its domain rule."""
 
@@ -110,6 +149,9 @@ def validate_root_cause_evidence(
             _incompatible()
         if root_cause_code == "SOURCE_EXACT_PAYMENT_DUPLICATE":
             _require_incident_node_and_upstream_evidence(context, root_records)
+    elif root_cause_code in _SCHEMA_SOURCE_ROOTS:
+        _require_incident_node_and_upstream_evidence(context, root_records)
+        _require_schema_source_target_schema(context, root_records, relation_name)
     else:
         _require_incident_node_and_upstream_evidence(context, root_records)
 

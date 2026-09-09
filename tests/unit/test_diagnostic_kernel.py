@@ -371,6 +371,7 @@ def _duplicate_kernel() -> DiagnosticKernel:
         observable_schema_relations=("raw_payments",),
         observable_profile_relations=("raw_payments",),
         incident_subjects=("seed.jaffle_shop.raw_payments", "raw_payments"),
+        lineage_node_candidates=("seed.jaffle_shop.raw_payments",),
     )
 
 
@@ -670,6 +671,7 @@ def _orphan_kernel() -> DiagnosticKernel:
         observable_profile_relations=("raw_payments",),
         observable_history_relations=("raw_orders",),
         incident_subjects=("seed.jaffle_shop.raw_payments", "raw_payments", "raw_orders"),
+        lineage_node_candidates=("seed.jaffle_shop.raw_payments",),
     )
 
 
@@ -950,6 +952,7 @@ def _silent_kernel(
         observable_profile_relations=("raw_payments", "raw_orders"),
         observable_history_relations=("raw_payments", "raw_orders"),
         incident_subjects=("seed.jaffle_shop.raw_payments", "raw_payments", "raw_orders"),
+        lineage_node_candidates=("seed.jaffle_shop.raw_payments",),
         incident_observations=observations,
     )
 
@@ -2055,3 +2058,375 @@ def test_payment_rules_do_not_mutate_their_inputs() -> None:
         tuple(silent),
     )
     assert silent == silent_before
+
+
+def _schema_type_kernel() -> DiagnosticKernel:
+    return DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+            "SOURCE_SCHEMA_COLUMN_RENAMED",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_schema_relations=("raw_customers", "raw_orders", "raw_payments"),
+        incident_subjects=("model.jaffle_shop.customers",),
+    )
+
+
+def _schema_type_failure_records() -> tuple[EvidenceRecord, ...]:
+    run = _record(
+        EvidenceType.DBT_RUN_RESULTS,
+        EvidenceSource.DBT_RUN_RESULTS,
+        RUN_ID,
+        DbtRunResultsFact(
+            kind="DBT_RUN_RESULTS",
+            run_id=RUN_ID,
+            run_status="FAILED",
+            dbt_exit_code=1,
+            failed_nodes=("model.jaffle_shop.customers",),
+            skipped_nodes=(),
+        ),
+    )
+    node_error = _record(
+        EvidenceType.DBT_NODE_ERROR,
+        EvidenceSource.DBT_RUN_RESULTS,
+        "model.jaffle_shop.customers",
+        DbtNodeErrorFact(
+            kind="DBT_NODE_ERROR",
+            run_id=RUN_ID,
+            node_id="model.jaffle_shop.customers",
+            resource_type="model",
+            status="error",
+            message="cannot cast text to integer",
+        ),
+    )
+    lineage = _record(
+        EvidenceType.DBT_LINEAGE,
+        EvidenceSource.DBT_MANIFEST,
+        "model.jaffle_shop.customers",
+        DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="model.jaffle_shop.customers",
+            direction="upstream",
+            related_nodes=(
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.stg_orders",
+                    resource_type="model",
+                    name="stg_orders",
+                    distance=1,
+                ),
+                DbtLineageNode(
+                    node_id="seed.jaffle_shop.raw_orders",
+                    resource_type="seed",
+                    name="raw_orders",
+                    distance=2,
+                ),
+                DbtLineageNode(
+                    node_id="seed.jaffle_shop.raw_customers",
+                    resource_type="seed",
+                    name="raw_customers",
+                    distance=2,
+                ),
+                DbtLineageNode(
+                    node_id="seed.jaffle_shop.raw_payments",
+                    resource_type="seed",
+                    name="raw_payments",
+                    distance=2,
+                ),
+            ),
+        ),
+    )
+    return run, node_error, lineage
+
+
+def _schema_record(relation_name: str, column_type: str) -> EvidenceRecord:
+    return _record(
+        EvidenceType.RELATION_SCHEMA,
+        EvidenceSource.POSTGRES_CATALOG,
+        relation_name,
+        RelationSchemaFact(
+            kind="RELATION_SCHEMA",
+            run_id=RUN_ID,
+            schema_name="analytics",
+            relation_name=relation_name,
+            columns=(
+                RelationSchemaColumn(
+                    name="user_id",
+                    data_type=column_type,
+                    nullable=True,
+                    ordinal_position=1,
+                ),
+            ),
+        ),
+    )
+
+
+def _close_schema_type_failure(
+    kernel: DiagnosticKernel,
+    *,
+    records: tuple[EvidenceRecord, ...],
+) -> None:
+    run, node_error, lineage = records
+    _close(
+        kernel,
+        gap_id="g_locate",
+        gap_kind=EvidenceGapKind.LOCATE_FAILURE,
+        tool_name="get_dbt_run_results",
+        arguments={"run_id": RUN_ID},
+        record=run,
+    )
+    _close(
+        kernel,
+        gap_id="g_explain",
+        gap_kind=EvidenceGapKind.EXPLAIN_FAILURE,
+        tool_name="get_dbt_node_error",
+        arguments={"run_id": RUN_ID, "node_id": "model.jaffle_shop.customers"},
+        record=node_error,
+    )
+    _close(
+        kernel,
+        gap_id="g_lineage",
+        gap_kind=EvidenceGapKind.DISCOVER_SOURCE_RELATION,
+        tool_name="get_dbt_lineage",
+        arguments={"node_id": "model.jaffle_shop.customers", "direction": "upstream"},
+        record=lineage,
+    )
+
+
+def _schema_type_decision(
+    records: tuple[EvidenceRecord, ...],
+    *,
+    root_evidence: tuple[EvidenceRecord, ...],
+    relation_name: str,
+) -> KernelDecision:
+    _run, node_error, lineage = records
+    return KernelDecision(
+        status="CONFIRMED",
+        run_id=RUN_ID,
+        selected_hypothesis_id="h_type",
+        assessments=(
+            HypothesisAssessment(
+                hypothesis_id="h_type",
+                verdict=HypothesisVerdict.SUPPORTED,
+                evidence_ids=tuple(record.evidence_id for record in root_evidence),
+            ),
+            HypothesisAssessment(
+                hypothesis_id="h_rename",
+                verdict=HypothesisVerdict.REFUTED,
+                evidence_ids=(lineage.evidence_id,),
+            ),
+        ),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                relation_name=relation_name,
+                evidence_ids=tuple(record.evidence_id for record in root_evidence),
+            ),
+            ClaimEvidence(
+                kind=ClaimKind.AFFECTED_ASSET,
+                value="model.jaffle_shop.customers",
+                evidence_ids=(node_error.evidence_id, lineage.evidence_id),
+            ),
+        ),
+        summary="Source user_id changed from integer to text.",
+        recommended_actions=(),
+        confidence=0.9,
+    )
+
+
+def test_kernel_rejects_schema_root_cause_without_target_relation_schema() -> None:
+    kernel = _schema_type_kernel()
+    records = _schema_type_failure_records()
+    raw_customers_schema = _schema_record("raw_customers", "integer")
+    _close_schema_type_failure(kernel, records=records)
+    _close(
+        kernel,
+        gap_id="g_schema_customers",
+        gap_kind=EvidenceGapKind.DISCRIMINATE_SCHEMA,
+        tool_name="get_relation_schema",
+        arguments={"relation_name": "raw_customers"},
+        record=raw_customers_schema,
+        hypothesis_ids=("h_type", "h_rename"),
+        new_hypotheses=(
+            Hypothesis(
+                hypothesis_id="h_type",
+                root_cause_code="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+            ),
+            Hypothesis(
+                hypothesis_id="h_rename",
+                root_cause_code="SOURCE_SCHEMA_COLUMN_RENAMED",
+            ),
+        ),
+    )
+    before = kernel.snapshot(model_requests_used=0)
+
+    with pytest.raises(KernelError, match="ROOT_CLAIM_EVIDENCE_INCOMPATIBLE"):
+        kernel.finalize(
+            _schema_type_decision(
+                records,
+                root_evidence=(
+                    records[1],
+                    records[2],
+                    raw_customers_schema,
+                ),
+                relation_name="raw_orders",
+            )
+        )
+
+    after = kernel.snapshot(model_requests_used=0)
+    assert after == before
+    assert after.final_status is None
+    assert after.gate_reason is None
+
+
+def test_kernel_accepts_schema_root_cause_with_target_relation_schema() -> None:
+    kernel = _schema_type_kernel()
+    records = _schema_type_failure_records()
+    raw_orders_schema = _schema_record("raw_orders", "text")
+    _close_schema_type_failure(kernel, records=records)
+    _close(
+        kernel,
+        gap_id="g_schema_orders",
+        gap_kind=EvidenceGapKind.DISCRIMINATE_SCHEMA,
+        tool_name="get_relation_schema",
+        arguments={"relation_name": "raw_orders"},
+        record=raw_orders_schema,
+        hypothesis_ids=("h_type", "h_rename"),
+        new_hypotheses=(
+            Hypothesis(
+                hypothesis_id="h_type",
+                root_cause_code="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+            ),
+            Hypothesis(
+                hypothesis_id="h_rename",
+                root_cause_code="SOURCE_SCHEMA_COLUMN_RENAMED",
+            ),
+        ),
+    )
+
+    outcome = kernel.finalize(
+        _schema_type_decision(
+            records,
+            root_evidence=(
+                records[1],
+                records[2],
+                raw_orders_schema,
+            ),
+            relation_name="raw_orders",
+        )
+    )
+
+    assert outcome.status is KernelFinalStatus.CONFIRMED
+    assert outcome.root_cause_code == "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"
+    assert outcome.affected_assets == ("model.jaffle_shop.customers",)
+
+
+def _lineage_candidate_kernel() -> DiagnosticKernel:
+    return DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_EXACT_PAYMENT_DUPLICATE",
+            "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        incident_subjects=("raw_payments", "seed.jaffle_shop.raw_payments"),
+        lineage_node_candidates=("seed.jaffle_shop.raw_payments",),
+    )
+
+
+def test_kernel_lineage_rejects_relation_name_subject_upfront() -> None:
+    kernel = _lineage_candidate_kernel()
+    before = kernel.snapshot(model_requests_used=0)
+
+    with pytest.raises(KernelError, match="NODE_ARGUMENT_NOT_PROVEN"):
+        kernel.prepare_tool(
+            intent=InvestigationIntent(
+                gap_id="g_lineage",
+                gap_kind=EvidenceGapKind.DISCOVER_SOURCE_RELATION,
+            ),
+            tool_name="get_dbt_lineage",
+            arguments={"node_id": "raw_payments", "direction": "upstream"},
+        )
+
+    after = kernel.snapshot(model_requests_used=0)
+    assert after == before
+    assert after.gaps == ()
+    assert after.lineage_node_candidates == ("seed.jaffle_shop.raw_payments",)
+
+
+def test_kernel_lineage_accepts_canonical_candidate_node_id() -> None:
+    kernel = _lineage_candidate_kernel()
+
+    prepared = kernel.prepare_tool(
+        intent=InvestigationIntent(
+            gap_id="g_lineage",
+            gap_kind=EvidenceGapKind.DISCOVER_SOURCE_RELATION,
+        ),
+        tool_name="get_dbt_lineage",
+        arguments={"node_id": "seed.jaffle_shop.raw_payments", "direction": "upstream"},
+    )
+
+    assert prepared.tool_name == "get_dbt_lineage"
+    assert prepared.arguments == {
+        "node_id": "seed.jaffle_shop.raw_payments",
+        "direction": "upstream",
+    }
+
+
+def test_kernel_lineage_candidates_grow_with_accepted_lineage_evidence() -> None:
+    kernel = DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_EXACT_PAYMENT_DUPLICATE",
+            "SOURCE_SEMANTIC_PAYMENT_DUPLICATE",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        incident_subjects=("seed.jaffle_shop.raw_payments",),
+        lineage_node_candidates=("seed.jaffle_shop.raw_payments",),
+    )
+    lineage = _record(
+        EvidenceType.DBT_LINEAGE,
+        EvidenceSource.DBT_MANIFEST,
+        "seed.jaffle_shop.raw_payments",
+        DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="seed.jaffle_shop.raw_payments",
+            direction="downstream",
+            related_nodes=(
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.stg_payments",
+                    resource_type="model",
+                    name="stg_payments",
+                    distance=1,
+                ),
+            ),
+        ),
+    )
+    prepared = kernel.prepare_tool(
+        intent=InvestigationIntent(
+            gap_id="g_lineage",
+            gap_kind=EvidenceGapKind.MAP_IMPACT,
+        ),
+        tool_name="get_dbt_lineage",
+        arguments={"node_id": "seed.jaffle_shop.raw_payments", "direction": "downstream"},
+    )
+    kernel.record_tool_result(prepared, (lineage,))
+
+    state = kernel.snapshot(model_requests_used=0)
+    assert "model.jaffle_shop.stg_payments" in state.lineage_node_candidates
+
+    # The downstream node discovered by accepted evidence is now callable.
+    kernel.prepare_tool(
+        intent=InvestigationIntent(
+            gap_id="g_lineage_downstream",
+            gap_kind=EvidenceGapKind.DISCOVER_SOURCE_RELATION,
+        ),
+        tool_name="get_dbt_lineage",
+        arguments={"node_id": "model.jaffle_shop.stg_payments", "direction": "upstream"},
+    )

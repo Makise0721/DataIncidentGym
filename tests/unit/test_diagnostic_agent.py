@@ -222,9 +222,9 @@ def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> No
 
     assert expected == P1_ROOT_CAUSE_CODES
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
-        "p1.kernel.v9",
+        "p1.kernel.v10",
         "p1.static.v5",
-        "p1.controller.v8",
+        "p1.controller.v9",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)
@@ -471,3 +471,319 @@ async def test_tool_budget_exhaustion_is_not_reported_as_request_limit(
     result = await runner.diagnose()
 
     assert result.diagnosis.summary == "MODEL_TOOL_CALL_LIMIT"
+
+def _invalid_static_payload(missing_summary: bool = True) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": "INSUFFICIENT_EVIDENCE",
+        "run_id": RUN_ID,
+        "root_cause_code": None,
+        "affected_assets": [],
+        "evidence_ids": [],
+        "claims": [],
+        "unresolved_evidence": [],
+        "recommended_actions": [],
+        "confidence": 0.2,
+    }
+    if not missing_summary:
+        payload["summary"] = "More evidence is required."
+    return payload
+
+
+def _protocol_event(result) -> object:
+    return next(
+        (event for event in result.trace if getattr(event, "event_type", None) == "MODEL_PROTOCOL"),
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_output_schema_rejection_records_safe_field_path(tmp_path: Path) -> None:
+    """A missing field is classified and located without leaking values."""
+
+    def return_bad(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    _invalid_static_payload(missing_summary=True),
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    result = await _static_runner(tmp_path, FunctionModel(return_bad)).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event is not None
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert event.stage == "OUTPUT_SCHEMA_VALIDATION"
+    assert event.error_loc == ("summary",)
+    assert event.error_kind == ("missing",)
+    dumped = result.model_dump_json()
+    assert "Field required" not in dumped
+    assert '"input"' not in dumped
+    assert result.metrics.model_requests == 3
+
+
+@pytest.mark.asyncio
+async def test_kernel_output_enum_rejection_is_classified_and_located(
+    tmp_path: Path,
+) -> None:
+    """An invalid status literal surfaces the field path and error kind."""
+
+    _write_public_run(tmp_path)
+
+    def return_bad(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    {
+                        "schema_version": "p1.kernel_decision.v1",
+                        "status": "MAYBE",
+                        "run_id": RUN_ID,
+                        "summary": "Invalid status.",
+                        "recommended_actions": [],
+                        "confidence": 0.2,
+                    },
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    runner = DiagnosisRunner.for_run(
+        RUN_ID,
+        _settings(),
+        DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+        tmp_path,
+        model=FunctionModel(return_bad),
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+    )
+    result = await runner.diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event is not None
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert "status" in event.error_loc
+    assert event.error_kind == ("literal_error",)
+
+
+@pytest.mark.asyncio
+async def test_kernel_cross_field_contract_rejection_records_error_kind(
+    tmp_path: Path,
+) -> None:
+    """A decision that violates a model validator is classified safely."""
+
+    _write_public_run(tmp_path)
+
+    def return_bad(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    {
+                        "schema_version": "p1.kernel_decision.v1",
+                        "status": "CONFIRMED",
+                        "run_id": RUN_ID,
+                        "selected_hypothesis_id": None,
+                        "assessments": [],
+                        "claims": [],
+                        "unresolved_evidence": [],
+                        "summary": "CONFIRMED without a selected hypothesis.",
+                        "recommended_actions": [],
+                        "confidence": 0.9,
+                    },
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    runner = DiagnosisRunner.for_run(
+        RUN_ID,
+        _settings(),
+        DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+        tmp_path,
+        model=FunctionModel(return_bad),
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+    )
+    result = await runner.diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event is not None
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert event.error_kind == ("value_error",)
+
+
+@pytest.mark.asyncio
+async def test_output_schema_rejection_recovers_after_retry(tmp_path: Path) -> None:
+    """The model corrects the output on the first retry and diagnosis completes."""
+
+    def scripted(messages: list[object], agent_info: AgentInfo) -> ModelResponse:
+        invalid_attempts = sum(
+            isinstance(part, ToolCallPart) and part.tool_name == agent_info.output_tools[0].name
+            for message in messages
+            for part in message.parts
+        )
+        payload = _invalid_static_payload(missing_summary=invalid_attempts == 0)
+        if invalid_attempts > 0:
+            payload["unresolved_evidence"] = [
+                {
+                    "evidence_kind": "RELATION_SCHEMA",
+                    "subject": "raw_orders",
+                    "reason_code": "NOT_OBSERVABLE",
+                }
+            ]
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    payload,
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    result = await _static_runner(tmp_path, FunctionModel(scripted)).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+    assert _protocol_event(result) is None
+    assert result.metrics.model_requests == 2
+
+
+def test_schema_prompt_keeps_insufficient_bound_to_indistinguishability() -> None:
+    """The transformation-definition absence alone must not force INSUFFICIENT."""
+
+    flat = " ".join(KERNEL_PROMPT.split())
+    assert (
+        "When the target relation schema is unavailable, or the available public "
+        "evidence still cannot distinguish a source change from a transformation cast"
+        in flat
+    )
+    assert "may still be confirmable" in flat
+    assert "or the transformation definition is not observable, keep both source-change" not in flat
+
+
+@pytest.mark.asyncio
+async def test_terminal_schema_error_attributes_current_round_not_previous(
+    tmp_path: Path,
+) -> None:
+    """Error A then error B: the terminal trace must report B, not stale A."""
+
+    def scripted(
+        messages: list[object],
+        agent_info: AgentInfo,
+    ) -> ModelResponse:
+        attempts = sum(
+            isinstance(part, ToolCallPart)
+            for message in messages
+            for part in message.parts
+        )
+        payload = _invalid_static_payload(missing_summary=attempts < 2)
+        if attempts >= 2:
+            payload["status"] = "MAYBE"
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    payload,
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    result = await _static_runner(tmp_path, FunctionModel(scripted)).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event is not None
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert event.error_loc == ("status",)
+    assert event.error_kind == ("literal_error",)
+    assert "summary" not in event.error_loc
+    assert "missing" not in event.error_kind
+
+
+@pytest.mark.asyncio
+async def test_unknown_output_field_key_never_reaches_persisted_trace(
+    tmp_path: Path,
+) -> None:
+    """extra_forbidden keys supplied by the model are replaced by a marker."""
+
+    secret_key = "PRIVATE_CONTENT_IN_UNEXPECTED_FIELD"
+
+    def return_bad(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        payload = _invalid_static_payload(missing_summary=False)
+        payload[secret_key] = "secret-value-must-not-persist"
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    payload,
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    result = await _static_runner(tmp_path, FunctionModel(return_bad)).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event is not None
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert event.error_kind == ("extra_forbidden",)
+    assert event.error_loc == ("<unknown-field>",)
+    dumped = result.model_dump_json()
+    assert secret_key not in dumped
+    assert "secret-value-must-not-persist" not in dumped
+
+
+def test_safe_validation_details_filters_unknown_names_and_bounds_length() -> None:
+    from data_incident_gym.diagnostic_agent import (
+        _MAX_LOC_SEGMENT_CHARS,
+        _MAX_LOC_TOTAL_CHARS,
+        _SAFE_ERROR_KINDS,
+        _UNKNOWN_FIELD_MARKER,
+        _safe_validation_details,
+    )
+    from data_incident_gym.diagnostic_contracts import KernelDecision
+
+    long_key = "PRIVATE_" + "k" * 300
+    payload = {
+        "schema_version": "p1.kernel_decision.v1",
+        "status": "CONFIRMED",
+        "run_id": RUN_ID,
+        "selected_hypothesis_id": "h_type",
+        "assessments": [],
+        "claims": [
+            {
+                "kind": "ROOT_CAUSE",
+                "value": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                "evidence_ids": ["ev_" + "a" * 60],
+                long_key: "secret-nested",
+            }
+        ],
+        "unresolved_evidence": [],
+        "summary": "x",
+        "recommended_actions": [],
+        "confidence": 0.9,
+    }
+    with pytest.raises(Exception) as caught:
+        KernelDecision.model_validate(payload)
+    from pydantic import ValidationError
+
+    assert isinstance(caught.value, ValidationError)
+    locs, kinds = _safe_validation_details(caught.value)
+
+    assert long_key not in locs
+    assert "secret-nested" not in locs
+    assert all(len(segment) <= _MAX_LOC_SEGMENT_CHARS for segment in locs)
+    assert all(kind in _SAFE_ERROR_KINDS for kind in kinds)
+    assert sum(len(segment) for segment in locs) <= _MAX_LOC_TOTAL_CHARS
+    # The nested unknown key collapses to the fixed marker.
+    assert _UNKNOWN_FIELD_MARKER in locs
+    assert "claims" in locs

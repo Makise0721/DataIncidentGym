@@ -98,6 +98,7 @@ def _duplicate_kernel_with_extra_allowance(extra_profile_relation: str) -> Diagn
         observable_schema_relations=("raw_payments",),
         observable_profile_relations=("raw_payments", extra_profile_relation),
         incident_subjects=("seed.jaffle_shop.raw_payments", "raw_payments"),
+        lineage_node_candidates=("seed.jaffle_shop.raw_payments",),
     )
 
 
@@ -549,9 +550,9 @@ def _confirmed_run_result(
             strategy=DiagnosticStrategy.DIAGNOSTIC_KERNEL,
             base_prompt_version="p1.base.v1",
             base_prompt_sha256="0" * 64,
-            strategy_prompt_version="p1.kernel.v9",
+            strategy_prompt_version="p1.kernel.v10",
             strategy_prompt_sha256="1" * 64,
-            controller_protocol_version="p1.controller.v8",
+            controller_protocol_version="p1.controller.v9",
             controller_protocol_sha256="2" * 64,
             tool_schema_sha256="3" * 64,
         ),

@@ -24,19 +24,39 @@ Reference only registered hypothesis IDs, and register at least two compatible h
 before attempting a confirmed diagnosis. Every opened evidence gap must close with a
 successful typed tool result before you confirm a diagnosis. For relation tools, query
 only relations listed under provable_relations for that tool in the ledger; that list is
-exact and complete, and any relation not on it will be rejected. If a relation is rejected
-as not allowed by the run scope, or a relation argument is rejected as unproven, never
-retry that relation or a variant of it: instead query a relation that is provable, register
-the competing hypothesis on a provable call, or finalize INSUFFICIENT_EVIDENCE with an
-unresolved-evidence declaration bound to the blocked gap. If a decisive gap is blocked or
-the available evidence cannot distinguish compatible causes, return INSUFFICIENT_EVIDENCE
-rather than guessing.
+exact and complete, and any relation not on it will be rejected. One boundary probe is
+allowed when a relation outside that list is directly relevant to the declared incident
+or the accepted evidence and its permission receipt is required to explain the evidence
+gap: call that relation tool for that relation exactly once, and the controller records
+the real rejection as a blocked gap that counts against the tool budget and returns no
+data; never probe a variant of a blocked relation or repeat a blocked call. For
+get_dbt_lineage, query only node identifiers listed under provable_lineage_nodes in the
+ledger; a relation name or a schema-qualified name is not a node identifier. If a relation
+is rejected as not allowed by the run scope, or a node argument is rejected as unproven,
+never retry that relation or a variant of it: instead query a relation that is provable,
+register the competing hypothesis on a provable call, or finalize INSUFFICIENT_EVIDENCE
+with unresolved-evidence declarations bound to the blocked gaps. If a decisive gap is
+blocked or the available evidence cannot distinguish compatible causes, return
+INSUFFICIENT_EVIDENCE rather than guessing.
 
 For a required-field NULL, confirm SOURCE_REQUIRED_FIELD_NULL only when a matching upstream
 relation profile reports a positive null_count for the implicated column. A downstream
 not-null failure without that source profile is also compatible with a transformation that
 introduced the NULL, so return INSUFFICIENT_EVIDENCE when the source profile and transformation
 definition are both unavailable.
+
+For a source schema root cause, confirm SOURCE_SCHEMA_COLUMN_RENAMED or
+SOURCE_SCHEMA_COLUMN_TYPE_CHANGED only when you declare the target relation in the claim
+relation_name and cite that same relation's schema fact from the failed node's upstream
+path; a schema fact or aggregate profile of any other relation cannot substitute it. A
+current column type or name alone does not prove a change happened, and without the target
+schema, a matching node error is also compatible with TRANSFORMATION_COLUMN_CAST_CHANGED or
+a renamed field introduced in a transformation. When the target relation schema is
+unavailable, or the available public evidence still cannot distinguish a source change from
+a transformation cast, keep both alternatives and return INSUFFICIENT_EVIDENCE rather than
+confirming the source hypothesis. The absence of a transformation definition alone does not
+force INSUFFICIENT_EVIDENCE: when the target schema is observed, a source change may still
+be confirmable.
 
 A successful dbt run proves only that the executed models and tests completed. It does not prove
 that a public data-quality alert is healthy. For a payment duplicate alert, inspect the declared

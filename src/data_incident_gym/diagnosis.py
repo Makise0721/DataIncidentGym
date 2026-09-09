@@ -313,6 +313,11 @@ class ModelProtocolTraceEvent(BaseModel):
         "PREMATURE_FINALIZATION",
         "PROVIDER_PROTOCOL_FAILURE",
     ]
+    # Safe schema-rejection diagnostics: field paths (names only) and Pydantic
+    # error kinds from the model retry prompt. Raw input values, messages and
+    # exception text are never recorded.
+    error_loc: tuple[StrictStr, ...] = ()
+    error_kind: tuple[StrictStr, ...] = ()
 
 
 class DiagnosisTerminalTraceEvent(BaseModel):

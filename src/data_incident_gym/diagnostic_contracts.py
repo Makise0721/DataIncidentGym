@@ -251,6 +251,7 @@ class InvestigationState(BaseModel):
     run_id: StrictStr = Field(pattern=_RUN_ID_PATTERN)
     revision: Annotated[StrictInt, Field(ge=0)]
     allowed_root_cause_codes: tuple[StrictStr, ...]
+    lineage_node_candidates: tuple[StrictStr, ...] = ()
     hypotheses: tuple[Hypothesis, ...]
     gaps: tuple[EvidenceGap, ...]
     assessments: tuple[HypothesisAssessment, ...]
@@ -270,6 +271,7 @@ class InvestigationState(BaseModel):
     @model_validator(mode="after")
     def validate_invariants(self) -> Self:
         reject_duplicates(self.allowed_root_cause_codes, "ontology members")
+        reject_duplicates(self.lineage_node_candidates, "lineage node candidates")
         reject_duplicates(tuple(item.hypothesis_id for item in self.hypotheses), "hypothesis IDs")
         reject_duplicates(tuple(item.gap_id for item in self.gaps), "gap IDs")
         reject_duplicates(self.evidence_inventory, "evidence inventory IDs")

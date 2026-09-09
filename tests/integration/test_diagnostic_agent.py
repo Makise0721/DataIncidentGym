@@ -182,6 +182,7 @@ def _scripted_diagnosis(
         {
             "kind": "ROOT_CAUSE",
             "value": selected[1],
+            "relation_name": schema.relation_name,
             "evidence_ids": [node_error_id, schema_id],
         },
         {

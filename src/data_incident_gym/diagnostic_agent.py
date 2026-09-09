@@ -13,7 +13,7 @@ from time import monotonic
 from typing import Annotated, Any, Literal, Protocol
 
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, StrictStr
+from pydantic import BaseModel, Field, StrictStr, ValidationError
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
@@ -70,10 +70,10 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v9"
+KERNEL_PROMPT_VERSION = "p1.kernel.v10"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v8"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v9"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -341,6 +341,7 @@ class _RunState:
     static_diagnosis: Diagnosis | None = None
     last_response: ModelResponse | None = None
     last_observation: tuple[tuple[str, ...], tuple[str, ...], bool] | None = None
+    current_output_details: tuple[tuple[str, ...], tuple[str, ...]] | None = None
     protocol_failure: tuple[str, str, str | None] | None = None
     protocol_trace_recorded: bool = False
     next_gap_number: int = 1
@@ -372,6 +373,7 @@ class _RunState:
         self.last_response = response
         self.protocol_failure = None
         self.protocol_trace_recorded = False
+        self.current_output_details = None
         function_names = {tool.name for tool in parameters.function_tools}
         output_names = {tool.name for tool in parameters.output_tools}
         function_calls = tuple(
@@ -396,19 +398,23 @@ class _RunState:
         category: str,
         stage: str,
         tool_name: str | None,
+        error_loc: tuple[str, ...] = (),
+        error_kind: tuple[str, ...] = (),
     ) -> None:
-        self.protocol_failure = (category, stage, tool_name)
+        self.protocol_failure = (category, stage, tool_name, error_loc, error_kind)
 
     def append_protocol_trace(self) -> None:
         if self.protocol_trace_recorded or self.protocol_failure is None:
             return
-        category, stage, tool_name = self.protocol_failure
+        category, stage, tool_name, error_loc, error_kind = self.protocol_failure
         self.trace.append(
             ModelProtocolTraceEvent(
                 event_type="MODEL_PROTOCOL",
                 stage=stage,
                 tool_name=tool_name,
                 category=category,
+                error_loc=error_loc,
+                error_kind=error_kind,
             )
         )
         self.protocol_trace_recorded = True
@@ -601,7 +607,166 @@ class _ModelObservationAdapter(Model):
     ) -> ModelResponse:
         response = await self._model.request(messages, model_settings, model_request_parameters)
         self._state.record_model_response(response, model_request_parameters)
+        self._state.current_output_details = _output_call_details(
+            response,
+            model_request_parameters,
+            self._state.strategy,
+        )
         return response
+
+
+_MAX_ERROR_ITEMS = 3
+_MAX_LOC_SEGMENTS = 4
+_MAX_LOC_SEGMENT_CHARS = 64
+_MAX_LOC_TOTAL_CHARS = 200
+_UNKNOWN_FIELD_MARKER = "<unknown-field>"
+
+# Known output/claim/tool schema fields; only these names may appear in trace
+# error locations. Anything else is replaced with the fixed marker above, so
+# model-supplied keys never reach the persisted trace.
+_SAFE_LOC_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "run_id",
+        "summary",
+        "confidence",
+        "selected_hypothesis_id",
+        "assessments",
+        "claims",
+        "unresolved_evidence",
+        "recommended_actions",
+        "hypothesis_id",
+        "root_cause_code",
+        "verdict",
+        "evidence_ids",
+        "kind",
+        "value",
+        "relation_name",
+        "history_name",
+        "bucket",
+        "current_value",
+        "evidence_kind",
+        "subject",
+        "reason_code",
+        "asset",
+        "affected_assets",
+        "node_id",
+        "direction",
+        "gap_id",
+        "gap_kind",
+        "tool_name",
+        "error_code",
+        "kernel_hypothesis_ids",
+        "kernel_new_hypotheses",
+        "arguments",
+        "fingerprint",
+    }
+)
+
+# Fixed Pydantic error-kind vocabulary; anything outside is dropped.
+_SAFE_ERROR_KINDS = frozenset(
+    {
+        "missing",
+        "extra_forbidden",
+        "literal_error",
+        "value_error",
+        "string_pattern_mismatch",
+        "string_type",
+        "model_attributes_type",
+        "union_tag_invalid",
+        "json_invalid",
+        "int_type",
+        "float_type",
+        "bool_type",
+        "dict_type",
+        "list_type",
+        "tuple_type",
+        "string_too_short",
+        "string_too_long",
+        "int_too_small",
+        "int_too_big",
+        "finite_number",
+        "greater_than",
+        "less_than",
+        "url_parsing",
+        "uuid_parsing",
+        "date_parsing",
+        "datetime_parsing",
+        "time_parsing",
+        "timezone_aware",
+        "timezone_naive",
+        "recursion_loop",
+        "model_type",
+        "none_required",
+        "not_none",
+        "no_such_attribute",
+        "invalid_key",
+        "enum",
+    }
+)
+
+
+def _safe_validation_details(
+    error: ValidationError,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Project Pydantic error details onto allowlisted, bounded trace fields."""
+
+    locs: list[str] = []
+    kinds: list[str] = []
+    total_chars = 0
+    for item in error.errors()[:_MAX_ERROR_ITEMS]:
+        error_type = item.get("type")
+        if not isinstance(error_type, str) or error_type not in _SAFE_ERROR_KINDS:
+            continue
+        kinds.append(error_type)
+        unknown_seen = False
+        for segment in item.get("loc", ())[:_MAX_LOC_SEGMENTS]:
+            if not isinstance(segment, str):
+                continue
+            if segment not in _SAFE_LOC_FIELDS or len(segment) > _MAX_LOC_SEGMENT_CHARS:
+                unknown_seen = True
+                continue
+            if segment not in locs and total_chars + len(segment) <= _MAX_LOC_TOTAL_CHARS:
+                locs.append(segment)
+                total_chars += len(segment)
+        if unknown_seen and _UNKNOWN_FIELD_MARKER not in locs:
+            locs.append(_UNKNOWN_FIELD_MARKER)
+    return tuple(locs), tuple(dict.fromkeys(kinds))
+
+
+def _output_call_details(
+    response: ModelResponse,
+    parameters: ModelRequestParameters,
+    strategy: DiagnosticStrategy,
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Locally validate the structured output call for safe error attribution.
+
+    PydanticAI performs the same validation afterwards; parsing here gives the
+    current round's field-level error before the SDK raises a terminal
+    exception that carries no details. Raw values never leave this function.
+    """
+
+    try:
+        output_names = {tool.name for tool in parameters.output_tools}
+        if not output_names:
+            return None
+        payload: object | None = None
+        for part in response.parts:
+            if isinstance(part, ToolCallPart) and part.tool_name in output_names:
+                payload = part.args_as_dict()
+                break
+        if not isinstance(payload, dict):
+            return None
+        model_type = KernelDecision if _is_kernel_strategy(strategy) else _StaticDecision
+        model_type.model_validate(payload)
+    except ValidationError as error:
+        return _safe_validation_details(error)
+    except Exception:
+        # A malformed or SDK-specific payload must not break the diagnosis;
+        # coarse classification still applies when details are unavailable.
+        return None
+    return None
 
 
 def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
@@ -614,10 +779,13 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
         )
     elif isinstance(error, (UnexpectedModelBehavior, ToolRetryError, ValueError, TypeError)):
         if observation is not None and observation[1]:
+            details = state.current_output_details or ((), ())
             state.set_protocol_failure(
                 category="OUTPUT_SCHEMA_REJECTED",
                 stage="OUTPUT_SCHEMA_VALIDATION",
                 tool_name=observation[1][-1],
+                error_loc=details[0],
+                error_kind=details[1],
             )
         elif observation is not None and observation[0]:
             state.set_protocol_failure(
@@ -661,6 +829,7 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
             tool_name: list(relations)
             for tool_name, relations in kernel.provable_relations_by_tool().items()
         },
+        "provable_lineage_nodes": list(kernel.provable_lineage_nodes()),
         "model_requests_remaining": snapshot.model_requests_remaining,
         "tool_calls_remaining": snapshot.tool_calls_remaining,
     }
@@ -669,8 +838,13 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
         + _canonical_json(payload)
         + "\nGap identifiers and kinds are allocated by the controller; reference the gaps "
         "above by their gap_id; query only relations listed under provable_relations for "
-        "that tool; the list is exact and complete and relations returned by evidence do "
-        "not extend it; budget remaining requests conservatively."
+        "that tool and only node identifiers listed under provable_lineage_nodes for "
+        "get_dbt_lineage; a relation name or schema-qualified name is not a node "
+        "identifier and rejected node arguments must never be retried; the lists are "
+        "exact and complete and relations returned by evidence do not extend them. One "
+        "boundary probe per blocked-relevant relation is allowed to record its "
+        "permission receipt; it counts against the budget and returns no data. Budget "
+        "remaining requests conservatively."
     )
 
 
@@ -678,14 +852,17 @@ def _kernel_state_prepare(
     ctx: RunContext[_RunState],
     tool_def: ToolDefinition,
 ) -> ToolDefinition:
-    """Attach the current investigation ledger to each Kernel tool description."""
+    """Attach the current investigation ledger to each Kernel tool description.
+
+    The ledger is attached from the very first prepared call, including an
+    empty investigation, so the model always sees provable relations, lineage
+    node candidates and the remaining budget before choosing identifiers.
+    """
 
     kernel = ctx.deps.kernel
     if kernel is None:
         return tool_def
     snapshot = kernel.snapshot(model_requests_used=ctx.deps.usage.requests)
-    if not snapshot.hypotheses and not snapshot.gaps:
-        return tool_def
     description = tool_def.description or ""
     ledger = _kernel_state_summary(kernel, snapshot)
     return replace(tool_def, description=f"{description}\n\n{ledger}" if description else ledger)
@@ -695,12 +872,13 @@ def _kernel_retry_message(
     code: str,
     *,
     provable_relations: tuple[str, ...] | None = None,
+    provable_lineage_nodes: tuple[str, ...] | None = None,
 ) -> str:
     messages = {
         "ARGUMENTS_INVALID": "Send only the business arguments for the selected tool.",
         "GAP_TOOL_MISMATCH": "Choose the business tool matching the declared evidence gap.",
         "KERNEL_INTENT_MISSING": "Every Kernel business call must carry its binding arguments.",
-        "NODE_ARGUMENT_NOT_PROVEN": "Use a node identifier returned by accepted evidence.",
+        "NODE_ARGUMENT_NOT_PROVEN": "Use a canonical node identifier from the run catalog.",
         "HYPOTHESIS_REFERENCE_UNKNOWN": "Reference only registered hypothesis IDs.",
         "DUPLICATE_GAP_ID": "Gap identifiers are controller-allocated; retry the call as-is.",
         "DUPLICATE_TOOL_CALL": "Do not repeat an equivalent successful query.",
@@ -714,6 +892,16 @@ def _kernel_retry_message(
     if code == "RELATION_NOT_ALLOWED" and provable_relations:
         listed = ", ".join(provable_relations)
         message += f" Currently provable for this tool: {listed}."
+    if code == "RELATION_NOT_ALLOWED" and not provable_relations:
+        message += " No relation is provable for this tool."
+    if code == "RELATION_NOT_ALLOWED":
+        message += (
+            " Bind your unresolved-evidence declaration to this blocked gap; do not "
+            "retry this relation or a variant of it."
+        )
+    if code == "NODE_ARGUMENT_NOT_PROVEN" and provable_lineage_nodes:
+        listed = ", ".join(provable_lineage_nodes)
+        message += f" Lineage nodes callable in this run: {listed}."
     return f"{code}: {message}"
 
 
@@ -1134,9 +1322,22 @@ def _execute_evidence(
             started_at=started_at,
         )
         provable = None
+        lineage_nodes = None
         if error.code == "RELATION_NOT_ALLOWED" and state.kernel is not None:
             provable = state.kernel.provable_relations_by_tool().get(tool_name)
-        raise ToolFailed(_kernel_retry_message(error.code, provable_relations=provable)) from None
+        if (
+            error.code == "NODE_ARGUMENT_NOT_PROVEN"
+            and tool_name == "get_dbt_lineage"
+            and state.kernel is not None
+        ):
+            lineage_nodes = state.kernel.provable_lineage_nodes()
+        raise ToolFailed(
+            _kernel_retry_message(
+                error.code,
+                provable_relations=provable,
+                provable_lineage_nodes=lineage_nodes,
+            )
+        ) from None
 
     try:
         records = tuple(call())
@@ -1354,6 +1555,12 @@ class DiagnosisRunner:
 
     def _kernel(self, context: ObservableRunContext) -> DiagnosticKernel:
         observable = context.runtime["observable_relations"]
+        resolver = getattr(self._tools, "lineage_node_candidates", None)
+        lineage_node_candidates = (
+            tuple(resolver(context.incident_brief.subjects))
+            if callable(resolver)
+            else ()
+        )
         return DiagnosticKernel.start(
             run_id=self._run_id,
             allowed_root_cause_codes=P1_ROOT_CAUSE_CODES,
@@ -1377,6 +1584,7 @@ class DiagnosisRunner:
                 (observation.kind, observation.subject, observation.value)
                 for observation in context.incident_brief.observations
             ),
+            lineage_node_candidates=lineage_node_candidates,
         )
 
     def _agent(self, state: _RunState) -> Agent[_RunState, Any]:

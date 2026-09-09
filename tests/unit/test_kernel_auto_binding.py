@@ -546,6 +546,7 @@ def test_ledger_text_and_kernel_rejection_agree_on_relation_allowlist() -> None:
         tool_call_limit=8,
         observable_schema_relations=("raw_payments",),
         incident_subjects=("model.jaffle_shop.stg_payments",),
+        lineage_node_candidates=("model.jaffle_shop.stg_payments",),
     )
     observed_at = datetime(2026, 8, 30, tzinfo=UTC)
     lineage = EvidenceRecord.create(
@@ -583,11 +584,14 @@ def test_ledger_text_and_kernel_rejection_agree_on_relation_allowlist() -> None:
     kernel.record_tool_result(prepared, (lineage,))
 
     summary = _kernel_state_summary(kernel, kernel.snapshot(model_requests_used=0))
+    ledger = json.loads(summary.splitlines()[1])
 
     assert "already returned by accepted evidence" not in summary
-    assert "relations returned by evidence do not extend it" in summary
-    assert "raw_orders" not in summary
-    assert "raw_payments" in summary
+    assert "relations returned by evidence do not extend them" in summary
+    # The lineage node returned by accepted evidence is callable and visible...
+    assert "seed.jaffle_shop.raw_orders" in ledger["provable_lineage_nodes"]
+    # ...but it does not extend the schema relation whitelist.
+    assert ledger["provable_relations"]["get_relation_schema"] == ["raw_payments"]
 
     with pytest.raises(KernelError, match="RELATION_NOT_ALLOWED"):
         kernel.prepare_tool(

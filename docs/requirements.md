@@ -10,6 +10,7 @@
 > M5.2 修订：用户于 2026-08-28 批准当前模型切换为 OpenAI-compatible 的 `mimo-v2.5`；`qwen3.5:9b` 的历史失败记录不计入新模型验收分母。
 > M5.3 修订：用户于 2026-09-06 批准当前模型由 `mimo-v2.5` 切换为同供应商 OpenAI-compatible 的 `mimo-v2.5-pro`；`mimo-v2.5` 的三批 smoke 观察不计入新模型的验收分母，其记录保留为历史轨迹。
 > M6.1 修订：用户于 2026-09-08 批准 M6 责任描述修订——controller 在调用边界管理 gap 标识与工具到 gap 类型的映射，模型工具参数不再包含 kernel_gap_id/kernel_gap_kind（见 §17 M6）；假设、证据与确认合同不变。
+> M13.1 修订（2026-09-09 依据 p1-v8 smoke followup 计划批准）：SOURCE_SCHEMA_COLUMN_RENAMED / SOURCE_SCHEMA_COLUMN_TYPE_CHANGED 的 CONFIRMED 必须由模型在 root cause claim 中声明 relation_name 为目标关系，并引用同一目标关系、位于失败节点上游路径上的 RelationSchemaFact；其他关系的 schema 或任意聚合 profile 不能替代该必要证据。目标 schema 不可得或无法排除 TRANSFORMATION_COLUMN_CAST_CHANGED 时必须返回 INSUFFICIENT_EVIDENCE。Diagnostic Kernel 在终态提交前验证该绑定，evaluator 与六文件产物合同不变。get_dbt_lineage 仅接受运行 catalog 与已证明节点求交出的 canonical node_id（账本 provable_lineage_nodes 展示）；关系名或 schema 限定名在创建 gap 前被拒绝且不可重试。对与案情直接相关但不在工具白名单的关系，模型可对该工具发起一次边界探针以记录真实权限拒绝收据：探针计入原预算、不访问数据库、不产生成功证据、不可重试变体；INSUFFICIENT_EVIDENCE 的缺失证据声明必须绑定真实 BLOCKED gap（evaluator 收据合同不变）。
 > 当前约束：本文件定义 P0 基本原型及后续阶段边界；实施计划批准前不开始实现。
 
 ## 1. 产品摘要

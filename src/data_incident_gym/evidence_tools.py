@@ -342,6 +342,20 @@ class EvidenceTools:
         if run_id != self._run_id:
             raise_without_context(RunContextMismatchError("Run context does not match"))
 
+    def lineage_node_candidates(
+        self, subjects: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Return the exact manifest catalog node IDs among the given subjects.
+
+        Only exact catalog keys are callable by ``get_dbt_lineage``; relation
+        names or schema-qualified names are never candidates.
+        """
+
+        nodes = self._artifacts.manifest["nodes"]
+        sources = self._artifacts.manifest.get("sources", {})
+        catalog = {**nodes, **sources}
+        return tuple(sorted(subject for subject in subjects if subject in catalog))
+
     def get_dbt_run_results(self, run_id: str) -> tuple[EvidenceRecord, ...]:
         self._validate_context(run_id)
         results = self._artifacts.run_results["results"]

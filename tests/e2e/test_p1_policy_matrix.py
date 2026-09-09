@@ -1131,6 +1131,7 @@ def _model_response(
                 {
                     "kind": "ROOT_CAUSE",
                     "value": root_cause,
+                    "relation_name": schema.relation_name,
                     "evidence_ids": [run_id_evidence, node_error_id, schema_id, lineage_id],
                 },
                 *(

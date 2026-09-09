@@ -385,6 +385,7 @@ async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result
             {
                 "kind": "ROOT_CAUSE",
                 "value": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                "relation_name": "raw_payments",
                 "evidence_ids": [records[1].evidence_id, records[3].evidence_id],
             },
             {
@@ -553,6 +554,7 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
             {
                 "kind": "ROOT_CAUSE",
                 "value": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                "relation_name": "raw_payments",
                 "evidence_ids": [records[1].evidence_id, records[3].evidence_id],
             },
             {
@@ -639,7 +641,10 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
     assert result.metrics.successful_tool_calls == 5
     assert sum(isinstance(event, ToolTraceEvent) for event in result.trace) == 5
     assert len(tool_descriptions) == 4
-    assert "CURRENT INVESTIGATION LEDGER" not in tool_descriptions[0]
+    # The ledger is attached from the very first prepared call (followup fix).
+    assert "CURRENT INVESTIGATION LEDGER" in tool_descriptions[0]
+    assert '"provable_relations"' in tool_descriptions[0]
+    assert '"provable_lineage_nodes"' in tool_descriptions[0]
     assert '"g_auto_1"' in tool_descriptions[1]
     assert '"CLOSED"' in tool_descriptions[1]
     assert '"provable_relations"' in tool_descriptions[1]

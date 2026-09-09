@@ -105,11 +105,13 @@ class DiagnosticKernel:
         health_target_subjects: tuple[str, ...] = (),
         incident_logical_observed_at: datetime | None = None,
         incident_observations: tuple[tuple[str, str, str], ...] = (),
+        lineage_node_candidates: tuple[str, ...] = (),
     ) -> None:
         self._run_id = run_id
         self._allowed_root_cause_codes = allowed_root_cause_codes
         self._model_request_limit = model_request_limit
         self._tool_call_limit = tool_call_limit
+        self._lineage_node_candidates = set(lineage_node_candidates)
         default_relations = set(observable_relations)
         self._observable_relations_by_tool = {
             "get_relation_schema": set(
@@ -160,6 +162,7 @@ class DiagnosticKernel:
         health_target_subjects: tuple[str, ...] = (),
         incident_logical_observed_at: datetime | None = None,
         incident_observations: tuple[tuple[str, str, str], ...] = (),
+        lineage_node_candidates: tuple[str, ...] = (),
     ) -> DiagnosticKernel:
         if len(allowed_root_cause_codes) < 2:
             raise ValueError("Diagnostic Kernel requires at least two ontology members")
@@ -182,6 +185,7 @@ class DiagnosticKernel:
             health_target_subjects=health_target_subjects,
             incident_logical_observed_at=incident_logical_observed_at,
             incident_observations=incident_observations,
+            lineage_node_candidates=lineage_node_candidates,
         )
 
     @property
@@ -196,6 +200,22 @@ class DiagnosticKernel:
             for tool_name, relations in self._observable_relations_by_tool.items()
         }
 
+    def provable_lineage_nodes(self) -> tuple[str, ...]:
+        """Return the exact node whitelist the lineage tool accepts right now.
+
+        The set starts from canonical run-catalog nodes among the incident
+        subjects and grows with failed nodes and lineage nodes returned by
+        accepted evidence.
+        """
+
+        return tuple(
+            sorted(
+                self._lineage_node_candidates
+                | self._known_failed_nodes()
+                | self._known_lineage_nodes()
+            )
+        )
+
     def snapshot(self, *, model_requests_used: int) -> InvestigationState:
         if type(model_requests_used) is not int or not 0 <= model_requests_used <= (
             self._model_request_limit
@@ -206,6 +226,7 @@ class DiagnosticKernel:
             run_id=self._run_id,
             revision=self._revision,
             allowed_root_cause_codes=self._allowed_root_cause_codes,
+            lineage_node_candidates=self.provable_lineage_nodes(),
             hypotheses=tuple(self._hypotheses),
             gaps=tuple(self._gaps),
             assessments=self._assessments,
@@ -288,7 +309,7 @@ class DiagnosticKernel:
         ):
             self._error("NODE_ARGUMENT_NOT_PROVEN", fingerprint)
         if tool_name == "get_dbt_lineage" and arguments["node_id"] not in (
-            self._known_failed_nodes() | self._known_lineage_nodes() | self._incident_subjects
+            self._known_failed_nodes() | self._known_lineage_nodes() | self._lineage_node_candidates
         ):
             self._error("NODE_ARGUMENT_NOT_PROVEN", fingerprint)
         if (
@@ -536,7 +557,12 @@ class DiagnosticKernel:
             self._error("ROOT_CLAIM_MISMATCH")
         root_records = [inventory[evidence_id] for evidence_id in root_claim.evidence_ids]
         context = self._validation_context()
-        validate_root_cause_evidence(context, root_claim.value, root_records)
+        validate_root_cause_evidence(
+            context,
+            root_claim.value,
+            root_records,
+            relation_name=root_claim.relation_name,
+        )
         validate_asset_claims(context, asset_claims, root_records, inventory)
         evidence_ids = tuple(
             dict.fromkeys(
