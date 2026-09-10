@@ -1,0 +1,13 @@
+{
+  "schema_version": "p1.diagnosis.v1",
+  "status": "MODEL_ERROR",
+  "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+  "root_cause_code": null,
+  "summary": "MODEL_TIMEOUT",
+  "affected_assets": [],
+  "evidence_ids": [],
+  "claims": [],
+  "unresolved_evidence": [],
+  "recommended_actions": [],
+  "confidence": 0.0
+}

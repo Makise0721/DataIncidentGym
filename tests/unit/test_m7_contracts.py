@@ -579,6 +579,7 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
         "confidence": 0.9,
     }
     tool_descriptions: list[str] = []
+    request_ledgers: list[str] = []
 
     def scripted(
         messages: list[ModelMessage],
@@ -590,6 +591,7 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
                 for tool in agent_info.function_tools
             )
         )
+        request_ledgers.append(agent_info.instructions or "")
         completed = sum(
             isinstance(part, ToolReturnPart)
             for message in messages
@@ -641,16 +643,19 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
     assert result.metrics.successful_tool_calls == 5
     assert sum(isinstance(event, ToolTraceEvent) for event in result.trace) == 5
     assert len(tool_descriptions) == 4
-    # The ledger is attached from the very first prepared call (followup fix).
-    assert "CURRENT INVESTIGATION LEDGER" in tool_descriptions[0]
-    assert '"provable_relations"' in tool_descriptions[0]
-    assert '"provable_lineage_nodes"' in tool_descriptions[0]
-    assert '"g_auto_1"' in tool_descriptions[1]
-    assert '"CLOSED"' in tool_descriptions[1]
-    assert '"provable_relations"' in tool_descriptions[1]
-    assert '"g_auto_4"' in tool_descriptions[2]
-    assert '"raw_payments"' in tool_descriptions[2]
-    assert "incident_case_id" not in tool_descriptions[1]
+    # Exactly one ledger per request, refreshed with the current kernel state,
+    # and never repeated inside the tool descriptions.
+    assert len(request_ledgers) == 4
+    assert all(text.count("CURRENT INVESTIGATION LEDGER") == 1 for text in request_ledgers)
+    assert all("CURRENT INVESTIGATION LEDGER" not in text for text in tool_descriptions)
+    assert '"provable_relations"' in request_ledgers[0]
+    assert '"provable_lineage_nodes"' in request_ledgers[0]
+    assert '"g_auto_1"' in request_ledgers[1]
+    assert '"CLOSED"' in request_ledgers[1]
+    assert '"provable_relations"' in request_ledgers[1]
+    assert '"g_auto_4"' in request_ledgers[2]
+    assert '"raw_payments"' in request_ledgers[2]
+    assert "incident_case_id" not in request_ledgers[1]
 
 
 def test_m7_catalog_has_four_scenarios_and_actual_customer_failure() -> None:

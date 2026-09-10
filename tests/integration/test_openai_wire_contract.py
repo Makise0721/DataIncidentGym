@@ -525,3 +525,158 @@ async def test_openai_wire_malformed_success_response_is_fail_closed(
     assert len(wire.requests) == 1
     assert wire.paths == ["/v1/chat/completions"]
     assert wire.errors == []
+
+
+LEDGER_HEADER = "CURRENT INVESTIGATION LEDGER"
+# The strategy prompt names the ledger too, so counting that phrase would count
+# prompt prose. This signature appears only in a serialized ledger block.
+LEDGER_SIGNATURE = LEDGER_HEADER + " (controller-maintained; authoritative):"
+
+
+def _ledger_surfaces(request: dict[str, Any]) -> tuple[int, list[str]]:
+    """Ledger blocks actually serialized onto the OpenAI wire payload."""
+
+    message_copies = sum(
+        (message.get("content") or "").count(LEDGER_SIGNATURE)
+        for message in request["messages"]
+        if isinstance(message.get("content"), str)
+    )
+    tool_copies = [
+        tool["function"]["name"]
+        for tool in request["tools"]
+        if LEDGER_HEADER in (tool["function"].get("description") or "")
+    ]
+    return message_copies, tool_copies
+
+
+def _ledger_payload(request: dict[str, Any]) -> dict[str, Any]:
+    """The single serialized ledger of a wire request, parsed from its message."""
+
+    for message in request["messages"]:
+        content = message.get("content")
+        if isinstance(content, str) and LEDGER_SIGNATURE in content:
+            body = content.split(LEDGER_SIGNATURE, 1)[1].strip()
+            return json.loads(body.splitlines()[0])
+    raise AssertionError("no ledger in request")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_openai_wire_sends_one_fresh_ledger_per_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wire payload of the initial, post-tool and output-retry requests each
+    carries exactly one ledger, and no earlier ledger is replayed."""
+
+    monkeypatch.setattr(pydantic_ai.models, "ALLOW_MODEL_REQUESTS", True)
+    run_id = "9" * 32
+    calls = 0
+
+    def respond(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 200, _chat_response(
+                {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-run-results",
+                            "type": "function",
+                            "function": {
+                                "name": "get_dbt_run_results",
+                                "arguments": json.dumps(
+                                    {
+                                        "run_id": run_id,
+                                        "kernel_hypothesis_ids": ["h_loss", "h_decline"],
+                                        "kernel_new_hypotheses": [
+                                            {
+                                                "hypothesis_id": "h_loss",
+                                                "root_cause_code": "SOURCE_PAYMENT_INGESTION_LOSS",
+                                            },
+                                            {
+                                                "hypothesis_id": "h_decline",
+                                                "root_cause_code": (
+                                                    "NORMAL_BUSINESS_PAYMENT_DECLINE"
+                                                ),
+                                            },
+                                        ],
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                }
+            )
+        # The first finalize declares nothing while every gap is closed, which
+        # the kernel rejects; the third request is the resulting output retry.
+        unresolved = (
+            []
+            if calls == 2
+            else [
+                {
+                    "evidence_kind": "INGESTION_WATERMARK",
+                    "subject": "raw_payments",
+                    "reason_code": "NOT_OBSERVABLE",
+                }
+            ]
+        )
+        return 200, _chat_response(
+            {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": f"call-final-{calls}",
+                        "type": "function",
+                        "function": {
+                            "name": _output_tool_name(request),
+                            "arguments": json.dumps(
+                                {
+                                    "status": "INSUFFICIENT_EVIDENCE",
+                                    "run_id": run_id,
+                                    "selected_hypothesis_id": None,
+                                    "assessments": [],
+                                    "claims": [],
+                                    "unresolved_evidence": unresolved,
+                                    "summary": "The payment profile is unavailable.",
+                                    "recommended_actions": [],
+                                    "confidence": 0.2,
+                                }
+                            ),
+                        },
+                    }
+                ],
+            }
+        )
+
+    _write_public_run(tmp_path, run_id)
+    with _OpenAIWireMock(respond) as wire:
+        runner, client = _diagnosis_runner(
+            tmp_path,
+            wire.base_url,
+            DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+            run_id,
+        )
+        try:
+            result = await runner.diagnose()
+        finally:
+            await client.close()
+
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+    assert len(wire.requests) == 3
+    assert wire.errors == []
+    for index, request in enumerate(wire.requests):
+        message_copies, tool_copies = _ledger_surfaces(request)
+        assert message_copies == 1, (index, message_copies)
+        assert tool_copies == [], (index, tool_copies)
+        # Exactly one serialized ledger in the whole payload: a replayed copy
+        # from an earlier turn would raise this count.
+        assert json.dumps(request).count(LEDGER_SIGNATURE) == 1, index
+    # The ledger is refreshed per request rather than replayed: the budget
+    # advances and the accepted evidence appears only after the tool returned.
+    assert [
+        _ledger_payload(request)["model_requests_remaining"] for request in wire.requests
+    ] == [8, 7, 6]
+    assert _ledger_payload(wire.requests[0])["evidence"] == []
+    assert len(_ledger_payload(wire.requests[1])["evidence"]) == 1
+    assert wire.requests[0]["messages"] != wire.requests[2]["messages"]

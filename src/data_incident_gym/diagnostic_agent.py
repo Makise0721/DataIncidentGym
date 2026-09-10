@@ -4,9 +4,9 @@ import asyncio
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from time import monotonic
@@ -28,7 +28,6 @@ from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.tools import ToolDefinition
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import (
@@ -46,6 +45,10 @@ from data_incident_gym.diagnosis import (
     KernelStateTraceEvent,
     ModelProtocolTraceEvent,
     PolicyIdentity,
+    RejectedAssessmentSummary,
+    RejectedClaimSummary,
+    RejectedDecisionSummary,
+    RejectedUnresolvedSummary,
     RootCauseClaim,
     ToolTraceEvent,
     TraceEvent,
@@ -65,15 +68,15 @@ from data_incident_gym.diagnostic_kernel import (
     KernelOutcome,
     PreparedToolCall,
 )
-from data_incident_gym.evidence import EvidenceRecord, EvidenceToolError
+from data_incident_gym.evidence import DbtRunResultsFact, EvidenceRecord, EvidenceToolError
 from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v10"
+KERNEL_PROMPT_VERSION = "p1.kernel.v12"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v9"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v11"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -807,6 +810,165 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
         )
 
 
+_MAX_SUMMARY_ITEMS = 16
+_MAX_CLAIM_EVIDENCE_REFS = 32
+
+
+def _rejected_decision_summary(
+    decision: KernelDecision,
+    kernel: DiagnosticKernel,
+    model_request_index: int,
+) -> RejectedDecisionSummary:
+    """Project a rejected kernel decision onto bounded, known-only fields.
+
+    Only registered hypothesis IDs, ontology root codes, public node/relation
+    identifiers from accepted evidence or the incident brief, and accepted
+    evidence references are kept; unknown content is reduced to counts.
+
+    Each array keeps at most `_MAX_SUMMARY_ITEMS` items and each claim keeps at
+    most `_MAX_CLAIM_EVIDENCE_REFS` references. Items dropped by a cap are not
+    inspected at all, so they are counted as truncated and never as unknown.
+    The identities differ by treatment of unknown content:
+
+    - assessments drop unregistered hypotheses, so
+      `total = len(kept) + unknown_hypothesis_count + truncated`;
+    - claims and unresolved_evidence redact unknown values in place, so
+      `total = len(kept) + truncated` and the `unknown_*` counts describe
+      redacted items inside `kept`;
+    - one claim's references: `total = kept + unknown_evidence_count + truncated`.
+    """
+
+    records = kernel.evidence_records
+    accepted_ids = {record.evidence_id for record in records}
+    known_relations: set[str] = {
+        relation
+        for tool_relations in kernel.provable_relations_by_tool().values()
+        for relation in tool_relations
+    }
+    known_nodes: set[str] = set(kernel.incident_subjects)
+    for record in records:
+        content = record.content
+        node_id = getattr(content, "node_id", None)
+        if isinstance(node_id, str):
+            known_nodes.add(node_id)
+        for node in getattr(content, "related_nodes", ()):
+            known_nodes.add(node.node_id)
+        relation = getattr(content, "relation_name", None)
+        if isinstance(relation, str):
+            known_relations.add(relation)
+        if isinstance(content, DbtRunResultsFact):
+            known_nodes.update(content.failed_nodes)
+            known_nodes.update(content.skipped_nodes)
+    known_codes = set(kernel.allowed_root_cause_codes)
+    registered = {item.hypothesis_id for item in kernel.hypotheses}
+
+    assessments: list[RejectedAssessmentSummary] = []
+    unknown_hypothesis_count = 0
+    truncated_assessment_count = _overflow(decision.assessments, _MAX_SUMMARY_ITEMS)
+    for item in decision.assessments[:_MAX_SUMMARY_ITEMS]:
+        if item.hypothesis_id not in registered:
+            unknown_hypothesis_count += 1
+            continue
+        assessments.append(
+            RejectedAssessmentSummary(
+                hypothesis_id=item.hypothesis_id,
+                verdict=item.verdict.value,
+            )
+        )
+
+    claims: list[RejectedClaimSummary] = []
+    unknown_claim_count = 0
+    unknown_evidence_count = 0
+    truncated_evidence_count = 0
+    truncated_claim_count = _overflow(decision.claims, _MAX_SUMMARY_ITEMS)
+    for item in decision.claims[:_MAX_SUMMARY_ITEMS]:
+        known_value: str | None = None
+        if item.kind is ClaimKind.ROOT_CAUSE:
+            if item.value in known_codes:
+                known_value = item.value
+            else:
+                unknown_claim_count += 1
+        elif item.kind is ClaimKind.AFFECTED_ASSET:
+            if item.value in known_nodes:
+                known_value = item.value
+            else:
+                unknown_claim_count += 1
+        else:
+            known_value = None
+        relation_name = (
+            item.relation_name if item.relation_name in known_relations else None
+        )
+        kept_evidence: list[str] = []
+        for evidence_id in item.evidence_ids[:_MAX_CLAIM_EVIDENCE_REFS]:
+            if evidence_id in accepted_ids:
+                kept_evidence.append(evidence_id)
+            else:
+                unknown_evidence_count += 1
+        truncated_evidence_count += _overflow(item.evidence_ids, _MAX_CLAIM_EVIDENCE_REFS)
+        claims.append(
+            RejectedClaimSummary(
+                kind=item.kind.value,
+                known_value=known_value,
+                relation_name=relation_name,
+                evidence_ids=tuple(kept_evidence),
+            )
+        )
+
+    unresolved: list[RejectedUnresolvedSummary] = []
+    unknown_subject_count = 0
+    public_subjects = known_nodes | known_relations
+    truncated_unresolved_count = _overflow(decision.unresolved_evidence, _MAX_SUMMARY_ITEMS)
+    for item in decision.unresolved_evidence[:_MAX_SUMMARY_ITEMS]:
+        subject = item.subject if item.subject in public_subjects else None
+        if subject is None:
+            unknown_subject_count += 1
+        unresolved.append(
+            RejectedUnresolvedSummary(
+                evidence_kind=item.evidence_kind,
+                reason_code=item.reason_code,
+                subject=subject,
+            )
+        )
+
+    return RejectedDecisionSummary(
+        model_request_index=model_request_index,
+        status=decision.status,
+        selected_hypothesis_id=(
+            decision.selected_hypothesis_id
+            if decision.selected_hypothesis_id in registered
+            else None
+        ),
+        assessments=tuple(assessments),
+        claims=tuple(claims),
+        unresolved_evidence=tuple(unresolved),
+        unknown_hypothesis_count=unknown_hypothesis_count,
+        unknown_claim_count=unknown_claim_count,
+        unknown_evidence_count=unknown_evidence_count,
+        unknown_subject_count=unknown_subject_count,
+        truncated_assessment_count=truncated_assessment_count,
+        truncated_claim_count=truncated_claim_count,
+        truncated_unresolved_count=truncated_unresolved_count,
+        truncated_evidence_count=truncated_evidence_count,
+        total_assessments=len(decision.assessments),
+        total_claims=len(decision.claims),
+        total_unresolved=len(decision.unresolved_evidence),
+        truncated=any(
+            (
+                truncated_assessment_count,
+                truncated_claim_count,
+                truncated_unresolved_count,
+                truncated_evidence_count,
+            )
+        ),
+    )
+
+
+def _overflow(items: Sequence[object], limit: int) -> int:
+    """Number of items a bounded projection dropped from the end of `items`."""
+
+    return max(0, len(items) - limit)
+
+
 def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState) -> str:
     """Project the model-visible investigation ledger for the current request."""
 
@@ -822,8 +984,17 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
                 "tool_name": gap.tool_name,
                 "subject": gap.subject,
                 "status": gap.status.value,
+                "error_code": gap.error_code,
             }
             for gap in snapshot.gaps
+        ],
+        "evidence": [
+            {
+                "evidence_id": record.evidence_id,
+                "evidence_type": record.evidence_type.value,
+                "subject": record.subject,
+            }
+            for record in kernel.evidence_records
         ],
         "provable_relations": {
             tool_name: list(relations)
@@ -837,35 +1008,31 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
         "CURRENT INVESTIGATION LEDGER (controller-maintained; authoritative):\n"
         + _canonical_json(payload)
         + "\nGap identifiers and kinds are allocated by the controller; reference the gaps "
-        "above by their gap_id; query only relations listed under provable_relations for "
-        "that tool and only node identifiers listed under provable_lineage_nodes for "
-        "get_dbt_lineage; a relation name or schema-qualified name is not a node "
-        "identifier and rejected node arguments must never be retried; the lists are "
-        "exact and complete and relations returned by evidence do not extend them. One "
-        "boundary probe per blocked-relevant relation is allowed to record its "
-        "permission receipt; it counts against the budget and returns no data. Budget "
-        "remaining requests conservatively."
+        "above by their gap_id; the evidence list is the exact accepted inventory and "
+        "gap error_code values are the real rejection receipts; query only relations "
+        "listed under provable_relations for that tool and only node identifiers listed "
+        "under provable_lineage_nodes for get_dbt_lineage; a relation name or "
+        "schema-qualified name is not a node identifier and rejected node arguments must "
+        "never be retried; the lists are exact and complete and relations returned by "
+        "evidence do not extend them. One boundary probe per blocked-relevant relation "
+        "is allowed to record its permission receipt; it counts against the budget and "
+        "returns no data. Budget remaining requests conservatively."
     )
 
 
-def _kernel_state_prepare(
-    ctx: RunContext[_RunState],
-    tool_def: ToolDefinition,
-) -> ToolDefinition:
-    """Attach the current investigation ledger to each Kernel tool description.
+def _kernel_ledger_instructions(ctx: RunContext[_RunState]) -> str | None:
+    """The one authoritative investigation ledger for the current request.
 
-    The ledger is attached from the very first prepared call, including an
-    empty investigation, so the model always sees provable relations, lineage
-    node candidates and the remaining budget before choosing identifiers.
+    The ledger is resolved when the request is prepared, so every model call
+    sees the current hypotheses, gaps, accepted evidence, permissions and
+    budget exactly once instead of once per registered tool.
     """
 
     kernel = ctx.deps.kernel
     if kernel is None:
-        return tool_def
+        return None
     snapshot = kernel.snapshot(model_requests_used=ctx.deps.usage.requests)
-    description = tool_def.description or ""
-    ledger = _kernel_state_summary(kernel, snapshot)
-    return replace(tool_def, description=f"{description}\n\n{ledger}" if description else ledger)
+    return _kernel_state_summary(kernel, snapshot)
 
 
 def _kernel_retry_message(
@@ -881,12 +1048,33 @@ def _kernel_retry_message(
         "NODE_ARGUMENT_NOT_PROVEN": "Use a canonical node identifier from the run catalog.",
         "HYPOTHESIS_REFERENCE_UNKNOWN": "Reference only registered hypothesis IDs.",
         "DUPLICATE_GAP_ID": "Gap identifiers are controller-allocated; retry the call as-is.",
+        "DUPLICATE_HYPOTHESIS": (
+            "Re-sending a registered hypothesis with its original root cause code is "
+            "allowed; an existing hypothesis ID cannot be redefined with a different "
+            "root cause code."
+        ),
         "DUPLICATE_TOOL_CALL": "Do not repeat an equivalent successful query.",
         "EVIDENCE_GAP_OPEN": (
             "Every opened evidence gap must close with a successful typed tool result "
             "before confirming."
         ),
         "RELATION_NOT_ALLOWED": "This relation is not queryable in this run.",
+        "UNRESOLVED_EVIDENCE_UNBOUND": (
+            "Re-check each declared gap: schema, data-profile and history declarations "
+            "must bind a blocked gap already recorded for the same subject and tool; "
+            "watermark, payment-event-identity and transformation-definition "
+            "declarations need a relevant public subject and a fact that is not "
+            "observable in this run. Fix the invalid items, then re-check the "
+            "remaining independent and justified gaps instead of deleting them all."
+        ),
+        "ROOT_CLAIM_EVIDENCE_INCOMPATIBLE": (
+            "Successful tools and a full evidence inventory do not by themselves "
+            "support the selected claim. Re-check the selected hypothesis, the "
+            "records cited by the ROOT_CAUSE claim, and their relation and "
+            "time/lineage bindings before retrying; if the public evidence is "
+            "genuinely insufficient, re-investigate or finalize INSUFFICIENT_EVIDENCE "
+            "under the existing contract."
+        ),
     }
     message = messages.get(code, "Correct the structured investigation decision.")
     if code == "RELATION_NOT_ALLOWED" and provable_relations:
@@ -933,8 +1121,6 @@ def _register_evidence_tools(
     def register(tool_name: str):
         if tool_name not in enabled_tool_names:
             return lambda function: function
-        if kernel_mode:
-            return agent.tool(prepare=_kernel_state_prepare)
         return agent.tool
 
     if kernel_mode:
@@ -1597,6 +1783,11 @@ class DiagnosisRunner:
             _ModelObservationAdapter(self._model, state),
             deps_type=_RunState,
             output_type=output_type,
+            instructions=(
+                [_kernel_ledger_instructions]
+                if _is_kernel_strategy(self._strategy)
+                else None
+            ),
             system_prompt=f"{BASE_PROMPT}\n\n{self._strategy_prompt}",
             retries={"tools": 1, "output": self._budget.output_retry_limit},
         )
@@ -1621,11 +1812,21 @@ class DiagnosisRunner:
                         stage="OUTPUT_VALIDATION",
                         tool_name=None,
                     )
+                    rejected_decision = None
+                    try:
+                        rejected_decision = _rejected_decision_summary(
+                            output,
+                            current.kernel,
+                            current.usage.requests,
+                        )
+                    except Exception:
+                        rejected_decision = None
                     current.trace.append(
                         EvidenceGateTraceEvent(
                             event_type="EVIDENCE_GATE",
                             reason_code=error.code,
                             accepted=False,
+                            rejected_decision=rejected_decision,
                         )
                     )
                     raise ModelRetry(_kernel_retry_message(error.code)) from None

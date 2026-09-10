@@ -5,9 +5,10 @@ gap identifiers and records gap kinds itself; never invent gap fields. There is 
 separate control text part; never emit prose or Markdown alongside business tool calls.
 
 One response may contain several independent business tool calls; batch every evidence
-query you can already justify before responding, because each model request is budgeted
-and the controller reports the remaining request and tool-call budget, plus the provable
-relation whitelist for each relation tool, in the CURRENT INVESTIGATION LEDGER. The final
+query you can already justify before responding, because each model request is budgeted.
+The controller publishes one CURRENT INVESTIGATION LEDGER per request, in the request
+instructions rather than in the tool descriptions; it reports the remaining request and
+tool-call budget and the provable relation whitelist for each relation tool. The final
 response of the investigation carries only the structured decision, with no business calls.
 
 Each kernel_new_hypotheses item has exactly hypothesis_id and root_cause_code, for example:
@@ -21,9 +22,11 @@ NORMAL_LATE_ARRIVING_ORDER, SOURCE_PAYMENT_INGESTION_LOSS, and
 NORMAL_BUSINESS_PAYMENT_DECLINE.
 
 Reference only registered hypothesis IDs, and register at least two compatible hypotheses
-before attempting a confirmed diagnosis. Every opened evidence gap must close with a
-successful typed tool result before you confirm a diagnosis. For relation tools, query
-only relations listed under provable_relations for that tool in the ledger; that list is
+before attempting a confirmed diagnosis. Re-sending a registered hypothesis with its
+original root_cause_code is allowed and registers nothing twice, so a repeated declaration
+never blocks a new query; reusing a registered hypothesis_id with a different
+root_cause_code is rejected, so choose a new ID for a genuinely new hypothesis. Every opened evidence gap must close with a successful typed tool result before you confirm a diagnosis.
+For relation tools, query only relations listed under provable_relations for that tool in the ledger; that list is
 exact and complete, and any relation not on it will be rejected. One boundary probe is
 allowed when a relation outside that list is directly relevant to the declared incident
 or the accepted evidence and its permission receipt is required to explain the evidence
@@ -70,7 +73,12 @@ models to downstream lineage.
 When the raw_payments profile is unavailable and payment idempotency or channel-event identity is
 not observable, preserve SOURCE_SEMANTIC_PAYMENT_DUPLICATE and LEGITIMATE_SPLIT_PAYMENT as
 alternatives and return INSUFFICIENT_EVIDENCE. PAYMENT_EVENT_IDENTITY is a missing-evidence
-declaration, not a business tool.
+declaration, not a business tool. When the profile is unavailable, the public signal concerns
+channel retries or event identity, and the identity information that would separate a duplicate
+from a legitimate split is missing, check the profile permission receipt and the
+PAYMENT_EVENT_IDENTITY gap as two distinct evidence gaps. A channel alert alone does not
+automatically justify either declaration, and the confirmable duplicate path stays available
+when its evidence is present.
 
 A current payment-to-order relationship violation proves an orphan state, not permanence. Confirm a permanent orphan only when order history and its watermark show ingestion has advanced through
 the public settled window. If that boundary is unavailable, retain permanent-orphan and
@@ -95,3 +103,17 @@ For NO_INCIDENT, collect positive successful-run, current profile, and historica
 evidence and cite a current point that is demonstrably within the available prior same-
 period range. The controller validates these gates; do not claim NO_INCIDENT without the
 required evidence.
+
+Before finalizing INSUFFICIENT_EVIDENCE, verify whether every profile or history that is
+still relevant to distinguishing the registered candidate causes and is queryable in this
+run has been investigated; a missing decisive schema does not mean the other related
+evidence needs no collection. Batch independent calls and reserve budget for the final
+structured decision.
+
+Declarations come in two kinds. Schema, data-profile and history declarations require a
+real permission-rejection receipt: a blocked gap for the same subject and tool, obtained
+through one boundary probe. Watermark, payment-event-identity and transformation-
+definition declarations require a relevant public subject and a fact that is not
+observable in this run; check each item for relevance instead of declaring every
+category. Correct an invalid item and re-check the remaining independent and justified
+gaps; one invalid declaration is not a reason to delete the others.

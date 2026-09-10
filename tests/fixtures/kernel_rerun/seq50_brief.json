@@ -1,0 +1,31 @@
+{
+ "source_run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+ "subjects": [
+  "seed.jaffle_shop.raw_payments",
+  "raw_payments",
+  "raw_orders",
+  "payment_count_by_order_date"
+ ],
+ "observations": [
+  {
+   "kind": "CURRENT_PERIOD_COUNT",
+   "subject": "raw_payments/payment_count_by_order_date/2018-03-23",
+   "value": "3"
+  },
+  {
+   "kind": "EXPECTED_PERIOD_COUNT",
+   "subject": "raw_payments/payment_count_by_order_date/2018-03-23",
+   "value": "5"
+  },
+  {
+   "kind": "CURRENT_RELATION_COUNT",
+   "subject": "raw_payments",
+   "value": "111"
+  },
+  {
+   "kind": "SETTLED_PAYMENT_WINDOW_END",
+   "subject": "raw_orders",
+   "value": "2018-03-23"
+  }
+ ]
+}

@@ -1,0 +1,13 @@
+{
+ "source_run_id": "d2abcf132c6a3e4d97256035e806c89e",
+ "subjects": [
+  "model.jaffle_shop.customers"
+ ],
+ "observations": [
+  {
+   "kind": "DBT_MODEL_FAILURE",
+   "subject": "model.jaffle_shop.customers",
+   "value": "error"
+  }
+ ]
+}

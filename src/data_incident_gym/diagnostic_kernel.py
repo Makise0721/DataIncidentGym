@@ -192,6 +192,18 @@ class DiagnosticKernel:
     def evidence_records(self) -> tuple[EvidenceRecord, ...]:
         return tuple(self._records)
 
+    @property
+    def allowed_root_cause_codes(self) -> tuple[str, ...]:
+        return tuple(self._allowed_root_cause_codes)
+
+    @property
+    def incident_subjects(self) -> tuple[str, ...]:
+        return tuple(sorted(self._incident_subjects))
+
+    @property
+    def hypotheses(self) -> tuple[Hypothesis, ...]:
+        return tuple(self._hypotheses)
+
     def provable_relations_by_tool(self) -> dict[str, tuple[str, ...]]:
         """Return the exact relation whitelist each relation tool would accept."""
 
@@ -338,13 +350,10 @@ class DiagnosticKernel:
             self._error("DUPLICATE_GAP_ID", fingerprint)
         validated = self._validate_arguments(arguments, fingerprint)
         self._validate_tool_mapping(intent, tool_name, validated, fingerprint)
-        existing_ids = {item.hypothesis_id for item in self._hypotheses}
-        for hypothesis in intent.new_hypotheses:
-            if hypothesis.hypothesis_id in existing_ids:
-                self._error("DUPLICATE_HYPOTHESIS", fingerprint)
-            if hypothesis.root_cause_code not in self._allowed_root_cause_codes:
-                self._error("ONTOLOGY_CODE_UNKNOWN", fingerprint)
-            existing_ids.add(hypothesis.hypothesis_id)
+        pending = self._pending_hypotheses(intent, fingerprint)
+        existing_ids = {item.hypothesis_id for item in self._hypotheses} | {
+            item.hypothesis_id for item in pending
+        }
         if any(
             hypothesis_id not in existing_ids for hypothesis_id in intent.hypothesis_ids
         ):
@@ -353,7 +362,9 @@ class DiagnosticKernel:
             self._validate_argument_provenance(tool_name, validated, fingerprint)
         except KernelError as error:
             if error.code == "RELATION_NOT_ALLOWED" and error.fingerprint == fingerprint:
-                self._record_blocked_relation_gap(intent, tool_name, validated, fingerprint)
+                self._record_blocked_relation_gap(
+                    intent, tool_name, validated, fingerprint, pending
+                )
             raise
         prepared = PreparedToolCall(
             gap_id=intent.gap_id,
@@ -363,7 +374,7 @@ class DiagnosticKernel:
         )
         self._fingerprints.append(fingerprint)
         self._revision += 1
-        self._hypotheses.extend(intent.new_hypotheses)
+        self._hypotheses.extend(pending)
         self._gaps.append(
             EvidenceGap(
                 gap_id=intent.gap_id,
@@ -382,17 +393,47 @@ class DiagnosticKernel:
         self._prepared_calls[fingerprint] = prepared
         return prepared
 
+    def _pending_hypotheses(
+        self,
+        intent: InvestigationIntent,
+        fingerprint: str,
+    ) -> tuple[Hypothesis, ...]:
+        """Declarations that are genuinely new, validated as one group.
+
+        Re-sending a registered ID with its original root cause code is
+        idempotent: the declaration is dropped from the pending set and the
+        current business call proceeds. Re-sending the same ID with a different
+        code is a redefinition and stays rejected. Nothing is committed before
+        the whole group passes, so a conflict later in the array cannot leave an
+        earlier declaration half-registered.
+        """
+
+        registered = {item.hypothesis_id: item.root_cause_code for item in self._hypotheses}
+        pending: list[Hypothesis] = []
+        for hypothesis in intent.new_hypotheses:
+            known_code = registered.get(hypothesis.hypothesis_id)
+            if known_code is not None:
+                if known_code != hypothesis.root_cause_code:
+                    self._error("DUPLICATE_HYPOTHESIS", fingerprint)
+                continue
+            if hypothesis.root_cause_code not in self._allowed_root_cause_codes:
+                self._error("ONTOLOGY_CODE_UNKNOWN", fingerprint)
+            registered[hypothesis.hypothesis_id] = hypothesis.root_cause_code
+            pending.append(hypothesis)
+        return tuple(pending)
+
     def _record_blocked_relation_gap(
         self,
         intent: InvestigationIntent,
         tool_name: str,
         validated: dict[str, str],
         fingerprint: str,
+        pending: tuple[Hypothesis, ...],
     ) -> None:
         """Mirror the tool layer's verdict: the attempt counts and the gap blocks."""
 
         self._fingerprints.append(fingerprint)
-        self._hypotheses.extend(intent.new_hypotheses)
+        self._hypotheses.extend(pending)
         self._gaps.append(
             EvidenceGap(
                 gap_id=intent.gap_id,

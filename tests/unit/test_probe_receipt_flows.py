@@ -735,7 +735,7 @@ class _RunResultsOnlyTools:
 
 
 def _ledger_visible_scripted() -> tuple[FunctionModel, list[dict[str, str]]]:
-    descriptions: list[dict[str, str]] = []
+    ledgers: list[dict[str, str]] = []
 
     def scripted(
         messages: list[ModelMessage],
@@ -757,13 +757,15 @@ def _ledger_visible_scripted() -> tuple[FunctionModel, list[dict[str, str]]]:
                     ),
                 ]
             )
-        if not descriptions:
-            descriptions.extend(
+        if not ledgers:
+            ledgers.append(
                 {
-                    "name": tool.name,
-                    "description": tool.description or "",
+                    "instructions": agent_info.instructions or "",
+                    "tools": "\n".join(
+                        tool.description or ""
+                        for tool in (*agent_info.function_tools, *agent_info.output_tools)
+                    ),
                 }
-                for tool in agent_info.function_tools
             )
         return ModelResponse(
             parts=[
@@ -783,14 +785,14 @@ def _ledger_visible_scripted() -> tuple[FunctionModel, list[dict[str, str]]]:
             ]
         )
 
-    return FunctionModel(scripted), descriptions
+    return FunctionModel(scripted), ledgers
 
 
 @pytest.mark.asyncio
 async def test_first_kernel_prepare_attaches_ledger_with_lineage_candidates(
     tmp_path: Path,
 ) -> None:
-    """The very first prepared call shows provable nodes in the ledger."""
+    """The very first prepared request shows provable nodes in exactly one ledger."""
 
     _write_context(
         tmp_path,
@@ -801,21 +803,23 @@ async def test_first_kernel_prepare_attaches_ledger_with_lineage_candidates(
         history_relations=(),
     )
     tools = _DuplicateProfileTools()
-    model, descriptions = _ledger_visible_scripted()
+    model, ledgers = _ledger_visible_scripted()
     result = await _runner(tmp_path, model, tools).diagnose()
 
     assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
-    joined = "\n".join(item["description"] for item in descriptions)
-    assert "CURRENT INVESTIGATION LEDGER" in joined
-    assert '"provable_lineage_nodes"' in joined
-    assert "seed.jaffle_shop.raw_payments" in joined
+    assert len(ledgers) == 1
+    instructions = ledgers[0]["instructions"]
+    assert instructions.count("CURRENT INVESTIGATION LEDGER") == 1
+    assert '"provable_lineage_nodes"' in instructions
+    assert "seed.jaffle_shop.raw_payments" in instructions
+    assert "CURRENT INVESTIGATION LEDGER" not in ledgers[0]["tools"]
 
 
 @pytest.mark.asyncio
 async def test_first_kernel_prepare_attaches_ledger_when_candidates_empty(
     tmp_path: Path,
 ) -> None:
-    """Even without candidates the initial ledger is visible on first prepare."""
+    """Even without candidates the initial ledger is visible on the first request."""
 
     _write_context(
         tmp_path,
@@ -826,9 +830,10 @@ async def test_first_kernel_prepare_attaches_ledger_when_candidates_empty(
         history_relations=(),
     )
     tools = _RunResultsOnlyTools()
-    model, descriptions = _ledger_visible_scripted()
+    model, ledgers = _ledger_visible_scripted()
     result = await _runner(tmp_path, model, tools).diagnose()
 
     assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
-    joined = "\n".join(item["description"] for item in descriptions)
-    assert '"provable_lineage_nodes":[]' in joined
+    assert len(ledgers) == 1
+    assert '"provable_lineage_nodes":[]' in ledgers[0]["instructions"]
+    assert "CURRENT INVESTIGATION LEDGER" not in ledgers[0]["tools"]

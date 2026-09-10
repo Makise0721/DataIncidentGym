@@ -1,0 +1,240 @@
+{
+ "source_run_id": "d2abcf132c6a3e4d97256035e806c89e",
+ "records": [
+  {
+   "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+   "evidence_id": "ev_4faffe63a27742fbd3bc030620c220691cbcd63870d40cbaf8cc0447ff16735b",
+   "evidence_type": "DBT_RUN_RESULTS",
+   "source": "dbt_artifact:run_results.json",
+   "subject": "d2abcf132c6a3e4d97256035e806c89e",
+   "observed_at": "2026-09-09T13:06:46.710078Z",
+   "content": {
+    "kind": "DBT_RUN_RESULTS",
+    "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+    "run_status": "FAILED",
+    "dbt_exit_code": 1,
+    "failed_nodes": [
+     "model.jaffle_shop.customers"
+    ],
+    "skipped_nodes": [
+     "test.jaffle_shop.not_null_customers_customer_id.5c9bf9911d",
+     "test.jaffle_shop.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2",
+     "test.jaffle_shop.unique_customers_customer_id.c5af1ff4b1"
+    ]
+   },
+   "content_digest": "1a5ddc42c5527395469d8837a361bae7ecaff9d14acde09fe5961a1e286da32a"
+  },
+  {
+   "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+   "evidence_id": "ev_563efc4ce03a16fcc90a83b636113285e0ef06a1801e481d61d5bac1eabf2d72",
+   "evidence_type": "DBT_NODE_ERROR",
+   "source": "dbt_artifact:run_results.json",
+   "subject": "model.jaffle_shop.customers",
+   "observed_at": "2026-09-09T13:06:46.710078Z",
+   "content": {
+    "kind": "DBT_NODE_ERROR",
+    "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+    "node_id": "model.jaffle_shop.customers",
+    "resource_type": "model",
+    "status": "error",
+    "message": "Database Error in model customers (models/customers.sql)\n  operator does not exist: integer = text\n  LINE 73:         on customers.customer_id = customer_orders.customer_...\n                                            ^\n  HINT:  No operator matches the given name and argument types. You might need to add explicit type casts."
+   },
+   "content_digest": "00f7ac45d81705c4fc353dbb7ef4f9bb23ca5ab723f93fc0e0a1ef1a7a6251b9"
+  },
+  {
+   "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+   "evidence_id": "ev_1e3ae7c79703173e355432addde5ec4ff3e3cd022f102a4f0d4aa5abe6e81b2a",
+   "evidence_type": "DBT_LINEAGE",
+   "source": "dbt_artifact:manifest.json",
+   "subject": "model.jaffle_shop.customers",
+   "observed_at": "2026-09-09T13:06:39.739165Z",
+   "content": {
+    "kind": "DBT_LINEAGE",
+    "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+    "node_id": "model.jaffle_shop.customers",
+    "direction": "upstream",
+    "related_nodes": [
+     {
+      "node_id": "model.jaffle_shop.stg_customers",
+      "resource_type": "model",
+      "name": "stg_customers",
+      "distance": 1
+     },
+     {
+      "node_id": "model.jaffle_shop.stg_orders",
+      "resource_type": "model",
+      "name": "stg_orders",
+      "distance": 1
+     },
+     {
+      "node_id": "model.jaffle_shop.stg_payments",
+      "resource_type": "model",
+      "name": "stg_payments",
+      "distance": 1
+     },
+     {
+      "node_id": "seed.jaffle_shop.raw_customers",
+      "resource_type": "seed",
+      "name": "raw_customers",
+      "distance": 2
+     },
+     {
+      "node_id": "seed.jaffle_shop.raw_orders",
+      "resource_type": "seed",
+      "name": "raw_orders",
+      "distance": 2
+     },
+     {
+      "node_id": "seed.jaffle_shop.raw_payments",
+      "resource_type": "seed",
+      "name": "raw_payments",
+      "distance": 2
+     }
+    ]
+   },
+   "content_digest": "2a1a1720a58c5a447fde2624a529401088c3631bc3a1bede86d196e97c3c27b8"
+  },
+  {
+   "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+   "evidence_id": "ev_3c3d69999dcb702c0b2e6758aa2043d75b4dbe14905da8338d26aba495c1e2c2",
+   "evidence_type": "RELATION_SCHEMA",
+   "source": "postgres_catalog",
+   "subject": "analytics.raw_customers",
+   "observed_at": "2026-09-09T13:07:01.267504Z",
+   "content": {
+    "kind": "RELATION_SCHEMA",
+    "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+    "schema_name": "analytics",
+    "relation_name": "raw_customers",
+    "columns": [
+     {
+      "name": "id",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 1
+     },
+     {
+      "name": "first_name",
+      "data_type": "text",
+      "nullable": true,
+      "ordinal_position": 2
+     },
+     {
+      "name": "last_name",
+      "data_type": "text",
+      "nullable": true,
+      "ordinal_position": 3
+     }
+    ]
+   },
+   "content_digest": "1d029ee806244ed1c47bd228d5c2888631c3930dd27f56a2fc2230cbe46864df"
+  },
+  {
+   "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+   "evidence_id": "ev_8b69dc38a14504b87421f5ed70766543770b56be03ab4f9b003ab21aa8529e9e",
+   "evidence_type": "RELATION_SCHEMA",
+   "source": "postgres_catalog",
+   "subject": "analytics.raw_payments",
+   "observed_at": "2026-09-09T13:07:01.342192Z",
+   "content": {
+    "kind": "RELATION_SCHEMA",
+    "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+    "schema_name": "analytics",
+    "relation_name": "raw_payments",
+    "columns": [
+     {
+      "name": "id",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 1
+     },
+     {
+      "name": "order_id",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 2
+     },
+     {
+      "name": "payment_method",
+      "data_type": "text",
+      "nullable": true,
+      "ordinal_position": 3
+     },
+     {
+      "name": "amount",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 4
+     },
+     {
+      "name": "source_batch_note",
+      "data_type": "text",
+      "nullable": true,
+      "ordinal_position": 5
+     }
+    ]
+   },
+   "content_digest": "dccb9343ab6130bd3587f8ce1a9bac91e5fd63800ba1881435cec8eb98f1b38e"
+  },
+  {
+   "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+   "evidence_id": "ev_2e10c64f65960e705ae25c78ab54b87d19af52da37cc1c496d3cb4be78cb0bdd",
+   "evidence_type": "RELATION_DATA_PROFILE",
+   "source": "postgres_profile_snapshot",
+   "subject": "raw_orders",
+   "observed_at": "2026-09-09T13:07:33.316274Z",
+   "content": {
+    "kind": "RELATION_DATA_PROFILE",
+    "run_id": "d2abcf132c6a3e4d97256035e806c89e",
+    "relation_name": "raw_orders",
+    "profile_spec_version": "profile_spec.v1",
+    "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+    "snapshot": {
+     "relation_name": "raw_orders",
+     "row_count": 99,
+     "columns": [
+      {
+       "column_name": "id",
+       "null_count": 0,
+       "distinct_count": 99
+      },
+      {
+       "column_name": "user_id",
+       "null_count": 0,
+       "distinct_count": 62
+      },
+      {
+       "column_name": "order_date",
+       "null_count": 0,
+       "distinct_count": 69
+      },
+      {
+       "column_name": "status",
+       "null_count": 0,
+       "distinct_count": 5
+      }
+     ],
+     "business_key_duplicates": [
+      {
+       "name": "id",
+       "duplicate_count": 0
+      }
+     ],
+     "business_fingerprint_duplicates": [],
+     "relationship_violations": [
+      {
+       "name": "user_id_to_raw_customers_id",
+       "violation_count": 0
+      },
+      {
+       "name": "id_to_raw_payments_order_id",
+       "violation_count": 0
+      }
+     ],
+     "groups": []
+    }
+   },
+   "content_digest": "ceb72ce78c8a7c49c52a377624c2a82b62d3114f80d6df65f1e6a5b273dfc009"
+  }
+ ]
+}

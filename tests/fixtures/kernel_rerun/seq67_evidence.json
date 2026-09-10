@@ -1,0 +1,104 @@
+{
+ "source_run_id": "c9f54f9edcd39d277583c282e788efb7",
+ "records": [
+  {
+   "run_id": "c9f54f9edcd39d277583c282e788efb7",
+   "evidence_id": "ev_7234472e98cb8301b31cfb9fe8efb88da281303ec9c51cf1ea993fd7a50a1df0",
+   "evidence_type": "DBT_RUN_RESULTS",
+   "source": "dbt_artifact:run_results.json",
+   "subject": "c9f54f9edcd39d277583c282e788efb7",
+   "observed_at": "2026-09-09T13:17:11.062288Z",
+   "content": {
+    "kind": "DBT_RUN_RESULTS",
+    "run_id": "c9f54f9edcd39d277583c282e788efb7",
+    "run_status": "SUCCEEDED",
+    "dbt_exit_code": 0,
+    "failed_nodes": [],
+    "skipped_nodes": []
+   },
+   "content_digest": "db5ecf4edfd2be44cf64a26b460c0bcb3771303324de0af96e34fa612371c493"
+  },
+  {
+   "run_id": "c9f54f9edcd39d277583c282e788efb7",
+   "evidence_id": "ev_96de131daecdb661b395a848e78bb5860ada53d7272237abd7ef90bcc917ccce",
+   "evidence_type": "RELATION_SCHEMA",
+   "source": "postgres_catalog",
+   "subject": "analytics.raw_payments",
+   "observed_at": "2026-09-09T13:17:24.031690Z",
+   "content": {
+    "kind": "RELATION_SCHEMA",
+    "run_id": "c9f54f9edcd39d277583c282e788efb7",
+    "schema_name": "analytics",
+    "relation_name": "raw_payments",
+    "columns": [
+     {
+      "name": "id",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 1
+     },
+     {
+      "name": "order_id",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 2
+     },
+     {
+      "name": "payment_method",
+      "data_type": "text",
+      "nullable": true,
+      "ordinal_position": 3
+     },
+     {
+      "name": "amount",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 4
+     },
+     {
+      "name": "source_batch_note",
+      "data_type": "text",
+      "nullable": true,
+      "ordinal_position": 5
+     }
+    ]
+   },
+   "content_digest": "d043f0a7ae4cf7dffa71a9a506af1daea3238889239df0fca18736a28a33f3b4"
+  },
+  {
+   "run_id": "c9f54f9edcd39d277583c282e788efb7",
+   "evidence_id": "ev_049fa920d8526fae2b506dda7e340200259cf72e7ace6e431f3b10f6a47bb04d",
+   "evidence_type": "DBT_LINEAGE",
+   "source": "dbt_artifact:manifest.json",
+   "subject": "seed.jaffle_shop.raw_payments",
+   "observed_at": "2026-09-09T13:17:03.570037Z",
+   "content": {
+    "kind": "DBT_LINEAGE",
+    "run_id": "c9f54f9edcd39d277583c282e788efb7",
+    "node_id": "seed.jaffle_shop.raw_payments",
+    "direction": "downstream",
+    "related_nodes": [
+     {
+      "node_id": "model.jaffle_shop.stg_payments",
+      "resource_type": "model",
+      "name": "stg_payments",
+      "distance": 1
+     },
+     {
+      "node_id": "model.jaffle_shop.customers",
+      "resource_type": "model",
+      "name": "customers",
+      "distance": 2
+     },
+     {
+      "node_id": "model.jaffle_shop.orders",
+      "resource_type": "model",
+      "name": "orders",
+      "distance": 2
+     }
+    ]
+   },
+   "content_digest": "d58c5aef714e9b89010c321ca8e424ff6fbfa80942e8b54a8f2f5e4d0ff83047"
+  }
+ ]
+}

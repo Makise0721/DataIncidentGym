@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from data_incident_gym.diagnosis import ModelProtocolTraceEvent
+from data_incident_gym.diagnosis import EvidenceGateTraceEvent, ModelProtocolTraceEvent
 from data_incident_gym.diagnostic_contracts import InvestigationState
 
 RUN_ID = "a" * 32
@@ -83,3 +83,81 @@ def test_new_protocol_event_serialization_carries_the_keys() -> None:
 
     assert dumped["error_loc"] == []
     assert dumped["error_kind"] == []
+
+
+def _legacy_gate_event_json() -> str:
+    return json.dumps(
+        {
+            "event_type": "EVIDENCE_GATE",
+            "reason_code": "ROOT_CLAIM_EVIDENCE_INCOMPATIBLE",
+            "accepted": False,
+        }
+    )
+
+
+def test_legacy_gate_event_parses_with_rejected_decision_default() -> None:
+    event = EvidenceGateTraceEvent.model_validate_json(_legacy_gate_event_json())
+
+    assert event.rejected_decision is None
+
+
+def test_new_gate_event_serialization_carries_rejected_decision_key() -> None:
+    event = EvidenceGateTraceEvent.model_validate_json(_legacy_gate_event_json())
+    dumped = json.loads(event.model_dump_json())
+
+    assert "rejected_decision" in dumped
+    assert dumped["rejected_decision"] is None
+
+
+def _pre_truncation_summary_json() -> str:
+    """A rejected summary written before the truncated counters existed."""
+
+    return json.dumps(
+        {
+            "schema_version": "p1.rejected_decision.v1",
+            "model_request_index": 3,
+            "status": "CONFIRMED",
+            "selected_hypothesis_id": "h_ingestion_loss",
+            "assessments": [{"hypothesis_id": "h_ingestion_loss", "verdict": "SUPPORTED"}],
+            "claims": [
+                {
+                    "kind": "ROOT_CAUSE",
+                    "known_value": "SOURCE_PAYMENT_INGESTION_LOSS",
+                    "relation_name": None,
+                    "evidence_ids": ["ev_" + "0" * 64],
+                }
+            ],
+            "unresolved_evidence": [],
+            "unknown_hypothesis_count": 0,
+            "unknown_claim_count": 0,
+            "unknown_evidence_count": 1,
+            "unknown_subject_count": 0,
+            "total_assessments": 1,
+            "total_claims": 18,
+            "total_unresolved": 0,
+            "truncated": True,
+        }
+    )
+
+
+def test_pre_truncation_summary_parses_with_zero_counters() -> None:
+    """Records written before the truncated counters keep parsing; their
+    ``truncated`` flag stays authoritative and the counters default to zero."""
+
+    event = EvidenceGateTraceEvent.model_validate(
+        {
+            "event_type": "EVIDENCE_GATE",
+            "reason_code": "ROOT_CLAIM_EVIDENCE_INCOMPATIBLE",
+            "accepted": False,
+            "rejected_decision": json.loads(_pre_truncation_summary_json()),
+        }
+    )
+    summary = event.rejected_decision
+
+    assert summary is not None
+    assert summary.truncated is True
+    assert summary.total_claims == 18
+    assert summary.truncated_assessment_count == 0
+    assert summary.truncated_claim_count == 0
+    assert summary.truncated_unresolved_count == 0
+    assert summary.truncated_evidence_count == 0

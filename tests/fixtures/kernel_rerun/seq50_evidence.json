@@ -1,0 +1,1002 @@
+{
+ "source_run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+ "records": [
+  {
+   "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+   "evidence_id": "ev_8ea090823ed5dd8d0ba2ae31e57fd46abb8388adb78512e20e4b41f8461b35bc",
+   "evidence_type": "DBT_RUN_RESULTS",
+   "source": "dbt_artifact:run_results.json",
+   "subject": "870de53cf8e67a39cbcc97c0d42884e7",
+   "observed_at": "2026-09-09T13:00:26.204354Z",
+   "content": {
+    "kind": "DBT_RUN_RESULTS",
+    "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+    "run_status": "SUCCEEDED",
+    "dbt_exit_code": 0,
+    "failed_nodes": [],
+    "skipped_nodes": []
+   },
+   "content_digest": "23b3027129a81fc86fa59467f3e44d88d25d642424240dc72233591b44c04246"
+  },
+  {
+   "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+   "evidence_id": "ev_d0c55a30348acd4ec0374fcca8cba74da268069eb9339584d998172719b14947",
+   "evidence_type": "RELATION_DATA_PROFILE",
+   "source": "postgres_profile_snapshot",
+   "subject": "raw_payments",
+   "observed_at": "2026-09-09T13:00:44.859292Z",
+   "content": {
+    "kind": "RELATION_DATA_PROFILE",
+    "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+    "relation_name": "raw_payments",
+    "profile_spec_version": "profile_spec.v1",
+    "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+    "snapshot": {
+     "relation_name": "raw_payments",
+     "row_count": 111,
+     "columns": [
+      {
+       "column_name": "id",
+       "null_count": 0,
+       "distinct_count": 111
+      },
+      {
+       "column_name": "order_id",
+       "null_count": 0,
+       "distinct_count": 97
+      },
+      {
+       "column_name": "payment_method",
+       "null_count": 0,
+       "distinct_count": 4
+      },
+      {
+       "column_name": "amount",
+       "null_count": 0,
+       "distinct_count": 30
+      }
+     ],
+     "business_key_duplicates": [
+      {
+       "name": "id",
+       "duplicate_count": 0
+      }
+     ],
+     "business_fingerprint_duplicates": [
+      {
+       "name": "order_payment_amount",
+       "duplicate_count": 0
+      }
+     ],
+     "relationship_violations": [
+      {
+       "name": "order_id_to_raw_orders_id",
+       "violation_count": 0
+      }
+     ],
+     "groups": [
+      {
+       "name": "payment_method",
+       "columns": [
+        "payment_method"
+       ],
+       "values": [
+        [
+         "bank_transfer"
+        ],
+        [
+         "coupon"
+        ],
+        [
+         "credit_card"
+        ],
+        [
+         "gift_card"
+        ]
+       ],
+       "counts": [
+        32,
+        13,
+        55,
+        11
+       ]
+      }
+     ]
+    }
+   },
+   "content_digest": "98bc5f5001463d36255dc83d6fcda64ac62c5e2e3277ec5ca102f8d569db59f9"
+  },
+  {
+   "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+   "evidence_id": "ev_c2cba3950afcb416fd6889d11c20fc76c6b7800899b955e4d348aa496715e0ab",
+   "evidence_type": "RELATION_DATA_PROFILE",
+   "source": "postgres_profile_snapshot",
+   "subject": "raw_orders",
+   "observed_at": "2026-09-09T13:00:44.913498Z",
+   "content": {
+    "kind": "RELATION_DATA_PROFILE",
+    "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+    "relation_name": "raw_orders",
+    "profile_spec_version": "profile_spec.v1",
+    "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+    "snapshot": {
+     "relation_name": "raw_orders",
+     "row_count": 99,
+     "columns": [
+      {
+       "column_name": "id",
+       "null_count": 0,
+       "distinct_count": 99
+      },
+      {
+       "column_name": "user_id",
+       "null_count": 0,
+       "distinct_count": 62
+      },
+      {
+       "column_name": "order_date",
+       "null_count": 0,
+       "distinct_count": 69
+      },
+      {
+       "column_name": "status",
+       "null_count": 0,
+       "distinct_count": 5
+      }
+     ],
+     "business_key_duplicates": [
+      {
+       "name": "id",
+       "duplicate_count": 0
+      }
+     ],
+     "business_fingerprint_duplicates": [],
+     "relationship_violations": [
+      {
+       "name": "user_id_to_raw_customers_id",
+       "violation_count": 0
+      },
+      {
+       "name": "id_to_raw_payments_order_id",
+       "violation_count": 2
+      }
+     ],
+     "groups": []
+    }
+   },
+   "content_digest": "b460fd9b335a944882f0090fc61fe01083264041e136c7464f7e124d4cc28c01"
+  },
+  {
+   "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+   "evidence_id": "ev_2744de22971619c35a0fe4efaee7d3f0ff72bd26618a30d8b082ce83047b1881",
+   "evidence_type": "RELATION_HISTORY",
+   "source": "postgres_profile_snapshot",
+   "subject": "raw_payments",
+   "observed_at": "2026-09-09T13:00:44.953110Z",
+   "content": {
+    "kind": "RELATION_HISTORY",
+    "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+    "relation_name": "raw_payments",
+    "profile_spec_version": "profile_spec.v1",
+    "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+    "snapshot": {
+     "relation_name": "raw_payments",
+     "histories": [
+      {
+       "name": "payment_count_by_order_date",
+       "metric": "count",
+       "points": [
+        {
+         "bucket": "2018-01-01",
+         "periodic_key": "2018-01-01",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-02",
+         "periodic_key": "2018-01-02",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-04",
+         "periodic_key": "2018-01-04",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-05",
+         "periodic_key": "2018-01-05",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-07",
+         "periodic_key": "2018-01-07",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-09",
+         "periodic_key": "2018-01-09",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-11",
+         "periodic_key": "2018-01-11",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-12",
+         "periodic_key": "2018-01-12",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-14",
+         "periodic_key": "2018-01-14",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-15",
+         "periodic_key": "2018-01-15",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-17",
+         "periodic_key": "2018-01-17",
+         "value": 4
+        },
+        {
+         "bucket": "2018-01-18",
+         "periodic_key": "2018-01-18",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-20",
+         "periodic_key": "2018-01-20",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-22",
+         "periodic_key": "2018-01-22",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-23",
+         "periodic_key": "2018-01-23",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-24",
+         "periodic_key": "2018-01-24",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-26",
+         "periodic_key": "2018-01-26",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-27",
+         "periodic_key": "2018-01-27",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-28",
+         "periodic_key": "2018-01-28",
+         "value": 4
+        },
+        {
+         "bucket": "2018-01-29",
+         "periodic_key": "2018-01-29",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-31",
+         "periodic_key": "2018-01-31",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-02",
+         "periodic_key": "2018-02-02",
+         "value": 2
+        },
+        {
+         "bucket": "2018-02-04",
+         "periodic_key": "2018-02-04",
+         "value": 2
+        },
+        {
+         "bucket": "2018-02-06",
+         "periodic_key": "2018-02-06",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-08",
+         "periodic_key": "2018-02-08",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-10",
+         "periodic_key": "2018-02-10",
+         "value": 3
+        },
+        {
+         "bucket": "2018-02-11",
+         "periodic_key": "2018-02-11",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-13",
+         "periodic_key": "2018-02-13",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-14",
+         "periodic_key": "2018-02-14",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-16",
+         "periodic_key": "2018-02-16",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-17",
+         "periodic_key": "2018-02-17",
+         "value": 3
+        },
+        {
+         "bucket": "2018-02-19",
+         "periodic_key": "2018-02-19",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-20",
+         "periodic_key": "2018-02-20",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-21",
+         "periodic_key": "2018-02-21",
+         "value": 3
+        },
+        {
+         "bucket": "2018-02-23",
+         "periodic_key": "2018-02-23",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-24",
+         "periodic_key": "2018-02-24",
+         "value": 2
+        },
+        {
+         "bucket": "2018-02-25",
+         "periodic_key": "2018-02-25",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-26",
+         "periodic_key": "2018-02-26",
+         "value": 3
+        },
+        {
+         "bucket": "2018-02-27",
+         "periodic_key": "2018-02-27",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-28",
+         "periodic_key": "2018-02-28",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-01",
+         "periodic_key": "2018-03-01",
+         "value": 3
+        },
+        {
+         "bucket": "2018-03-02",
+         "periodic_key": "2018-03-02",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-03",
+         "periodic_key": "2018-03-03",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-05",
+         "periodic_key": "2018-03-05",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-06",
+         "periodic_key": "2018-03-06",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-07",
+         "periodic_key": "2018-03-07",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-08",
+         "periodic_key": "2018-03-08",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-10",
+         "periodic_key": "2018-03-10",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-11",
+         "periodic_key": "2018-03-11",
+         "value": 4
+        },
+        {
+         "bucket": "2018-03-12",
+         "periodic_key": "2018-03-12",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-14",
+         "periodic_key": "2018-03-14",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-16",
+         "periodic_key": "2018-03-16",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-17",
+         "periodic_key": "2018-03-17",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-18",
+         "periodic_key": "2018-03-18",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-20",
+         "periodic_key": "2018-03-20",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-21",
+         "periodic_key": "2018-03-21",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-23",
+         "periodic_key": "2018-03-23",
+         "value": 3
+        },
+        {
+         "bucket": "2018-03-24",
+         "periodic_key": "2018-03-24",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-26",
+         "periodic_key": "2018-03-26",
+         "value": 3
+        },
+        {
+         "bucket": "2018-03-27",
+         "periodic_key": "2018-03-27",
+         "value": 3
+        },
+        {
+         "bucket": "2018-03-28",
+         "periodic_key": "2018-03-28",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-30",
+         "periodic_key": "2018-03-30",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-31",
+         "periodic_key": "2018-03-31",
+         "value": 1
+        },
+        {
+         "bucket": "2018-04-02",
+         "periodic_key": "2018-04-02",
+         "value": 2
+        },
+        {
+         "bucket": "2018-04-03",
+         "periodic_key": "2018-04-03",
+         "value": 2
+        },
+        {
+         "bucket": "2018-04-04",
+         "periodic_key": "2018-04-04",
+         "value": 1
+        },
+        {
+         "bucket": "2018-04-06",
+         "periodic_key": "2018-04-06",
+         "value": 1
+        },
+        {
+         "bucket": "2018-04-07",
+         "periodic_key": "2018-04-07",
+         "value": 2
+        },
+        {
+         "bucket": "2018-04-09",
+         "periodic_key": "2018-04-09",
+         "value": 1
+        }
+       ],
+       "watermark_column": null,
+       "watermark_value": null,
+       "sla_seconds": null
+      }
+     ]
+    }
+   },
+   "content_digest": "78fd2362811d993afa779e67d6fa6af00fbf71aa69d15f8d0b97de40f6f7c7ac"
+  },
+  {
+   "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+   "evidence_id": "ev_c52e53b6e2238c51902b9f24e784c971ac04a8e5d5c3eccc6ca46bdda93c9f47",
+   "evidence_type": "RELATION_HISTORY",
+   "source": "postgres_profile_snapshot",
+   "subject": "raw_orders",
+   "observed_at": "2026-09-09T13:00:44.997718Z",
+   "content": {
+    "kind": "RELATION_HISTORY",
+    "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+    "relation_name": "raw_orders",
+    "profile_spec_version": "profile_spec.v1",
+    "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+    "snapshot": {
+     "relation_name": "raw_orders",
+     "histories": [
+      {
+       "name": "order_count_by_day",
+       "metric": "count",
+       "points": [
+        {
+         "bucket": "2018-01-01",
+         "periodic_key": "1",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-02",
+         "periodic_key": "2",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-04",
+         "periodic_key": "4",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-05",
+         "periodic_key": "5",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-07",
+         "periodic_key": "7",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-09",
+         "periodic_key": "2",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-11",
+         "periodic_key": "4",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-12",
+         "periodic_key": "5",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-14",
+         "periodic_key": "7",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-15",
+         "periodic_key": "1",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-17",
+         "periodic_key": "3",
+         "value": 3
+        },
+        {
+         "bucket": "2018-01-18",
+         "periodic_key": "4",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-20",
+         "periodic_key": "6",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-22",
+         "periodic_key": "1",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-23",
+         "periodic_key": "2",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-24",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-26",
+         "periodic_key": "5",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-27",
+         "periodic_key": "6",
+         "value": 1
+        },
+        {
+         "bucket": "2018-01-28",
+         "periodic_key": "7",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-29",
+         "periodic_key": "1",
+         "value": 2
+        },
+        {
+         "bucket": "2018-01-31",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-02",
+         "periodic_key": "5",
+         "value": 2
+        },
+        {
+         "bucket": "2018-02-04",
+         "periodic_key": "7",
+         "value": 2
+        },
+        {
+         "bucket": "2018-02-06",
+         "periodic_key": "2",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-08",
+         "periodic_key": "4",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-10",
+         "periodic_key": "6",
+         "value": 3
+        },
+        {
+         "bucket": "2018-02-11",
+         "periodic_key": "7",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-13",
+         "periodic_key": "2",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-14",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-16",
+         "periodic_key": "5",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-17",
+         "periodic_key": "6",
+         "value": 3
+        },
+        {
+         "bucket": "2018-02-19",
+         "periodic_key": "1",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-20",
+         "periodic_key": "2",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-21",
+         "periodic_key": "3",
+         "value": 2
+        },
+        {
+         "bucket": "2018-02-23",
+         "periodic_key": "5",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-24",
+         "periodic_key": "6",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-25",
+         "periodic_key": "7",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-26",
+         "periodic_key": "1",
+         "value": 2
+        },
+        {
+         "bucket": "2018-02-27",
+         "periodic_key": "2",
+         "value": 1
+        },
+        {
+         "bucket": "2018-02-28",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-01",
+         "periodic_key": "4",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-02",
+         "periodic_key": "5",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-03",
+         "periodic_key": "6",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-05",
+         "periodic_key": "1",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-06",
+         "periodic_key": "2",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-07",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-08",
+         "periodic_key": "4",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-10",
+         "periodic_key": "6",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-11",
+         "periodic_key": "7",
+         "value": 3
+        },
+        {
+         "bucket": "2018-03-12",
+         "periodic_key": "1",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-14",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-16",
+         "periodic_key": "5",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-17",
+         "periodic_key": "6",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-18",
+         "periodic_key": "7",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-20",
+         "periodic_key": "2",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-21",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-23",
+         "periodic_key": "5",
+         "value": 4
+        },
+        {
+         "bucket": "2018-03-24",
+         "periodic_key": "6",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-26",
+         "periodic_key": "1",
+         "value": 3
+        },
+        {
+         "bucket": "2018-03-27",
+         "periodic_key": "2",
+         "value": 2
+        },
+        {
+         "bucket": "2018-03-28",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-30",
+         "periodic_key": "5",
+         "value": 1
+        },
+        {
+         "bucket": "2018-03-31",
+         "periodic_key": "6",
+         "value": 1
+        },
+        {
+         "bucket": "2018-04-02",
+         "periodic_key": "1",
+         "value": 1
+        },
+        {
+         "bucket": "2018-04-03",
+         "periodic_key": "2",
+         "value": 2
+        },
+        {
+         "bucket": "2018-04-04",
+         "periodic_key": "3",
+         "value": 1
+        },
+        {
+         "bucket": "2018-04-06",
+         "periodic_key": "5",
+         "value": 1
+        },
+        {
+         "bucket": "2018-04-07",
+         "periodic_key": "6",
+         "value": 2
+        },
+        {
+         "bucket": "2018-04-09",
+         "periodic_key": "1",
+         "value": 1
+        }
+       ],
+       "watermark_column": "order_date",
+       "watermark_value": "2018-04-09",
+       "sla_seconds": 86400
+      }
+     ]
+    }
+   },
+   "content_digest": "8088e48263969c41ef41e74d7f47a7a74d792d5a36aca729eb62fe70c5ef5f02"
+  },
+  {
+   "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+   "evidence_id": "ev_019174d9af240cb997c8f93fc4a29acf9955db35baaf040de75e4662b328a503",
+   "evidence_type": "RELATION_SCHEMA",
+   "source": "postgres_catalog",
+   "subject": "analytics.raw_payments",
+   "observed_at": "2026-09-09T13:00:45.007965Z",
+   "content": {
+    "kind": "RELATION_SCHEMA",
+    "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+    "schema_name": "analytics",
+    "relation_name": "raw_payments",
+    "columns": [
+     {
+      "name": "id",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 1
+     },
+     {
+      "name": "order_id",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 2
+     },
+     {
+      "name": "payment_method",
+      "data_type": "text",
+      "nullable": true,
+      "ordinal_position": 3
+     },
+     {
+      "name": "amount",
+      "data_type": "integer",
+      "nullable": true,
+      "ordinal_position": 4
+     },
+     {
+      "name": "source_batch_note",
+      "data_type": "text",
+      "nullable": true,
+      "ordinal_position": 5
+     }
+    ]
+   },
+   "content_digest": "ff2dc00f7d9f102f78912e7bda7116db6ca323458cec8383506b361e2462fb20"
+  },
+  {
+   "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+   "evidence_id": "ev_17e85df7876f743160d3eab0ebe96aa1489ef7f971b2ec4fd55496707f6f6834",
+   "evidence_type": "DBT_LINEAGE",
+   "source": "dbt_artifact:manifest.json",
+   "subject": "seed.jaffle_shop.raw_payments",
+   "observed_at": "2026-09-09T13:00:20.060454Z",
+   "content": {
+    "kind": "DBT_LINEAGE",
+    "run_id": "870de53cf8e67a39cbcc97c0d42884e7",
+    "node_id": "seed.jaffle_shop.raw_payments",
+    "direction": "downstream",
+    "related_nodes": [
+     {
+      "node_id": "model.jaffle_shop.stg_payments",
+      "resource_type": "model",
+      "name": "stg_payments",
+      "distance": 1
+     },
+     {
+      "node_id": "model.jaffle_shop.customers",
+      "resource_type": "model",
+      "name": "customers",
+      "distance": 2
+     },
+     {
+      "node_id": "model.jaffle_shop.orders",
+      "resource_type": "model",
+      "name": "orders",
+      "distance": 2
+     }
+    ]
+   },
+   "content_digest": "c49b6034dc1ad7cad62442fde492e943216c8183974f37c010fd460736dac916"
+  }
+ ]
+}

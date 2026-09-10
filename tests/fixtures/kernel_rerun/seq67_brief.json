@@ -1,0 +1,14 @@
+{
+ "source_run_id": "c9f54f9edcd39d277583c282e788efb7",
+ "subjects": [
+  "seed.jaffle_shop.raw_payments",
+  "raw_payments"
+ ],
+ "observations": [
+  {
+   "kind": "CHANNEL_PAYMENT_RETRY_ALERT",
+   "subject": "raw_payments",
+   "value": "coupon"
+  }
+ ]
+}

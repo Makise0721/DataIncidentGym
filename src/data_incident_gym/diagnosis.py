@@ -287,12 +287,80 @@ class ToolTraceEvent(BaseModel):
         return self
 
 
+class RejectedAssessmentSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    hypothesis_id: StrictStr
+    verdict: Literal["SUPPORTED", "REFUTED"]
+
+
+class RejectedClaimSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["ROOT_CAUSE", "AFFECTED_ASSET", "HEALTH_STATE"]
+    known_value: StrictStr | None = None
+    relation_name: StrictStr | None = None
+    evidence_ids: tuple[StrictStr, ...] = ()
+
+
+class RejectedUnresolvedSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evidence_kind: Literal[
+        "RELATION_SCHEMA",
+        "RELATION_DATA_PROFILE",
+        "RELATION_HISTORY",
+        "INGESTION_WATERMARK",
+        "PAYMENT_EVENT_IDENTITY",
+        "TRANSFORMATION_DEFINITION",
+    ]
+    reason_code: Literal["RELATION_NOT_ALLOWED", "NOT_OBSERVABLE"]
+    subject: StrictStr | None = None
+
+
+class RejectedDecisionSummary(BaseModel):
+    """Bounded structural projection of a kernel decision rejected at finalize.
+
+    Only known public identifiers and accepted evidence references are kept;
+    raw values, free text and unknown content are reduced to counts. Every array
+    and every claim's reference list is capped; items dropped by a cap are not
+    inspected and are counted as truncated, never as unknown. Assessments drop
+    unregistered hypotheses (`total = len(kept) + unknown + truncated`), while
+    claims and unresolved_evidence redact unknown values in place
+    (`total = len(kept) + truncated`); one claim's references satisfy
+    `total = kept + unknown + truncated`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["p1.rejected_decision.v1"] = "p1.rejected_decision.v1"
+    model_request_index: Annotated[StrictInt, Field(ge=0)]
+    status: Literal["CONFIRMED", "INSUFFICIENT_EVIDENCE", "NO_INCIDENT"]
+    selected_hypothesis_id: StrictStr | None = None
+    assessments: tuple[RejectedAssessmentSummary, ...] = ()
+    claims: tuple[RejectedClaimSummary, ...] = ()
+    unresolved_evidence: tuple[RejectedUnresolvedSummary, ...] = ()
+    unknown_hypothesis_count: StrictInt = 0
+    unknown_claim_count: StrictInt = 0
+    unknown_evidence_count: StrictInt = 0
+    unknown_subject_count: StrictInt = 0
+    truncated_assessment_count: StrictInt = 0
+    truncated_claim_count: StrictInt = 0
+    truncated_unresolved_count: StrictInt = 0
+    truncated_evidence_count: StrictInt = 0
+    total_assessments: StrictInt = 0
+    total_claims: StrictInt = 0
+    total_unresolved: StrictInt = 0
+    truncated: StrictBool = False
+
+
 class EvidenceGateTraceEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     event_type: Literal["EVIDENCE_GATE"]
     reason_code: NonBlankStr
     accepted: StrictBool
+    rejected_decision: RejectedDecisionSummary | None = None
 
 
 class ModelProtocolTraceEvent(BaseModel):
