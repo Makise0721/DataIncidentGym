@@ -267,6 +267,27 @@ def test_kernel_prompt_exposes_the_exact_binding_transport_contract() -> None:
     assert '"root_cause_code":"SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"' in KERNEL_PROMPT
 
 
+def test_kernel_prompt_states_confirmed_asset_completeness() -> None:
+    """Asset completeness is scoped to CONFIRMED, is checked against the
+    accepted evidence rather than the current citations, and separates the
+    no-failed-node case from the failed-node cases."""
+
+    assert "CONFIRMED" in KERNEL_PROMPT
+    assert "affected assets" in KERNEL_PROMPT
+    # Scoped: an abstention or a healthy verdict is not asked for assets.
+    assert "When the decision is CONFIRMED" in KERNEL_PROMPT
+    # Checked against accepted evidence, not against whatever the claims cite.
+    assert "check the affected assets against the accepted evidence" in KERNEL_PROMPT
+    assert "citing fewer\nrecords does not shrink" in KERNEL_PROMPT
+    # The three branches are each present, each phrased in the new rule text.
+    assert "the failed model itself is an affected asset" in KERNEL_PROMPT
+    assert "the distance-1 upstream models are affected" in KERNEL_PROMPT
+    assert "with no failed node" in KERNEL_PROMPT
+    assert "source or seed node the confirmed root cause names" in KERNEL_PROMPT
+    # The comparison relation must not become a fault source by accident.
+    assert "not every relation named in the incident is a fault source" in KERNEL_PROMPT
+
+
 def test_kernel_retry_message_carries_provable_relations_for_disallowed_relations() -> None:
     plain = _kernel_retry_message("RELATION_NOT_ALLOWED")
     assert "Currently provable" not in plain

@@ -119,9 +119,24 @@ the current partition and require its declared SLA plus the logical incident obs
 time to be within that SLA. Never use EvidenceRecord observed_at as event time or fall back
 to a historical range for that current partition.
 
-When the direct failed node is a dbt test, affected assets are its distance-1 upstream model
-dependencies, not the test node or the upstream seed relations. Bind those model claims to
-the failed-test node error and upstream-lineage evidence whose matching model has distance 1.
+When the decision is CONFIRMED, check the affected assets against the accepted evidence
+before submitting, not against whatever the current claims happen to cite: citing fewer
+records does not shrink the set you must check, and each asset claim must then cite the
+records that support it. This is the project's scope convention for a confirmed incident,
+so apply it from the public evidence only:
+- the failed model itself is an affected asset; it never appears in its own lineage
+  neighbours, so keep it even when the lineage record only lists its relations;
+- for a failed test, the distance-1 upstream models are affected, and a further model is
+  affected only when some other accepted downstream record or public evidence names it,
+  because a distance-1 upstream record alone does not prove what those models feed;
+- with no failed node, an incident confirmed on a source or seed relation whose downstream
+  lineage is accepted makes that lineage's models the affected assets. Size the assets from
+  the source or seed node the confirmed root cause names, not from every relation named in
+  the incident: not every relation named in the incident is a fault source, and a relation
+  collected only for comparison or for a watermark is not one.
+
+Bind those model claims to the failed-test node error and upstream-lineage evidence whose
+matching model has distance 1.
 
 For NO_INCIDENT, collect positive successful-run, current profile, and historical-series
 evidence and cite a current point that is demonstrably within the available prior same-

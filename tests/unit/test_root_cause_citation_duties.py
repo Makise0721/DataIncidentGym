@@ -757,3 +757,77 @@ def test_kernel_prompt_requires_two_hypotheses_for_both_terminal_statuses() -> N
     assert "register at least two compatible hypotheses\nbefore attempting a confirmed" not in (
         KERNEL_PROMPT
     )
+
+
+def test_a_failed_model_never_appears_in_its_own_lineage_neighbours() -> None:
+    """The prompt tells the model to keep the failed model even though its
+    lineage record only lists other nodes; that is only true because the record
+    does not list the node itself."""
+
+    record = _record(
+        EvidenceType.DBT_LINEAGE,
+        EvidenceSource.DBT_MANIFEST,
+        "model.jaffle_shop.customers",
+        DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="model.jaffle_shop.customers",
+            direction="upstream",
+            related_nodes=(
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.stg_customers",
+                    name="stg_customers",
+                    resource_type="model",
+                    distance=1,
+                ),
+            ),
+        ),
+    )
+
+    content = record.content
+    assert content.node_id == "model.jaffle_shop.customers"
+    assert content.node_id not in {node.node_id for node in content.related_nodes}
+
+
+def test_a_source_downstream_relation_reaches_the_downstream_models() -> None:
+    """The no-failed-node branch reads the confirmed source or seed node's
+    accepted downstream lineage; this pins that such a record names the models
+    the rule expects, and that a comparison relation is a separate subject."""
+
+    record = _record(
+        EvidenceType.DBT_LINEAGE,
+        EvidenceSource.DBT_MANIFEST,
+        "seed.jaffle_shop.raw_payments",
+        DbtLineageFact(
+            kind="DBT_LINEAGE",
+            run_id=RUN_ID,
+            node_id="seed.jaffle_shop.raw_payments",
+            direction="downstream",
+            related_nodes=(
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.stg_payments",
+                    name="stg_payments",
+                    resource_type="model",
+                    distance=1,
+                ),
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.orders",
+                    name="orders",
+                    resource_type="model",
+                    distance=2,
+                ),
+                DbtLineageNode(
+                    node_id="model.jaffle_shop.customers",
+                    name="customers",
+                    resource_type="model",
+                    distance=2,
+                ),
+            ),
+        ),
+    )
+
+    nodes = record.content.related_nodes
+    assert [node.name for node in nodes] == ["stg_payments", "orders", "customers"]
+    assert all(node.resource_type == "model" for node in nodes)
+    # The comparison relation of the same incident is not in this lineage.
+    assert "raw_orders" not in {node.name for node in nodes}
