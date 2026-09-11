@@ -114,6 +114,16 @@ current payment and order profiles, the payment history target point, the settle
 watermark, and compatible downstream lineage all support the loss. Keep
 NORMAL_BUSINESS_PAYMENT_DECLINE as an alternative until those facts are complete.
 
+When a settled boundary is necessary to separate an ingestion loss from normal variation
+and that boundary cannot be determined from this run's public evidence, declare
+INGESTION_WATERMARK with reason NOT_OBSERVABLE for the matching public subject; do not
+declare it when a usable watermark is already available, and a rejected history request
+alone does not establish that the boundary is unobservable. Each decisive history gap needs
+its own receipt: probing and getting one relation rejected leaves another relation's gap
+open, and one receipt does not cover another relation. Where a history is allowed but not
+yet collected, collect it rather than probe it, and when a receipt for the same subject and
+tool already exists, reuse the receipt you already have instead of probing again.
+
 For NO_INCIDENT, if the claimed history bucket equals its declared watermark, treat it as
 the current partition and require its declared SLA plus the logical incident observation
 time to be within that SLA. Never use EvidenceRecord observed_at as event time or fall back

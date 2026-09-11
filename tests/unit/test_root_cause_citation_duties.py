@@ -849,3 +849,92 @@ def test_kernel_prompt_requires_collection_check_for_both_terminal_statuses() ->
     assert "it is not a list of calls to make" in KERNEL_PROMPT
     # The relevance condition survives the rewrite.
     assert "still\nrelevant to distinguishing the registered candidate causes" in KERNEL_PROMPT
+
+
+def test_kernel_prompt_separates_history_receipts_from_a_watermark_declaration() -> None:
+    """Two history receipts do not produce a watermark declaration, and a blocked
+    history request must not be reported as unobservable. The watermark sentence
+    states its own trigger and its own prohibition."""
+
+    from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
+
+    # The watermark rule stands on its own trigger.
+    assert "When a settled boundary is necessary to separate an ingestion loss" in KERNEL_PROMPT
+    assert "cannot be determined from this run's public evidence" in KERNEL_PROMPT
+    assert "declare\nINGESTION_WATERMARK with reason NOT_OBSERVABLE" in KERNEL_PROMPT
+    assert "do not\ndeclare it when a usable watermark is already available" in KERNEL_PROMPT
+    assert "a rejected history request\nalone does not establish" in KERNEL_PROMPT
+    # Queryable-but-uncollected history is collected, not probed.
+    assert "collect it rather than probe it" in KERNEL_PROMPT
+    # Receipts are reused, not retried.
+    assert "reuse the receipt you already have" in KERNEL_PROMPT
+
+
+def test_kernel_prompt_requires_one_receipt_per_decisive_history_gap() -> None:
+    """Each decisive history gap needs its own receipt; a second relation's gap
+    is not covered by the first relation's receipt."""
+
+    from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
+
+    assert "Each decisive history gap needs\nits own receipt" in KERNEL_PROMPT
+    assert "one receipt does not cover another relation" in KERNEL_PROMPT
+
+
+def test_blocked_history_gaps_are_derived_without_a_watermark() -> None:
+    """finalize already derives unresolved items from blocked relation gaps, so
+    two history receipts produce two derived declarations without the model
+    repeating them. INGESTION_WATERMARK is a separate declaration and must not
+    be derived from those receipts."""
+
+    kernel = DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_PAYMENT_INGESTION_LOSS",
+            "NORMAL_BUSINESS_PAYMENT_DECLINE",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_history_relations=(),
+    )
+    declarations = (
+        Hypothesis(
+            hypothesis_id="h_loss",
+            root_cause_code="SOURCE_PAYMENT_INGESTION_LOSS",
+        ),
+        Hypothesis(
+            hypothesis_id="h_decline",
+            root_cause_code="NORMAL_BUSINESS_PAYMENT_DECLINE",
+        ),
+    )
+    for index, relation in enumerate(("raw_payments", "raw_orders")):
+        with pytest.raises(KernelError) as error:
+            kernel.prepare_tool(
+                intent=InvestigationIntent(
+                    gap_id=f"g_history_{index}",
+                    gap_kind=EvidenceGapKind.COMPARE_HISTORY,
+                    new_hypotheses=declarations if index == 0 else (),
+                ),
+                tool_name="get_relation_history",
+                arguments={"relation_name": relation},
+            )
+        assert error.value.code == "RELATION_NOT_ALLOWED"
+
+    outcome = kernel.finalize(
+        KernelDecision(
+            status="INSUFFICIENT_EVIDENCE",
+            run_id=RUN_ID,
+            summary="Both payment histories are not observable in this run.",
+            recommended_actions=(),
+            confidence=0.2,
+        )
+    )
+
+    derived = [
+        (item.evidence_kind, item.subject, item.reason_code)
+        for item in outcome.unresolved_evidence
+    ]
+    assert derived == [
+        ("RELATION_HISTORY", "raw_payments", "RELATION_NOT_ALLOWED"),
+        ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED"),
+    ]
+    assert all(item.evidence_kind != "INGESTION_WATERMARK" for item in outcome.unresolved_evidence)
