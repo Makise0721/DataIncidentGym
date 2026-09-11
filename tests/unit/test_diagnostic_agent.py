@@ -222,9 +222,9 @@ def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> No
 
     assert expected == P1_ROOT_CAUSE_CODES
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
-        "p1.kernel.v12",
+        "p1.kernel.v13",
         "p1.static.v5",
-        "p1.controller.v13",
+        "p1.controller.v14",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)

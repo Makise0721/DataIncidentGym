@@ -1219,7 +1219,7 @@ async def test_seq50_rejected_confirm_recovers_with_corrected_citation(
         and not event.accepted
     )
     assert len(rejected) == 1
-    assert any("records cited by the ROOT_CAUSE claim" in text for text in retry_text)
+    assert any("missing a category of record" in text for text in retry_text)
     summary = rejected[0].rejected_decision
     assert summary is not None
     assert summary.schema_version == "p1.rejected_decision.v1"

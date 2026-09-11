@@ -879,6 +879,13 @@ def test_kernel_confirms_permanent_orphan_only_with_history_boundary() -> None:
     records = _orphan_records()
     _close_orphan_records(kernel, records)
 
+    # Same premise as the ingestion-loss branch: confirmation comes from a
+    # successful run with no failed node, so no node-error record exists to cite.
+    run = next(record for record in records if record.content.kind == "DBT_RUN_RESULTS")
+    assert run.content.run_status == "SUCCEEDED"
+    assert run.content.failed_nodes == ()
+    assert all(record.content.kind != "DBT_NODE_ERROR" for record in records)
+
     outcome = kernel.finalize(_orphan_decision(records))
 
     assert outcome.status is KernelFinalStatus.CONFIRMED
@@ -1233,6 +1240,14 @@ def test_kernel_confirms_silent_payment_loss_from_public_aggregate_evidence() ->
     kernel = _silent_kernel()
     records = _silent_records()
     _close_silent_records(kernel, records)
+
+    # This branch confirms from a successful run with no failed node, and the
+    # evidence it holds contains no node-error record at all: its citation duty
+    # is run results, relation profiles and history, never a failed-node error.
+    run = next(record for record in records if record.content.kind == "DBT_RUN_RESULTS")
+    assert run.content.run_status == "SUCCEEDED"
+    assert run.content.failed_nodes == ()
+    assert all(record.content.kind != "DBT_NODE_ERROR" for record in records)
 
     outcome = kernel.finalize(_silent_decision(records))
 

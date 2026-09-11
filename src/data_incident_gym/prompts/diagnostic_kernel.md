@@ -26,6 +26,26 @@ before attempting a confirmed diagnosis. Re-sending a registered hypothesis with
 original root_cause_code is allowed and registers nothing twice, so a repeated declaration
 never blocks a new query; reusing a registered hypothesis_id with a different
 root_cause_code is rejected, so choose a new ID for a genuinely new hypothesis. Every opened evidence gap must close with a successful typed tool result before you confirm a diagnosis.
+
+Each claim carries its own citation duty: cite in the ROOT_CAUSE claim every record its
+root cause requires, and cite the records belonging to the affected-asset claim there.
+Referencing a record inside another claim does not satisfy the claim that needs it. The
+accepted-evidence list is the complete set of records you may cite, so completing a
+citation needs no further tool call. What the ROOT_CAUSE claim must cite depends on the
+root cause, and no single list covers all of them:
+
+- SOURCE_SEMANTIC_PAYMENT_DUPLICATE needs exactly one run-results record and exactly one
+  profile of the declared payment relation that satisfies its duplicate condition.
+  SOURCE_EXACT_PAYMENT_DUPLICATE needs those same two records under its own duplicate
+  condition, plus the failed node's error and an upstream relation fact.
+- Every other root cause except SOURCE_PAYMENT_INGESTION_LOSS and
+  SOURCE_PERMANENT_ORPHAN_PAYMENT needs the failed node's error plus an upstream relation
+  fact: a schema or profile of a relation on that failed node's upstream path.
+- SOURCE_PAYMENT_INGESTION_LOSS and SOURCE_PERMANENT_ORPHAN_PAYMENT follow the citation
+  requirements stated in their own sections below and are confirmed from a successful run
+  that has no failed node, so a failed-node error is neither required nor available for
+  them.
+
 For relation tools, query only relations listed under provable_relations for that tool in the ledger; that list is
 exact and complete, and any relation not on it will be rejected. One boundary probe is
 allowed when a relation outside that list is directly relevant to the declared incident
@@ -117,3 +137,15 @@ definition declarations require a relevant public subject and a fact that is not
 observable in this run; check each item for relevance instead of declaring every
 category. Correct an invalid item and re-check the remaining independent and justified
 gaps; one invalid declaration is not a reason to delete the others.
+
+Before declaring a schema, data-profile or history gap, verify that a receipt for that
+same subject and tool already exists. If it does not and the tool budget still allows it,
+take the one permitted boundary probe now, since a declaration without its receipt will
+be rejected. If the budget is already spent, do not declare that item at all: finalize
+over the evidence you can publicly support instead of submitting a declaration you cannot
+back. Receipts must still come from a real rejection in this run; never fabricate one. A
+rejected decision does not by itself bar a later probe: if the conditions above hold and
+the tool budget still allows it, take the one permitted boundary probe in a following
+request and then finalize with the receipt. What stays forbidden is probing once the tool
+budget is exhausted, repeating a call whose relation was already rejected, and probing a
+variant of a blocked relation.

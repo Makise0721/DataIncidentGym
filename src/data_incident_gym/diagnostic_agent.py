@@ -80,10 +80,10 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v12"
+KERNEL_PROMPT_VERSION = "p1.kernel.v13"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v13"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v14"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -1334,12 +1334,13 @@ def _kernel_retry_message(
             "remaining independent and justified gaps instead of deleting them all."
         ),
         "ROOT_CLAIM_EVIDENCE_INCOMPATIBLE": (
-            "Successful tools and a full evidence inventory do not by themselves "
-            "support the selected claim. Re-check the selected hypothesis, the "
-            "records cited by the ROOT_CAUSE claim, and their relation and "
-            "time/lineage bindings before retrying; if the public evidence is "
-            "genuinely insufficient, re-investigate or finalize INSUFFICIENT_EVIDENCE "
-            "under the existing contract."
+            "The ROOT_CAUSE claim is usually missing a category of record its root cause "
+            "requires, such as the failed node's error or an upstream relation fact; "
+            "records cited by another claim do not count for it. If those records are "
+            "already in the accepted-evidence list, cite them in the ROOT_CAUSE claim; "
+            "otherwise investigate the missing category before retrying. If the public "
+            "evidence is genuinely insufficient, re-investigate or finalize "
+            "INSUFFICIENT_EVIDENCE under the existing contract."
         ),
     }
     message = messages.get(code, "Correct the structured investigation decision.")
