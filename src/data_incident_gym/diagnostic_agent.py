@@ -1255,8 +1255,10 @@ def _uncollected_relations(kernel: DiagnosticKernel) -> dict[str, list[str]]:
     subject, so subtracting subjects would report a collected relation as
     missing, and subtract cross-type would let one relation's profile hide its
     uncollected history. The result states what is allowed right now, not what
-    is callable: a spent tool budget or an already-fingerprinted attempt still
-    makes a listed relation unusable.
+    is callable: a spent budget, an already-recorded fingerprint for the same
+    call, or a recorded blocked receipt can still bar a call, while a request
+    rejected during preparation records no fingerprint and is retried after the
+    model corrects it.
     """
 
     return {
@@ -1323,11 +1325,13 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
         "never be retried; the lists are exact and complete and relations returned by "
         "evidence do not extend them. uncollected_relations names, per relation tool, the "
         "relations that are allowed but still have no accepted evidence of that tool's own "
-        "type; it states what is allowed, not what is callable, so a spent tool budget or "
-        "an earlier rejected attempt still makes a listed relation unusable. One boundary "
-        "probe per blocked-relevant relation is allowed to record its permission receipt; "
-        "it counts against the budget and returns no data. Budget remaining requests "
-        "conservatively."
+        "type; it states what is allowed, not what is callable: a spent tool budget, an "
+        "already-recorded fingerprint for the same tool and arguments, or a recorded "
+        "receipt for a blocked relation can still block a call, while a request rejected "
+        "while it was being prepared is corrected per its own feedback and does not by "
+        "itself make the relation unusable. One boundary probe per blocked-relevant "
+        "relation is allowed to record its permission receipt; it counts against the "
+        "budget and returns no data. Budget remaining requests conservatively."
     )
 
 

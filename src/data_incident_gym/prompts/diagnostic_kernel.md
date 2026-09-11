@@ -137,17 +137,15 @@ so apply it from the public evidence only:
 - a failed model is an affected asset together with every model its accepted downstream
   lineage names; the failed model itself never appears in its own lineage neighbours, so
   keep it as well;
-- for a failed test, the distance-1 upstream models are affected. The failed test node and
-  the upstream seed relations are not affected assets, and an upstream record's more distant
-  or downstream nodes do not extend the set;
+- for a failed test, the distance-1 upstream models are affected; bind those model claims to
+  the failed-test node error and upstream-lineage evidence whose matching model has distance
+  1. The failed test node and the upstream seed relations are not affected assets, and an
+  upstream record's more distant or downstream nodes do not extend the set;
 - with no failed node, an incident confirmed on a source or seed relation whose downstream
   lineage is accepted makes that lineage's models the affected assets. Size the assets from
   the source or seed node the confirmed root cause names, not from every relation named in
   the incident: not every relation named in the incident is a fault source, and a relation
   collected only for comparison or for a watermark is not one.
-
-Bind those model claims to the failed-test node error and upstream-lineage evidence whose
-matching model has distance 1.
 
 For NO_INCIDENT, collect positive successful-run, current profile, and historical-series
 evidence and cite a current point that is demonstrably within the available prior same-

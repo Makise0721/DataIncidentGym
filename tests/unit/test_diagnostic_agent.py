@@ -290,12 +290,18 @@ def test_kernel_prompt_states_confirmed_asset_completeness() -> None:
         KERNEL_PROMPT
     )
     assert "keep it as well" in KERNEL_PROMPT
-    # Failed test: distance-1 upstream models only, with the exclusions stated.
-    assert "the distance-1 upstream models are affected" in KERNEL_PROMPT
-    assert "The failed test node and\n  the upstream seed relations are not affected assets" in (
+    # Failed test: distance-1 upstream models only, with exclusions and the
+    # binding duty kept inside this branch instead of floating after the list.
+    assert "the distance-1 upstream models are affected; bind those model claims to" in (
+        KERNEL_PROMPT
+    )
+    assert "The failed test node and the upstream seed relations are not affected assets" in (
         KERNEL_PROMPT
     )
     assert "do not extend the set" in KERNEL_PROMPT
+    # The binding sentence must not survive as its own unqualified paragraph,
+    # where it would read as applying to every branch.
+    assert "\n\nBind those model claims" not in KERNEL_PROMPT
     # No failed node: sized from the confirmed root cause's source or seed node.
     assert "with no failed node" in KERNEL_PROMPT
     assert "source or seed node the confirmed root cause names" in KERNEL_PROMPT

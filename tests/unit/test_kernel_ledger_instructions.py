@@ -493,6 +493,28 @@ def test_relation_evidence_type_mapping_covers_every_relation_tool() -> None:
     assert set(_RELATION_EVIDENCE_TYPES) == set(kernel.provable_relations_by_tool())
 
 
+def test_ledger_explanation_limits_what_blocks_a_listed_relation() -> None:
+    """Being listed states a permission, not a guarantee of callability, and the
+    explanation may only name the constraints that really block a call. A request
+    rejected while being prepared records no fingerprint (only the success path
+    and the blocked-relation path do), so the text must not claim that any earlier
+    rejection makes a relation unusable."""
+
+    from data_incident_gym.diagnostic_agent import _kernel_state_summary
+
+    kernel = _projection_kernel()
+    summary = _kernel_state_summary(kernel, kernel.snapshot(model_requests_used=0))
+
+    assert "not what is callable" in summary
+    assert "a spent tool budget" in summary
+    assert "already-recorded fingerprint for the same tool and arguments" in summary
+    assert "rejected " in summary and "does not by" in summary
+    # The over-broad claim the audit flagged must stay gone, and the preparation
+    # case must be stated as correctable rather than fatal.
+    assert "earlier rejected attempt" not in summary
+    assert "does not by itself make the relation unusable" in summary
+
+
 def _static_scripted(
     *,
     run_id: str,
