@@ -134,11 +134,12 @@ before submitting, not against whatever the current claims happen to cite: citin
 records does not shrink the set you must check, and each asset claim must then cite the
 records that support it. This is the project's scope convention for a confirmed incident,
 so apply it from the public evidence only:
-- the failed model itself is an affected asset; it never appears in its own lineage
-  neighbours, so keep it even when the lineage record only lists its relations;
-- for a failed test, the distance-1 upstream models are affected, and a further model is
-  affected only when some other accepted downstream record or public evidence names it,
-  because a distance-1 upstream record alone does not prove what those models feed;
+- a failed model is an affected asset together with every model its accepted downstream
+  lineage names; the failed model itself never appears in its own lineage neighbours, so
+  keep it as well;
+- for a failed test, the distance-1 upstream models are affected. The failed test node and
+  the upstream seed relations are not affected assets, and an upstream record's more distant
+  or downstream nodes do not extend the set;
 - with no failed node, an incident confirmed on a source or seed relation whose downstream
   lineage is accepted makes that lineage's models the affected assets. Size the assets from
   the source or seed node the confirmed root cause names, not from every relation named in

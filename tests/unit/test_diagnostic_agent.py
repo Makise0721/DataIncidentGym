@@ -269,8 +269,14 @@ def test_kernel_prompt_exposes_the_exact_binding_transport_contract() -> None:
 
 def test_kernel_prompt_states_confirmed_asset_completeness() -> None:
     """Asset completeness is scoped to CONFIRMED, is checked against the
-    accepted evidence rather than the current citations, and separates the
-    no-failed-node case from the failed-node cases."""
+    accepted evidence rather than the current citations, and keeps the three
+    branches apart.
+
+    The branch difference is load-bearing: the project's impact-scope convention
+    takes a failed model together with its downstream models, but a failed test
+    only by its distance-1 upstream models, and the evaluator compares the asset
+    set exactly, so widening either branch produces a failing submission.
+    """
 
     assert "CONFIRMED" in KERNEL_PROMPT
     assert "affected assets" in KERNEL_PROMPT
@@ -279,9 +285,18 @@ def test_kernel_prompt_states_confirmed_asset_completeness() -> None:
     # Checked against accepted evidence, not against whatever the claims cite.
     assert "check the affected assets against the accepted evidence" in KERNEL_PROMPT
     assert "citing fewer\nrecords does not shrink" in KERNEL_PROMPT
-    # The three branches are each present, each phrased in the new rule text.
-    assert "the failed model itself is an affected asset" in KERNEL_PROMPT
+    # Failed model: itself plus its downstream models.
+    assert "a failed model is an affected asset together with every model its accepted" in (
+        KERNEL_PROMPT
+    )
+    assert "keep it as well" in KERNEL_PROMPT
+    # Failed test: distance-1 upstream models only, with the exclusions stated.
     assert "the distance-1 upstream models are affected" in KERNEL_PROMPT
+    assert "The failed test node and\n  the upstream seed relations are not affected assets" in (
+        KERNEL_PROMPT
+    )
+    assert "do not extend the set" in KERNEL_PROMPT
+    # No failed node: sized from the confirmed root cause's source or seed node.
     assert "with no failed node" in KERNEL_PROMPT
     assert "source or seed node the confirmed root cause names" in KERNEL_PROMPT
     # The comparison relation must not become a fault source by accident.

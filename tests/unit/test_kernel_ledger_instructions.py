@@ -440,6 +440,59 @@ async def test_ablations_expose_one_ledger_limited_to_enabled_tools(
         assert ledger["provable_relations"].get(missing_tool, []) == []
 
 
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    (
+        (
+            DiagnosticStrategy.KERNEL_NO_LINEAGE,
+            {
+                "get_relation_schema": ["raw_payments"],
+                "get_relation_data_profile": ["raw_payments"],
+                "get_relation_history": ["raw_payments"],
+            },
+        ),
+        (
+            DiagnosticStrategy.KERNEL_NO_SCHEMA,
+            {
+                "get_relation_schema": [],
+                "get_relation_data_profile": ["raw_payments"],
+                "get_relation_history": ["raw_payments"],
+            },
+        ),
+    ),
+)
+@pytest.mark.asyncio
+async def test_uncollected_relations_at_runner_level_keeps_other_tools(
+    tmp_path: Path,
+    strategy: DiagnosticStrategy,
+    expected: dict[str, list[str]],
+) -> None:
+    """The runner wiring decides the projection, so it is asserted here rather
+    than only against a hand-built kernel: KERNEL_NO_SCHEMA empties only the
+    schema entry, and KERNEL_NO_LINEAGE must leave every relation entry in place
+    because it removes lineage tooling, not relation permissions."""
+
+    _write_run_context(tmp_path, RUN_ID)
+    captured: list[dict[str, object]] = []
+    model = _ablation_scripted(run_id=RUN_ID, captured=captured)
+    result = await _runner_for(RUN_ID, tmp_path, model, _KernelTools(RUN_ID), strategy).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+    ledger = _ledger_payload(str(captured[-1]["instructions"]))
+    assert ledger["uncollected_relations"] == expected
+
+
+def test_relation_evidence_type_mapping_covers_every_relation_tool() -> None:
+    """The projection maps each relation tool to its evidence type by key, so a
+    new relation tool must arrive with its mapping instead of a runtime error."""
+
+    from data_incident_gym.diagnostic_agent import _RELATION_EVIDENCE_TYPES
+
+    kernel = _projection_kernel()
+
+    assert set(_RELATION_EVIDENCE_TYPES) == set(kernel.provable_relations_by_tool())
+
+
 def _static_scripted(
     *,
     run_id: str,
