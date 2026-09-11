@@ -80,10 +80,10 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v13"
+KERNEL_PROMPT_VERSION = "p1.kernel.v14"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v14"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v15"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -1307,11 +1307,37 @@ def _kernel_retry_message(
     provable_relations: tuple[str, ...] | None = None,
     provable_lineage_nodes: tuple[str, ...] | None = None,
 ) -> str:
+    """Model-facing feedback for one rejection code.
+
+    Every code a kernel or policy object can raise carries its own correction
+    here, because the generic fallback tells the model that something was wrong
+    but not what to change. Only controller-internal state conflicts, which a
+    different next response cannot fix, are left out; the guard in
+    ``tests/unit/test_kernel_rejection_feedback.py`` fails when a new code
+    appears without feedback.
+    """
+
     messages = {
-        "ARGUMENTS_INVALID": "Send only the business arguments for the selected tool.",
-        "GAP_TOOL_MISMATCH": "Choose the business tool matching the declared evidence gap.",
+        # Call preparation.
+        "ARGUMENTS_INVALID": (
+            "Send exactly the argument keys the selected tool declares, as strings; "
+            "extra keys, missing keys and non-string values are rejected."
+        ),
+        "GAP_TOOL_MISMATCH": (
+            "Choose the tool and direction the declared gap kind requires: each gap "
+            "kind maps to exactly one tool."
+        ),
         "KERNEL_INTENT_MISSING": "Every Kernel business call must carry its binding arguments.",
+        "RUN_CONTEXT_MISMATCH": (
+            "Use the run identifier of the run under investigation; an argument or "
+            "decision naming another run is rejected."
+        ),
         "NODE_ARGUMENT_NOT_PROVEN": "Use a canonical node identifier from the run catalog.",
+        "TOOL_CALL_LIMIT": (
+            "The tool-call budget is exhausted, so no further business call is accepted "
+            "and no new hypothesis can be registered; finalize with the evidence you "
+            "already have."
+        ),
         "HYPOTHESIS_REFERENCE_UNKNOWN": "Reference only registered hypothesis IDs.",
         "DUPLICATE_GAP_ID": "Gap identifiers are controller-allocated; retry the call as-is.",
         "DUPLICATE_HYPOTHESIS": (
@@ -1319,19 +1345,67 @@ def _kernel_retry_message(
             "allowed; an existing hypothesis ID cannot be redefined with a different "
             "root cause code."
         ),
-        "DUPLICATE_TOOL_CALL": "Do not repeat an equivalent successful query.",
+        "DUPLICATE_TOOL_CALL": (
+            "This exact query was already attempted, so a repeat registers nothing, "
+            "adds no hypothesis and consumes no new evidence; query a different "
+            "subject or finalize."
+        ),
+        "ONTOLOGY_CODE_UNKNOWN": (
+            "Use a root cause code from the ontology the ledger lists; an unknown code "
+            "registers nothing and rejects the whole call before any declaration in it "
+            "takes effect."
+        ),
+        # Evidence acceptance.
+        "EVIDENCE_EMPTY": (
+            "The tool returned no record, so the gap cannot close; query a subject that "
+            "yields a typed record."
+        ),
+        "EVIDENCE_RECORD_INVALID": (
+            "The tool returned something that is not an evidence record; re-run the "
+            "query for the same subject."
+        ),
+        "EVIDENCE_TYPE_MISMATCH": (
+            "The returned record type does not match the declared gap kind; query a "
+            "tool whose record type the gap kind expects."
+        ),
+        "EVIDENCE_SUBJECT_MISMATCH": (
+            "The returned record belongs to a subject other than the one the call "
+            "asked for; query the subject you declare."
+        ),
+        "DUPLICATE_EVIDENCE": (
+            "This evidence was already accepted by another gap, so a repeated record "
+            "cannot close a second gap; query a different subject."
+        ),
+        # Decision validation: confirmed path first, then the abstention path.
+        "ALTERNATIVE_HYPOTHESIS_REQUIRED": (
+            "A terminal decision needs at least two registered hypotheses. Hypotheses "
+            "are registered only with a business call, so a competing cause that was "
+            "never declared cannot be added once the tool budget is spent."
+        ),
         "EVIDENCE_GAP_OPEN": (
             "Every opened evidence gap must close with a successful typed tool result "
-            "before confirming."
+            "before CONFIRMED or NO_INCIDENT; finalize INSUFFICIENT_EVIDENCE when a "
+            "gap cannot close."
         ),
-        "RELATION_NOT_ALLOWED": "This relation is not queryable in this run.",
-        "UNRESOLVED_EVIDENCE_UNBOUND": (
-            "Re-check each declared gap: schema, data-profile and history declarations "
-            "must bind a blocked gap already recorded for the same subject and tool; "
-            "watermark, payment-event-identity and transformation-definition "
-            "declarations need a relevant public subject and a fact that is not "
-            "observable in this run. Fix the invalid items, then re-check the "
-            "remaining independent and justified gaps instead of deleting them all."
+        "HYPOTHESIS_ASSESSMENT_INCOMPLETE": (
+            "Assess every registered hypothesis exactly once: the assessment IDs must "
+            "be exactly the registered hypothesis IDs, with no additions."
+        ),
+        "SELECTED_HYPOTHESIS_NOT_SUPPORTED": (
+            "The selected hypothesis must carry a SUPPORTED verdict."
+        ),
+        "REFUTED_HYPOTHESIS_REQUIRED": (
+            "CONFIRMED needs at least one other registered hypothesis assessed "
+            "REFUTED, not only supported ones."
+        ),
+        "CLAIMS_INCOMPLETE": (
+            "CONFIRMED needs exactly one ROOT_CAUSE claim and at least one "
+            "AFFECTED_ASSET claim."
+        ),
+        "ROOT_CLAIM_MISMATCH": (
+            "The ROOT_CAUSE claim must carry the root cause code of the selected "
+            "hypothesis exactly; copy that registered code instead of composing a new "
+            "value."
         ),
         "ROOT_CLAIM_EVIDENCE_INCOMPATIBLE": (
             "The ROOT_CAUSE claim is usually missing a category of record its root cause "
@@ -1342,6 +1416,88 @@ def _kernel_retry_message(
             "evidence is genuinely insufficient, re-investigate or finalize "
             "INSUFFICIENT_EVIDENCE under the existing contract."
         ),
+        "ASSET_CLAIM_EVIDENCE_INCOMPATIBLE": (
+            "Each affected-asset value must be supported by the records that same claim "
+            "cites: the node's own error, a downstream lineage listing it, or a "
+            "distance-1 upstream model of the failed node. A profile cannot support an "
+            "asset value, so remove any asset claim whose value no cited record names."
+        ),
+        "CLAIM_EVIDENCE_UNBOUND": (
+            "Cite only evidence IDs from the accepted-evidence list that belong to a "
+            "closed gap; an unknown or still-open ID rejects the decision."
+        ),
+        "DECISION_SCOPE_MISMATCH": (
+            "The decision run_id must be the run under investigation."
+        ),
+        "INSUFFICIENCY_GAP_REQUIRED": (
+            "INSUFFICIENT_EVIDENCE needs at least one open or blocked gap or a matching "
+            "unresolved-evidence declaration; with every gap closed, declare the missing "
+            "category or confirm the diagnosis instead."
+        ),
+        "UNRESOLVED_EVIDENCE_UNBOUND": (
+            "Re-check each declared gap: schema, data-profile and history declarations "
+            "must bind a blocked gap already recorded for the same subject and tool; "
+            "watermark, payment-event-identity and transformation-definition "
+            "declarations need a relevant public subject and a fact that is not "
+            "observable in this run. Fix the invalid items, then re-check the "
+            "remaining independent and justified gaps instead of deleting them all."
+        ),
+        # Health path.
+        "HEALTH_RUN_NOT_PROVEN": (
+            "NO_INCIDENT needs an accepted run-results record showing a successful run "
+            "with no failed and no skipped nodes."
+        ),
+        "HEALTH_CLAIM_REQUIRED": (
+            "A NO_INCIDENT decision carries only HEALTH_STATE claims, and every claim "
+            "it carries must be one."
+        ),
+        "HEALTH_EVIDENCE_INCOMPATIBLE": (
+            "Each health claim must cite both a data profile and a history record for "
+            "the relation it declares."
+        ),
+        "HEALTH_HISTORY_NOT_DECLARED": (
+            "The cited history record must contain the series the claim names in "
+            "history_name."
+        ),
+        "HEALTH_POINT_NOT_ALERT_TARGET": (
+            "Name the alert target as relation/series/bucket; a point the run does not "
+            "publish as an alert target is rejected."
+        ),
+        "HEALTH_POINT_MISMATCH": (
+            "The declared current_value must equal the value of the cited history point "
+            "with that bucket."
+        ),
+        "HEALTH_RELATION_MISMATCH": (
+            "The cited profile and history must belong to the same relation the claim "
+            "declares."
+        ),
+        "HEALTH_WATERMARK_NOT_PROVEN": (
+            "The cited series must carry the order_date watermark column and a "
+            "watermark value."
+        ),
+        "HEALTH_WATERMARK_INVALID": (
+            "The watermark, bucket and observation time must be usable event-time "
+            "values; an unparseable value is rejected."
+        ),
+        "HEALTH_SLA_NOT_DECLARED": (
+            "A current-partition claim needs the series' declared SLA before it can be "
+            "called healthy."
+        ),
+        "HEALTH_SLA_NOT_SATISFIED": (
+            "In the current partition the logical observation time must fall inside the "
+            "declared SLA window; otherwise the alert is not healthy and NO_INCIDENT "
+            "does not hold."
+        ),
+        "HEALTH_POINT_AFTER_WATERMARK": (
+            "A bucket later than the watermark is not a completed period and cannot be "
+            "cited as the current point."
+        ),
+        "HEALTH_RANGE_NOT_PROVEN": (
+            "A non-current claim needs at least four prior same-period points and a "
+            "current value inside their inclusive min/max range."
+        ),
+        # Relations and lineage keep their public whitelist appended below.
+        "RELATION_NOT_ALLOWED": "This relation is not queryable in this run.",
     }
     message = messages.get(code, "Correct the structured investigation decision.")
     if code == "RELATION_NOT_ALLOWED" and provable_relations:

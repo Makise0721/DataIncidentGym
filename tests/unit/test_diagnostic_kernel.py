@@ -1902,6 +1902,57 @@ def test_kernel_keeps_revision_and_status_when_finalize_is_rejected() -> None:
     assert after.gate_reason is None
 
 
+def test_kernel_requires_two_hypotheses_for_insufficient_evidence_too() -> None:
+    """The prompt states the two-hypothesis requirement for both terminal
+    statuses, so the kernel must enforce it on the abstention path as well: here
+    the gap is genuinely blocked and the declaration matches it, and the single
+    registered hypothesis alone still rejects the decision before any state
+    changes."""
+
+    kernel = DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_REQUIRED_FIELD_NULL",
+            "TRANSFORMATION_REQUIRED_FIELD_NULL",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_profile_relations=("raw_orders",),
+    )
+    prepared = kernel.prepare_tool(
+        intent=InvestigationIntent(
+            gap_id="g_profile",
+            gap_kind=EvidenceGapKind.PROFILE_RELATION,
+            new_hypotheses=(
+                Hypothesis(
+                    hypothesis_id="h_source_null",
+                    root_cause_code="SOURCE_REQUIRED_FIELD_NULL",
+                ),
+            ),
+        ),
+        tool_name="get_relation_data_profile",
+        arguments={"relation_name": "raw_orders"},
+    )
+    kernel.record_tool_failure(prepared, "RELATION_NOT_ALLOWED")
+    before = kernel.snapshot(model_requests_used=0)
+
+    with pytest.raises(KernelError) as error:
+        kernel.finalize(
+            _insufficient_decision(
+                (
+                    {
+                        "evidence_kind": "RELATION_DATA_PROFILE",
+                        "subject": "raw_orders",
+                        "reason_code": "RELATION_NOT_ALLOWED",
+                    },
+                )
+            )
+        )
+
+    assert error.value.code == "ALTERNATIVE_HYPOTHESIS_REQUIRED"
+    assert kernel.snapshot(model_requests_used=0) == before
+
+
 def test_kernel_rejects_second_finalize_after_confirmed_outcome() -> None:
     kernel = _duplicate_kernel()
     records = _duplicate_records()

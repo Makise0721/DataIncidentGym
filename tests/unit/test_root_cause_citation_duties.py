@@ -734,3 +734,26 @@ def test_root_claim_retry_message_points_at_the_missing_category() -> None:
     assert re.search(r"ev_[0-9a-f]{64}", message) is None
     assert "expected_status" not in message
     assert "ground_truth" not in message
+
+
+def test_kernel_prompt_requires_two_hypotheses_for_both_terminal_statuses() -> None:
+    """The kernel rejects a one-hypothesis abstention exactly as it rejects a
+    one-hypothesis confirmation (``test_kernel_requires_two_hypotheses_for_
+    insufficient_evidence_too``), so the prompt must not scope the requirement to
+    the confirmed path alone. v11 seq59 registered one hypothesis and spent the
+    tool budget; the offline replay proved no later registration path exists, so
+    the prompt also has to say that declarations ride on business calls and stop
+    once the budget is gone."""
+
+    from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
+
+    assert "for CONFIRMED and for INSUFFICIENT_EVIDENCE alike" in KERNEL_PROMPT
+    assert "register\nboth competing causes before you run out of the tool budget" in (
+        KERNEL_PROMPT
+    )
+    assert "registered\nonly by a business call that carries them" in KERNEL_PROMPT
+    assert "once the tool-call budget is spent no declaration can" in KERNEL_PROMPT
+    # The narrower wording the v11 report flagged must stay gone.
+    assert "register at least two compatible hypotheses\nbefore attempting a confirmed" not in (
+        KERNEL_PROMPT
+    )

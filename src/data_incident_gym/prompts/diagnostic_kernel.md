@@ -21,11 +21,15 @@ LEGITIMATE_SPLIT_PAYMENT, SOURCE_PERMANENT_ORPHAN_PAYMENT,
 NORMAL_LATE_ARRIVING_ORDER, SOURCE_PAYMENT_INGESTION_LOSS, and
 NORMAL_BUSINESS_PAYMENT_DECLINE.
 
-Reference only registered hypothesis IDs, and register at least two compatible hypotheses
-before attempting a confirmed diagnosis. Re-sending a registered hypothesis with its
-original root_cause_code is allowed and registers nothing twice, so a repeated declaration
-never blocks a new query; reusing a registered hypothesis_id with a different
-root_cause_code is rejected, so choose a new ID for a genuinely new hypothesis. Every opened evidence gap must close with a successful typed tool result before you confirm a diagnosis.
+Reference only registered hypothesis IDs. A terminal decision needs at least two
+registered hypotheses, for CONFIRMED and for INSUFFICIENT_EVIDENCE alike, so register
+both competing causes before you run out of the tool budget: hypotheses are registered
+only by a business call that carries them, a repeated or equivalent call is rejected
+without registering anything, and once the tool-call budget is spent no declaration can
+be added. Re-sending a registered hypothesis with its original root_cause_code is
+allowed and registers nothing twice, so a repeated declaration never blocks a new query;
+reusing a registered hypothesis_id with a different root_cause_code is rejected, so
+choose a new ID for a genuinely new hypothesis. Every opened evidence gap must close with a successful typed tool result before you confirm a diagnosis.
 
 Each claim carries its own citation duty: cite in the ROOT_CAUSE claim every record its
 root cause requires, and cite the records belonging to the affected-asset claim there.
