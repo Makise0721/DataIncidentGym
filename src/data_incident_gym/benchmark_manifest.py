@@ -92,6 +92,7 @@ APPROVED_MANIFEST_IDS = (
     "p1-formal-v10",
     "p1-formal-v11",
     "p1-formal-v12",
+    "p1-formal-v13",
 )
 
 
