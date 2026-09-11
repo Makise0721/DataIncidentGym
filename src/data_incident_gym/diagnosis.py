@@ -401,6 +401,10 @@ class ModelProtocolTraceEvent(BaseModel):
     # exception text are never recorded.
     error_loc: tuple[StrictStr, ...] = ()
     error_kind: tuple[StrictStr, ...] = ()
+    # Fixed reason codes for model-level rules, which report neither a field
+    # location nor a distinguishing kind. Codes only: the validator messages
+    # they are derived from never reach the trace.
+    error_reason: tuple[StrictStr, ...] = ()
     # Which model request produced the recorded response, and what its calls
     # looked like. This is observation only: it changes no retry, budget or
     # acceptance behaviour.

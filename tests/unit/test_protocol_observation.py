@@ -128,6 +128,25 @@ def _kernel_invalid_payload() -> dict[str, object]:
     return payload
 
 
+def _model_rule_violating_payload() -> dict[str, object]:
+    """Model-level rule violation: an abstention carrying claims.
+
+    ``KernelDecision``'s own validator rejects the whole payload, so the
+    recorded location stays empty and the Pydantic kind is only ``value_error``;
+    the reason code is what makes this distinguishable.
+    """
+
+    payload = _base_payload()
+    payload["claims"] = [
+        {
+            "kind": "ROOT_CAUSE",
+            "value": "SOURCE_REQUIRED_FIELD_NULL",
+            "evidence_ids": ["ev_" + "0" * 64],
+        }
+    ]
+    return payload
+
+
 async def _run(tmp_path: Path, model: FunctionModel) -> object:
     runner = DiagnosisRunner.for_run(
         RUN_ID,
@@ -200,6 +219,16 @@ def _shape_scripted(mode: str) -> FunctionModel:
                     )
                 ]
             )
+        if mode == "model_rule_violation":
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        output_name,
+                        _model_rule_violating_payload(),
+                        tool_call_id=f"final-{step}",
+                    )
+                ]
+            )
         if mode == "kernel_rejection_exhaustion":
             return ModelResponse(
                 parts=[
@@ -242,6 +271,26 @@ async def test_output_validation_failure_is_attributed_to_output(tmp_path: Path)
     # The decision never became schema-valid, so the kernel output validator was
     # never reached and no output retry was recorded through it.
     assert event.output_retry_used is None
+
+
+@pytest.mark.asyncio
+async def test_model_rule_violation_records_a_classifiable_reason(tmp_path: Path) -> None:
+    """A model-level rule rejection carries an empty location and only
+    ``value_error`` as its kind, so the reason code is the only field that says
+    which rule was broken. This is the v14 seq19 case, which was recordable but
+    not interpretable before the code was added."""
+
+    _write_public_run(tmp_path)
+    result = await _run(tmp_path, _shape_scripted("model_rule_violation"))
+    event = _protocol_event(result)
+
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert event.error_origin == "OUTPUT_VALIDATION"
+    assert event.error_loc == ()
+    assert event.error_kind == ("value_error",)
+    assert event.error_reason == ("ABSTENTION_WITH_CLAIMS",)
+    # Only the code is recorded: no payload text, no validator message.
+    assert all(" " not in reason for reason in event.error_reason)
 
 
 @pytest.mark.asyncio

@@ -61,7 +61,11 @@ from data_incident_gym.diagnosis import (
     TraceEvent,
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
-from data_incident_gym.diagnostic_contracts import gap_kind_for_tool
+from data_incident_gym.diagnostic_contracts import (
+    MODEL_RULE_REASONS,
+    UNCLASSIFIED_MODEL_RULE,
+    gap_kind_for_tool,
+)
 from data_incident_gym.diagnostic_kernel import (
     _HYPOTHESIS_ID_PATTERN,
     ClaimKind,
@@ -356,7 +360,9 @@ class _RunState:
     static_diagnosis: Diagnosis | None = None
     last_response: ModelResponse | None = None
     last_observation: tuple[tuple[str, ...], tuple[str, ...], bool] | None = None
-    current_output_details: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+    current_output_details: (
+        tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]] | None
+    ) = None
     current_response_shape: tuple[tuple[ModelCallShape, ...], str] | None = None
     current_error_type: str | None = None
     current_error_origin: str | None = None
@@ -467,17 +473,18 @@ class _RunState:
         tool_name: str | None,
         error_loc: tuple[str, ...] = (),
         error_kind: tuple[str, ...] = (),
+        error_reason: tuple[str, ...] = (),
         error_type: str | None = None,
         origin: str | None = None,
     ) -> None:
-        self.protocol_failure = (category, stage, tool_name, error_loc, error_kind)
+        self.protocol_failure = (category, stage, tool_name, error_loc, error_kind, error_reason)
         self.current_error_type = error_type
         self.current_error_origin = origin
 
     def append_protocol_trace(self, *, output_retry_used: int | None = None) -> None:
         if self.protocol_trace_recorded or self.protocol_failure is None:
             return
-        category, stage, tool_name, error_loc, error_kind = self.protocol_failure
+        category, stage, tool_name, error_loc, error_kind, error_reason = self.protocol_failure
         shapes, ended_with = self.current_response_shape or ((), None)
         if output_retry_used is None:
             output_retry_used = self.output_retry_used
@@ -489,6 +496,7 @@ class _RunState:
                 category=category,
                 error_loc=error_loc,
                 error_kind=error_kind,
+                error_reason=error_reason,
                 # The adapter attempt that produced this failure; a request that
                 # raised before returning a response still advances it.
                 model_request_index=self.request_attempt,
@@ -822,16 +830,38 @@ def _safe_validation_details(
     return tuple(locs), tuple(dict.fromkeys(kinds))
 
 
+def _model_rule_reasons(error: ValidationError) -> tuple[str, ...]:
+    """Classify a model-level rejection into fixed, safe reason codes.
+
+    A model-level validator (``loc=()``) rejects the whole payload, so the
+    recorded location is empty and the Pydantic kind is only ``value_error``:
+    the two together cannot tell a duplicated entry from a blank text or a
+    status/field conflict. The validators' own messages are mapped to stable
+    codes so the failure can be classified offline. Only the mapped code leaves
+    this function; the message itself never reaches the trace.
+    """
+
+    reasons: list[str] = []
+    for item in error.errors()[:_MAX_ERROR_ITEMS]:
+        if item.get("type") != "value_error":
+            continue
+        message = str(item.get("msg", "")).removeprefix("Value error, ")
+        reasons.append(MODEL_RULE_REASONS.get(message, UNCLASSIFIED_MODEL_RULE))
+    return tuple(dict.fromkeys(reasons))
+
+
 def _output_call_details(
     response: ModelResponse,
     parameters: ModelRequestParameters,
     strategy: DiagnosticStrategy,
-) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]] | None:
     """Locally validate the structured output call for safe error attribution.
 
     PydanticAI performs the same validation afterwards; parsing here gives the
     current round's field-level error before the SDK raises a terminal
-    exception that carries no details. Raw values never leave this function.
+    exception that carries no details. The third element classifies a
+    model-level rejection, which carries neither a field location nor a
+    distinguishing kind. Raw values never leave this function.
     """
 
     try:
@@ -848,7 +878,8 @@ def _output_call_details(
         model_type = KernelDecision if _is_kernel_strategy(strategy) else _StaticDecision
         model_type.model_validate(payload)
     except ValidationError as error:
-        return _safe_validation_details(error)
+        locs, kinds = _safe_validation_details(error)
+        return locs, kinds, _model_rule_reasons(error)
     except Exception:
         # A malformed or SDK-specific payload must not break the diagnosis;
         # coarse classification still applies when details are unavailable.
@@ -980,13 +1011,14 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
         )
     elif isinstance(error, (UnexpectedModelBehavior, ToolRetryError, ValueError, TypeError)):
         if observation is not None and observation[1]:
-            details = state.current_output_details or ((), ())
+            details = state.current_output_details or ((), (), ())
             state.set_protocol_failure(
                 category="OUTPUT_SCHEMA_REJECTED",
                 stage="OUTPUT_SCHEMA_VALIDATION",
                 tool_name=observation[1][-1],
                 error_loc=details[0],
                 error_kind=details[1],
+                error_reason=details[2],
                 error_type=error_type,
                 origin=origin,
             )

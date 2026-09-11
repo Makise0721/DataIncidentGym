@@ -69,6 +69,28 @@ def reject_duplicates(values: tuple[object, ...], field_name: str) -> None:
         raise ValueError(f"{field_name} must not contain duplicates")
 
 
+# Model-level validation rules, keyed by the exact message each one raises, so a
+# rejection can be classified offline without keeping the rejected payload. The
+# guard in tests/unit/test_model_rule_reason_codes.py extracts the message
+# literals from this module and fails when a rule arrives without a code.
+MODEL_RULE_REASONS: dict[str, str] = {
+    "assessment evidence_ids must not be empty": "ASSESSMENT_EVIDENCE_EMPTY",
+    "assessment evidence_ids must not contain duplicates": "ASSESSMENT_EVIDENCE_DUPLICATED",
+    "assessment hypothesis IDs must not contain duplicates": "ASSESSMENT_HYPOTHESES_DUPLICATED",
+    "claim evidence_ids must not contain duplicates": "CLAIM_EVIDENCE_DUPLICATED",
+    "claim kind/value pairs must not contain duplicates": "CLAIM_VALUES_DUPLICATED",
+    "recommended_actions must not contain duplicates": "RECOMMENDED_ACTIONS_DUPLICATED",
+    "health claim requires relation/history/bucket/value": "HEALTH_CLAIM_INCOMPLETE",
+    "decision text must not be blank": "DECISION_TEXT_BLANK",
+    "CONFIRMED requires selected_hypothesis_id": "CONFIRMED_WITHOUT_SELECTION",
+    "non-confirmed decision cannot select a hypothesis": "NON_CONFIRMED_SELECTS_HYPOTHESIS",
+    "INSUFFICIENT_EVIDENCE cannot contain claims": "ABSTENTION_WITH_CLAIMS",
+    "only INSUFFICIENT_EVIDENCE can declare unresolved evidence": "UNRESOLVED_ON_NON_ABSTENTION",
+    "NO_INCIDENT can contain only health claims": "NO_INCIDENT_WITH_OTHER_CLAIMS",
+}
+UNCLASSIFIED_MODEL_RULE = "UNCLASSIFIED_MODEL_RULE"
+
+
 _GAP_TOOL: dict[EvidenceGapKind, tuple[str, str | None]] = {
     EvidenceGapKind.LOCATE_FAILURE: ("get_dbt_run_results", None),
     EvidenceGapKind.EXPLAIN_FAILURE: ("get_dbt_node_error", None),
