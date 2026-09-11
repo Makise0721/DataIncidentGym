@@ -381,7 +381,17 @@ class _RunState:
     kernel_rejection_attempt: int | None = None
     output_retry_used: int | None = None
     output_retry_limit: int | None = None
-    protocol_failure: tuple[str, str, str | None] | None = None
+    protocol_failure: (
+        tuple[
+            str,
+            str,
+            str | None,
+            tuple[str, ...],
+            tuple[str, ...],
+            tuple[str, ...],
+        ]
+        | None
+    ) = None
     protocol_trace_recorded: bool = False
     next_gap_number: int = 1
 
