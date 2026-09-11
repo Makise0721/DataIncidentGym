@@ -831,3 +831,21 @@ def test_a_source_downstream_relation_reaches_the_downstream_models() -> None:
     assert all(node.resource_type == "model" for node in nodes)
     # The comparison relation of the same incident is not in this lineage.
     assert "raw_orders" not in {node.name for node in nodes}
+
+
+def test_kernel_prompt_requires_collection_check_for_both_terminal_statuses() -> None:
+    """The ledger reports what is allowed but not yet collected; the prompt must
+    ask for that check before either terminal status, keep it conditional on
+    relevance, and name the ledger field it refers to."""
+
+    from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
+
+    assert "uncollected_relations" in KERNEL_PROMPT
+    assert "Before submitting either a confirmed or an\ninsufficient-evidence decision" in (
+        KERNEL_PROMPT
+    )
+    # Fact, not a to-do list.
+    assert "reports what is allowed and still uncollected" in KERNEL_PROMPT
+    assert "it is not a list of calls to make" in KERNEL_PROMPT
+    # The relevance condition survives the rewrite.
+    assert "still\nrelevant to distinguishing the registered candidate causes" in KERNEL_PROMPT

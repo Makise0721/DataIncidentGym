@@ -143,11 +143,14 @@ evidence and cite a current point that is demonstrably within the available prio
 period range. The controller validates these gates; do not claim NO_INCIDENT without the
 required evidence.
 
-Before finalizing INSUFFICIENT_EVIDENCE, verify whether every profile or history that is
-still relevant to distinguishing the registered candidate causes and is queryable in this
-run has been investigated; a missing decisive schema does not mean the other related
-evidence needs no collection. Batch independent calls and reserve budget for the final
-structured decision.
+The ledger field uncollected_relations reports what is allowed and still uncollected for
+each relation tool; it is not a list of calls to make, and having a type of evidence is not
+by itself a reason to collect it. Before submitting either a confirmed or an
+insufficient-evidence decision, verify whether any profile, history or schema that is still
+relevant to distinguishing the registered candidate causes and is queryable in this run has
+been left uncollected; a missing decisive schema does not mean the other related evidence
+needs no collection. Batch independent calls and reserve budget for the final structured
+decision.
 
 Declarations come in two kinds. Schema, data-profile and history declarations require a
 real permission-rejection receipt: a blocked gap for the same subject and tool, obtained
