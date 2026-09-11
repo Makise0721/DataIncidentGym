@@ -276,3 +276,68 @@ def test_competing_writers_publish_at_most_one_complete_bundle(tmp_path: Path) -
 
     assert len(results) == len(errors) == 1
     assert {path.name for path in results[0].iterdir()} == set(ARTIFACT_FILENAMES)
+
+
+def test_protocol_observation_event_round_trips_through_the_writer(
+    tmp_path: Path,
+) -> None:
+    """The new observation fields survive artifact serialization unchanged, so
+    a reviewer reading trace.jsonl sees the same attribution as the run."""
+
+    from data_incident_gym.artifacts import TraceEnvelope
+    from data_incident_gym.diagnosis import (
+        DiagnosisTerminalTraceEvent,
+        ModelCallShape,
+        ModelProtocolTraceEvent,
+    )
+
+    event = ModelProtocolTraceEvent(
+        event_type="MODEL_PROTOCOL",
+        stage="OUTPUT_SCHEMA_VALIDATION",
+        tool_name="final_result",
+        category="OUTPUT_SCHEMA_REJECTED",
+        error_origin="KERNEL_DECISION",
+        error_type="UNEXPECTED_MODEL_BEHAVIOR",
+        model_request_index=3,
+        output_retry_used=2,
+        response_ended_with="OUTPUT_CALL",
+        call_shapes=(
+            ModelCallShape(
+                tool_name="final_result",
+                is_output_call=True,
+                arguments_parse="OBJECT",
+            ),
+        ),
+        retry_prompt_targets=("<output>",),
+    )
+    base = _diagnosis_run()
+    diagnosis_run = base.model_copy(
+        update={
+            "trace": (
+                event,
+                DiagnosisTerminalTraceEvent(
+                    event_type="DIAGNOSIS_TERMINAL",
+                    strategy=base.strategy,
+                    status=base.diagnosis.status,
+                    evidence_inventory=(),
+                ),
+            )
+        }
+    )
+    output = ArtifactWriter(tmp_path, run_command=_git_command).write(
+        _artifact_run().model_copy(update={"diagnosis_run": diagnosis_run})
+    )
+
+    lines = [
+        line
+        for line in (output / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    parsed = [TraceEnvelope.model_validate(json.loads(line)).event for line in lines]
+    restored = next(
+        item for item in parsed if isinstance(item, ModelProtocolTraceEvent)
+    )
+    assert restored == event
+    assert restored.error_origin == "KERNEL_DECISION"
+    assert restored.model_request_index == 3
+    assert restored.call_shapes[0].arguments_parse == "OBJECT"

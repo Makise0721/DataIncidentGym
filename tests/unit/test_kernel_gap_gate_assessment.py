@@ -552,7 +552,7 @@ def _confirmed_run_result(
             base_prompt_sha256="0" * 64,
             strategy_prompt_version="p1.kernel.v12",
             strategy_prompt_sha256="1" * 64,
-            controller_protocol_version="p1.controller.v11",
+            controller_protocol_version="p1.controller.v13",
             controller_protocol_sha256="2" * 64,
             tool_schema_sha256="3" * 64,
         ),

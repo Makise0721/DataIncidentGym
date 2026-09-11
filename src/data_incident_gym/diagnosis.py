@@ -363,6 +363,21 @@ class EvidenceGateTraceEvent(BaseModel):
     rejected_decision: RejectedDecisionSummary | None = None
 
 
+class ModelCallShape(BaseModel):
+    """Safe structural shape of one call inside a model response.
+
+    Only the tool name, whether its arguments parsed as a JSON object, and
+    whether it targeted the structured-output tool are recorded. Argument
+    values, raw text and provider payloads never reach the trace.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool_name: NonBlankStr
+    is_output_call: StrictBool
+    arguments_parse: Literal["OBJECT", "INVALID_JSON", "EMPTY"]
+
+
 class ModelProtocolTraceEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -386,6 +401,30 @@ class ModelProtocolTraceEvent(BaseModel):
     # exception text are never recorded.
     error_loc: tuple[StrictStr, ...] = ()
     error_kind: tuple[StrictStr, ...] = ()
+    # Which model request produced the recorded response, and what its calls
+    # looked like. This is observation only: it changes no retry, budget or
+    # acceptance behaviour.
+    model_request_index: Annotated[StrictInt, Field(ge=0)] | None = None
+    output_retry_used: Annotated[StrictInt, Field(ge=0)] | None = None
+    call_shapes: tuple[ModelCallShape, ...] = ()
+    response_ended_with: Literal["OUTPUT_CALL", "BUSINESS_CALL", "TEXT_ONLY", "EMPTY"] | None = None
+    error_type: Literal[
+        "UNEXPECTED_MODEL_BEHAVIOR",
+        "TOOL_RETRY_ERROR",
+        "MODEL_API_ERROR",
+        "INCOMPLETE_TOOL_CALL",
+        "VALUE_ERROR",
+        "TYPE_ERROR",
+        "OTHER",
+    ] | None = None
+    error_origin: Literal[
+        "OUTPUT_VALIDATION",
+        "BUSINESS_TOOL_ARGUMENTS",
+        "KERNEL_DECISION",
+        "PROVIDER",
+        "UNKNOWN",
+    ] | None = None
+    retry_prompt_targets: tuple[StrictStr, ...] = ()
 
 
 class DiagnosisTerminalTraceEvent(BaseModel):

@@ -23,7 +23,13 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
     UsageLimitExceeded,
 )
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelResponse,
+    RetryPromptPart,
+    TextPart,
+    ToolCallPart,
+)
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -43,6 +49,7 @@ from data_incident_gym.diagnosis import (
     EvidenceGateTraceEvent,
     HealthStateClaim,
     KernelStateTraceEvent,
+    ModelCallShape,
     ModelProtocolTraceEvent,
     PolicyIdentity,
     RejectedAssessmentSummary,
@@ -76,7 +83,7 @@ BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v12"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v11"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v13"
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -345,9 +352,58 @@ class _RunState:
     last_response: ModelResponse | None = None
     last_observation: tuple[tuple[str, ...], tuple[str, ...], bool] | None = None
     current_output_details: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+    current_response_shape: tuple[tuple[ModelCallShape, ...], str] | None = None
+    current_error_type: str | None = None
+    current_error_origin: str | None = None
+    # Historical retry background: which surfaces had already been asked to
+    # retry before the current request. It never by itself names the current
+    # failure.
+    retry_prompt_targets: tuple[str, ...] = ()
+    # Adapter request attempt counter, 1-based. It counts calls into the adapter
+    # (one model request each) and is independent of SDK usage accounting, so a
+    # provider-level failure still advances it.
+    request_attempt: int = 0
+    registered_business_tools: frozenset[str] = frozenset()
+    # Attempt index in which the output validator rejected a decision through the
+    # kernel; cleared at the start of every attempt. Only genuine domain
+    # rejections count -- "already finalized" is a state conflict, not a verdict.
+    kernel_rejection_attempt: int | None = None
+    output_retry_used: int | None = None
+    output_retry_limit: int | None = None
     protocol_failure: tuple[str, str, str | None] | None = None
     protocol_trace_recorded: bool = False
     next_gap_number: int = 1
+
+    def begin_request_attempt(
+        self,
+        messages: Sequence[ModelMessage],
+        parameters: ModelRequestParameters,
+    ) -> None:
+        """Start a new adapter request attempt and isolate its observations.
+
+        Everything describing a response is cleared *before* the underlying
+        request runs, so a request that raises cannot inherit the previous
+        round's response shape, retry count or kernel verdict. Persisted trace
+        entries and kernel investigation state are untouched.
+        """
+
+        self.request_attempt += 1
+        self.last_response = None
+        self.last_observation = None
+        self.current_output_details = None
+        self.current_response_shape = None
+        self.current_error_type = None
+        self.current_error_origin = None
+        self.kernel_rejection_attempt = None
+        self.output_retry_used = None
+        self.output_retry_limit = None
+        self.protocol_failure = None
+        self.protocol_trace_recorded = False
+        self.registered_business_tools = frozenset(
+            tool.name for tool in parameters.function_tools
+        )
+        self.retry_prompt_targets = _retry_prompt_targets(messages, parameters)
+
 
     def allocate_kernel_intent(
         self,
@@ -373,10 +429,13 @@ class _RunState:
         response: ModelResponse,
         parameters: ModelRequestParameters,
     ) -> None:
+        """Record the response of the current attempt.
+
+        Response-scoped cleanup happens in `begin_request_attempt`, before the
+        request runs; this method only fills in what the response contains.
+        """
+
         self.last_response = response
-        self.protocol_failure = None
-        self.protocol_trace_recorded = False
-        self.current_output_details = None
         function_names = {tool.name for tool in parameters.function_tools}
         output_names = {tool.name for tool in parameters.output_tools}
         function_calls = tuple(
@@ -403,13 +462,20 @@ class _RunState:
         tool_name: str | None,
         error_loc: tuple[str, ...] = (),
         error_kind: tuple[str, ...] = (),
+        error_type: str | None = None,
+        origin: str | None = None,
     ) -> None:
         self.protocol_failure = (category, stage, tool_name, error_loc, error_kind)
+        self.current_error_type = error_type
+        self.current_error_origin = origin
 
-    def append_protocol_trace(self) -> None:
+    def append_protocol_trace(self, *, output_retry_used: int | None = None) -> None:
         if self.protocol_trace_recorded or self.protocol_failure is None:
             return
         category, stage, tool_name, error_loc, error_kind = self.protocol_failure
+        shapes, ended_with = self.current_response_shape or ((), None)
+        if output_retry_used is None:
+            output_retry_used = self.output_retry_used
         self.trace.append(
             ModelProtocolTraceEvent(
                 event_type="MODEL_PROTOCOL",
@@ -418,6 +484,15 @@ class _RunState:
                 category=category,
                 error_loc=error_loc,
                 error_kind=error_kind,
+                # The adapter attempt that produced this failure; a request that
+                # raised before returning a response still advances it.
+                model_request_index=self.request_attempt,
+                output_retry_used=output_retry_used,
+                call_shapes=shapes,
+                response_ended_with=ended_with,
+                error_type=self.current_error_type,
+                error_origin=self.current_error_origin,
+                retry_prompt_targets=self.retry_prompt_targets,
             )
         )
         self.protocol_trace_recorded = True
@@ -608,6 +683,9 @@ class _ModelObservationAdapter(Model):
         model_settings,
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
+        # Isolate this attempt before the request runs: a request that raises
+        # must not carry the previous round's response observations.
+        self._state.begin_request_attempt(messages, model_request_parameters)
         response = await self._model.request(messages, model_settings, model_request_parameters)
         self._state.record_model_response(response, model_request_parameters)
         self._state.current_output_details = _output_call_details(
@@ -615,6 +693,7 @@ class _ModelObservationAdapter(Model):
             model_request_parameters,
             self._state.strategy,
         )
+        self._state.current_response_shape = _response_shape(response, model_request_parameters)
         return response
 
 
@@ -772,13 +851,127 @@ def _output_call_details(
     return None
 
 
+def _response_shape(
+    response: ModelResponse,
+    parameters: ModelRequestParameters,
+) -> tuple[tuple[ModelCallShape, ...], str]:
+    """Structural shape of a model response: call order, names, argument parse.
+
+    Only names, parse outcomes and the closing part kind are derived; argument
+    values and free text are never captured.
+    """
+
+    output_names = {tool.name for tool in parameters.output_tools}
+    function_names = {tool.name for tool in parameters.function_tools}
+    shapes: list[ModelCallShape] = []
+    last_kind = "EMPTY"
+    for part in response.parts:
+        if isinstance(part, ToolCallPart):
+            is_output = part.tool_name in output_names
+            raw = part.args
+            if isinstance(raw, dict):
+                parse: Literal["OBJECT", "INVALID_JSON", "EMPTY"] = (
+                    "OBJECT" if raw else "EMPTY"
+                )
+            elif isinstance(raw, str) and raw.strip():
+                try:
+                    decoded = json.loads(raw)
+                except (ValueError, TypeError):
+                    parse = "INVALID_JSON"
+                else:
+                    parse = "OBJECT" if isinstance(decoded, dict) and decoded else "EMPTY"
+            else:
+                parse = "EMPTY"
+            shapes.append(
+                ModelCallShape(
+                    tool_name=part.tool_name,
+                    is_output_call=is_output,
+                    arguments_parse=parse,
+                )
+            )
+            if is_output:
+                last_kind = "OUTPUT_CALL"
+            elif part.tool_name in function_names:
+                last_kind = "BUSINESS_CALL"
+        elif isinstance(part, TextPart) and part.content.strip():
+            if last_kind == "EMPTY":
+                last_kind = "TEXT_ONLY"
+    return tuple(shapes), last_kind
+
+
+_ERROR_TYPE_LABELS = {
+    "UnexpectedModelBehavior": "UNEXPECTED_MODEL_BEHAVIOR",
+    "ToolRetryError": "TOOL_RETRY_ERROR",
+    "ModelAPIError": "MODEL_API_ERROR",
+    "IncompleteToolCall": "INCOMPLETE_TOOL_CALL",
+    "ValueError": "VALUE_ERROR",
+    "TypeError": "TYPE_ERROR",
+}
+
+_RETRY_TARGET_OUTPUT = "<output>"
+
+
+def _error_type_label(error: BaseException) -> str:
+    """Safe exception label: a fixed name from an allowlist, never the message."""
+
+    for klass in type(error).__mro__:
+        label = _ERROR_TYPE_LABELS.get(klass.__name__)
+        if label is not None:
+            return label
+    return "OTHER"
+
+
+def _retry_prompt_targets(
+    messages: Sequence[ModelMessage],
+    parameters: ModelRequestParameters,
+) -> tuple[str, ...]:
+    """Distinct retry-prompt targets seen in the conversation so far.
+
+    A retry prompt naming a structured-output tool is an output retry; one
+    naming a business tool is a rejected business call. Only names are kept, and
+    names outside the registered tools are collapsed to a marker, so
+    model-supplied text never reaches the trace.
+    """
+
+    output_names = {tool.name for tool in parameters.output_tools}
+    known = {tool.name for tool in (*parameters.function_tools, *parameters.output_tools)}
+    targets: list[str] = []
+    for message in messages:
+        for part in getattr(message, "parts", ()):
+            if not isinstance(part, RetryPromptPart):
+                continue
+            name = part.tool_name
+            if name is None or name in output_names:
+                target = _RETRY_TARGET_OUTPUT
+            elif name in known:
+                target = name
+            else:
+                target = _UNKNOWN_FIELD_MARKER
+            if target not in targets:
+                targets.append(target)
+    return tuple(targets)
+
+
 def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
+    """Classify a terminal protocol failure and record how it can be attributed.
+
+    ``category`` and ``stage`` keep their existing meaning and selection; the
+    added ``error_type``/``error_origin`` fields carry what the terminal
+    exception and the recorded retry prompts actually show, so an analyst can
+    tell an output-validation failure from a business-argument failure instead
+    of inferring the mechanism from the category alone.
+    """
+
     observation = state.last_observation
+    error_type = _error_type_label(error)
+    origin = _failure_origin(state, observation)
     if isinstance(error, (ModelAPIError, IncompleteToolCall)):
         state.set_protocol_failure(
             category="PROVIDER_PROTOCOL_FAILURE",
             stage="PROVIDER_RESPONSE",
             tool_name=None,
+            error_type=error_type,
+            origin="PROVIDER",
         )
     elif isinstance(error, (UnexpectedModelBehavior, ToolRetryError, ValueError, TypeError)):
         if observation is not None and observation[1]:
@@ -789,25 +982,98 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
                 tool_name=observation[1][-1],
                 error_loc=details[0],
                 error_kind=details[1],
+                error_type=error_type,
+                origin=origin,
             )
         elif observation is not None and observation[0]:
             state.set_protocol_failure(
                 category="TOOL_ARGUMENT_REJECTED",
                 stage="TOOL_ARGUMENT_VALIDATION",
                 tool_name=observation[0][-1],
+                error_type=error_type,
+                origin=origin,
             )
         else:
             state.set_protocol_failure(
                 category="OUTPUT_SCHEMA_REJECTED",
                 stage="OUTPUT_SCHEMA_VALIDATION",
                 tool_name=None,
+                error_type=error_type,
+                origin=origin,
             )
     else:
         state.set_protocol_failure(
             category="PROVIDER_PROTOCOL_FAILURE",
             stage="PROVIDER_RESPONSE",
             tool_name=None,
+            error_type=error_type,
+            origin="PROVIDER",
         )
+
+
+def _failure_origin(
+    state: _RunState,
+    observation: tuple[tuple[str, ...], tuple[str, ...], bool] | None,
+) -> str:
+    """Attribute a terminal protocol failure from the current request's evidence.
+
+    Only the current request may name the origin. Historical retry targets are
+    observation background: they are never used to promote a currently
+    unattributable failure into a definite class, because a surface retried
+    earlier says nothing about which surface ended this request.
+    """
+
+    return _closing_shape_origin(state, observation)
+
+
+def _business_retry_targets(state: _RunState) -> tuple[str, ...]:
+    """Retry targets that name a registered business tool.
+
+    A name outside the registered functions (collapsed to the unknown marker by
+    `_retry_prompt_targets`) may be a wrong tool choice, a hallucinated name or
+    provider noise; it must not be reported as an argument failure.
+    """
+
+    return tuple(
+        target
+        for target in state.retry_prompt_targets
+        if target != _RETRY_TARGET_OUTPUT
+        and target != _UNKNOWN_FIELD_MARKER
+        and target in state.registered_business_tools
+    )
+
+
+def _closing_shape_origin(
+    state: _RunState,
+    observation: tuple[tuple[str, ...], tuple[str, ...], bool] | None,
+) -> str:
+    """Attribute a failure only when the current response proves one source.
+
+    A definite class is returned only when this request's closing response leaves
+    exactly one candidate. A response that carries both a structured-output call
+    and a registered business call cannot be attributed here: a business call
+    whose JSON decoded may still violate the tool's type contract, so the shape
+    alone cannot show that it passed validation, and a kernel verdict proves only
+    that a decision was refused, not that it was the terminating failure. An
+    earlier acceptance is run state, not evidence about the current response, so
+    it never excludes a current output failure either.
+    """
+
+    if observation is None:
+        return "UNKNOWN"
+    has_output = bool(observation[1])
+    has_business = bool(observation[0])
+    if has_output and has_business:
+        return "UNKNOWN"
+    if has_output:
+        if state.kernel_rejection_attempt == state.request_attempt:
+            return "KERNEL_DECISION"
+        if state.current_output_details is not None:
+            return "OUTPUT_VALIDATION"
+        return "UNKNOWN"
+    if has_business:
+        return "BUSINESS_TOOL_ARGUMENTS"
+    return "UNKNOWN"
 
 
 _MAX_SUMMARY_ITEMS = 16
@@ -1801,16 +2067,27 @@ class DiagnosisRunner:
         @agent.output_validator
         def validate_output(ctx: RunContext[_RunState], output: Any) -> Any:
             current = ctx.deps
+            # Output-validation retries consumed so far, from the validator's own
+            # counter. It is None when a round never reaches this validator, and
+            # it is not a total of every SDK retry the request may have made.
+            current.output_retry_used = ctx.retry
+            current.output_retry_limit = ctx.max_retries
             if _is_kernel_strategy(current.strategy):
                 if not isinstance(output, KernelDecision) or current.kernel is None:
                     raise ModelRetry("MODEL_PROTOCOL_ERROR")
                 try:
                     outcome = current.kernel.finalize(output)
                 except KernelError as error:
+                    # KERNEL_FINALIZED means an earlier decision in this same
+                    # attempt already succeeded; that is a state conflict, not a
+                    # domain verdict, so it must not claim KERNEL_DECISION.
+                    if error.code != "KERNEL_FINALIZED":
+                        current.kernel_rejection_attempt = current.request_attempt
                     current.set_protocol_failure(
                         category="DECISION_CONTRACT_REJECTED",
                         stage="OUTPUT_VALIDATION",
                         tool_name=None,
+                        origin="KERNEL_DECISION",
                     )
                     rejected_decision = None
                     try:
@@ -1845,6 +2122,7 @@ class DiagnosisRunner:
                     category="DECISION_CONTRACT_REJECTED",
                     stage="OUTPUT_VALIDATION",
                     tool_name=None,
+                    origin="OUTPUT_VALIDATION",
                 )
                 raise ModelRetry("DIAGNOSIS_RUN_SCOPE_MISMATCH")
             if output.status is DiagnosisStatus.MODEL_ERROR:
@@ -1852,6 +2130,7 @@ class DiagnosisRunner:
                     category="DECISION_CONTRACT_REJECTED",
                     stage="OUTPUT_VALIDATION",
                     tool_name=None,
+                    origin="OUTPUT_VALIDATION",
                 )
                 raise ModelRetry("MODEL_ERROR_IS_CONTROLLER_GENERATED")
             known_ids = {record.evidence_id for record in current.evidence_records}
@@ -1864,6 +2143,7 @@ class DiagnosisRunner:
                     category="DECISION_CONTRACT_REJECTED",
                     stage="OUTPUT_VALIDATION",
                     tool_name=None,
+                    origin="OUTPUT_VALIDATION",
                 )
                 raise ModelRetry("DIAGNOSIS_EVIDENCE_ID_UNKNOWN")
             current.static_diagnosis = Diagnosis.model_validate(output.model_dump(mode="json"))
@@ -2100,11 +2380,13 @@ class DiagnosisRunner:
             _record_protocol_failure(state, error)
             state.append_protocol_trace()
             return self._model_error_result(state, "MODEL_PROTOCOL_ERROR")
-        except Exception:
+        except Exception as error:
             state.set_protocol_failure(
                 category="PROVIDER_PROTOCOL_FAILURE",
                 stage="PROVIDER_RESPONSE",
                 tool_name=None,
+                error_type=_error_type_label(error),
+                origin="PROVIDER",
             )
             state.append_protocol_trace()
             return self._model_error_result(state, "MODEL_RUNTIME_ERROR")
