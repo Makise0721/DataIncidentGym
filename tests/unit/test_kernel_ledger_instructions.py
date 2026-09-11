@@ -516,3 +516,136 @@ async def test_static_skill_never_receives_a_ledger(tmp_path: Path) -> None:
     for surfaces in captured:
         assert surfaces["copies"] == 0
         assert surfaces["tool_copies"] == []
+
+
+def _projection_kernel():
+    from data_incident_gym.diagnostic_kernel import DiagnosticKernel
+
+    return DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_REQUIRED_FIELD_NULL",
+            "TRANSFORMATION_REQUIRED_FIELD_NULL",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_schema_relations=("raw_orders", "raw_payments"),
+        observable_profile_relations=("raw_orders", "raw_payments"),
+        observable_history_relations=("raw_orders", "raw_payments"),
+    )
+
+
+def _profile_record(relation_name: str):
+    from data_incident_gym.evidence import (
+        EvidenceRecord,
+        EvidenceSource,
+        EvidenceType,
+        RelationDataProfileFact,
+    )
+    from data_incident_gym.profiles import RelationProfileSnapshot
+
+    return EvidenceRecord.create(
+        run_id=RUN_ID,
+        evidence_type=EvidenceType.RELATION_DATA_PROFILE,
+        source=EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+        subject=relation_name,
+        observed_at=datetime(2026, 8, 30, tzinfo=UTC),
+        content=RelationDataProfileFact(
+            kind="RELATION_DATA_PROFILE",
+            run_id=RUN_ID,
+            relation_name=relation_name,
+            profile_spec_version="profile_spec.v1",
+            profile_spec_sha256="b" * 64,
+            snapshot=RelationProfileSnapshot(
+                relation_name=relation_name,
+                row_count=0,
+                columns=(),
+            ),
+        ),
+    )
+
+
+def _close_profile_gap(kernel, relation_name: str) -> None:
+    from data_incident_gym.diagnostic_kernel import EvidenceGapKind, InvestigationIntent
+
+    prepared = kernel.prepare_tool(
+        intent=InvestigationIntent(gap_id="g_profile", gap_kind=EvidenceGapKind.PROFILE_RELATION),
+        tool_name="get_relation_data_profile",
+        arguments={"relation_name": relation_name},
+    )
+    kernel.record_tool_result(prepared, (_profile_record(relation_name),))
+
+
+def _uncollected(kernel) -> dict[str, list[str]]:
+    from data_incident_gym.diagnostic_agent import _kernel_state_summary
+
+    payload = json.loads(
+        _kernel_state_summary(kernel, kernel.snapshot(model_requests_used=0)).splitlines()[1]
+    )
+    return payload["uncollected_relations"]
+
+
+def test_ledger_reports_allowed_but_uncollected_relations() -> None:
+    """A relation is listed as uncollected only while that tool's own evidence
+    type has no accepted record for it; a profile never clears a history entry."""
+
+    kernel = _projection_kernel()
+    # Nothing collected yet: every allowed relation is uncollected for its tool.
+    assert _uncollected(kernel) == {
+        "get_relation_schema": ["raw_orders", "raw_payments"],
+        "get_relation_data_profile": ["raw_orders", "raw_payments"],
+        "get_relation_history": ["raw_orders", "raw_payments"],
+    }
+    _close_profile_gap(kernel, "raw_orders")
+
+    projection = _uncollected(kernel)
+    # The profile of raw_orders is collected; its history and schema stay listed.
+    assert projection["get_relation_data_profile"] == ["raw_payments"]
+    assert projection["get_relation_history"] == ["raw_orders", "raw_payments"]
+    assert projection["get_relation_schema"] == ["raw_orders", "raw_payments"]
+
+
+def test_uncollected_relations_follows_each_ablation() -> None:
+    """KERNEL_NO_SCHEMA clears only the schema entry; KERNEL_NO_LINEAGE clears
+    no relation entry, because neither ablation removes relation permissions."""
+
+    from data_incident_gym.diagnostic_kernel import DiagnosticKernel
+
+    # Only schema permissions are removed for KERNEL_NO_SCHEMA; lineage tooling is
+    # unrelated to relation permissions, so it clears nothing here.
+    no_schema = DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_REQUIRED_FIELD_NULL",
+            "TRANSFORMATION_REQUIRED_FIELD_NULL",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        observable_schema_relations=(),
+        observable_profile_relations=("raw_orders", "raw_payments"),
+        observable_history_relations=("raw_orders", "raw_payments"),
+    )
+    projection = _uncollected(no_schema)
+    assert projection["get_relation_schema"] == []
+    assert projection["get_relation_data_profile"] == ["raw_orders", "raw_payments"]
+    assert projection["get_relation_history"] == ["raw_orders", "raw_payments"]
+
+    # KERNEL_NO_LINEAGE keeps every relation permission, so nothing is cleared.
+    no_lineage = _projection_kernel()
+    projection = _uncollected(no_lineage)
+    assert projection["get_relation_schema"] == ["raw_orders", "raw_payments"]
+    assert projection["get_relation_history"] == ["raw_orders", "raw_payments"]
+
+
+def test_uncollected_projection_does_not_mutate_kernel_state() -> None:
+    """Projecting the ledger is read-only: hypotheses, gaps, fingerprints and
+    budget stay identical, and no tool call is issued."""
+
+    from data_incident_gym.diagnostic_agent import _kernel_state_summary
+
+    kernel = _projection_kernel()
+    before = kernel.snapshot(model_requests_used=0)
+    _kernel_state_summary(kernel, before)
+    _kernel_state_summary(kernel, kernel.snapshot(model_requests_used=0))
+
+    assert kernel.snapshot(model_requests_used=0) == before

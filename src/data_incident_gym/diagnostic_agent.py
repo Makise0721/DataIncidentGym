@@ -75,7 +75,12 @@ from data_incident_gym.diagnostic_kernel import (
     KernelOutcome,
     PreparedToolCall,
 )
-from data_incident_gym.evidence import DbtRunResultsFact, EvidenceRecord, EvidenceToolError
+from data_incident_gym.evidence import (
+    DbtRunResultsFact,
+    EvidenceRecord,
+    EvidenceToolError,
+    EvidenceType,
+)
 from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
@@ -1235,6 +1240,41 @@ def _overflow(items: Sequence[object], limit: int) -> int:
     return max(0, len(items) - limit)
 
 
+_RELATION_EVIDENCE_TYPES = {
+    "get_relation_schema": EvidenceType.RELATION_SCHEMA,
+    "get_relation_data_profile": EvidenceType.RELATION_DATA_PROFILE,
+    "get_relation_history": EvidenceType.RELATION_HISTORY,
+}
+
+
+def _uncollected_relations(kernel: DiagnosticKernel) -> dict[str, list[str]]:
+    """Relations a tool allows but whose own evidence type is still uncollected.
+
+    The subtraction runs per tool against that tool's evidence type and matches
+    on ``content.relation_name``: a schema record carries a schema-qualified
+    subject, so subtracting subjects would report a collected relation as
+    missing, and subtract cross-type would let one relation's profile hide its
+    uncollected history. The result states what is allowed right now, not what
+    is callable: a spent tool budget or an already-fingerprinted attempt still
+    makes a listed relation unusable.
+    """
+
+    return {
+        tool_name: [
+            relation
+            for relation in relations
+            if relation
+            not in {
+                record.content.relation_name
+                for record in kernel.evidence_records
+                if record.evidence_type is evidence_type
+            }
+        ]
+        for tool_name, relations in kernel.provable_relations_by_tool().items()
+        for evidence_type in (_RELATION_EVIDENCE_TYPES[tool_name],)
+    }
+
+
 def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState) -> str:
     """Project the model-visible investigation ledger for the current request."""
 
@@ -1266,6 +1306,7 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
             tool_name: list(relations)
             for tool_name, relations in kernel.provable_relations_by_tool().items()
         },
+        "uncollected_relations": _uncollected_relations(kernel),
         "provable_lineage_nodes": list(kernel.provable_lineage_nodes()),
         "model_requests_remaining": snapshot.model_requests_remaining,
         "tool_calls_remaining": snapshot.tool_calls_remaining,
@@ -1280,9 +1321,13 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
         "under provable_lineage_nodes for get_dbt_lineage; a relation name or "
         "schema-qualified name is not a node identifier and rejected node arguments must "
         "never be retried; the lists are exact and complete and relations returned by "
-        "evidence do not extend them. One boundary probe per blocked-relevant relation "
-        "is allowed to record its permission receipt; it counts against the budget and "
-        "returns no data. Budget remaining requests conservatively."
+        "evidence do not extend them. uncollected_relations names, per relation tool, the "
+        "relations that are allowed but still have no accepted evidence of that tool's own "
+        "type; it states what is allowed, not what is callable, so a spent tool budget or "
+        "an earlier rejected attempt still makes a listed relation unusable. One boundary "
+        "probe per blocked-relevant relation is allowed to record its permission receipt; "
+        "it counts against the budget and returns no data. Budget remaining requests "
+        "conservatively."
     )
 
 
