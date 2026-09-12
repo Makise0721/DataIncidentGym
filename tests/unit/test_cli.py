@@ -76,6 +76,7 @@ def test_canonical_manifest_path_accepts_approved_rerun_identities() -> None:
         "p1-formal-v15",
         "p1-formal-v16",
         "p1-formal-v17",
+        "p1-formal-v18",
     ):
         resolved = _canonical_benchmark_manifest_path(
             Path(f"config/benchmark/{manifest_id}.json")
@@ -86,7 +87,7 @@ def test_canonical_manifest_path_accepts_approved_rerun_identities() -> None:
 
 def test_canonical_manifest_path_rejects_unapproved_name() -> None:
     with pytest.raises(BenchmarkManifestError):
-        _canonical_benchmark_manifest_path(Path("config/benchmark/p1-formal-v18.json"))
+        _canonical_benchmark_manifest_path(Path("config/benchmark/p1-formal-v19.json"))
 
 
 def test_confirmed_manifest_rejects_filename_identity_mismatch(
