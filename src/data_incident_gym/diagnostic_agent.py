@@ -89,7 +89,7 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v15"
+KERNEL_PROMPT_VERSION = "p1.kernel.v16"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
 CONTROLLER_PROTOCOL_VERSION = "p1.controller.v16"

@@ -1,0 +1,698 @@
+{
+  "incident_case_id": "schema_type_change_order_customer_b",
+  "records": [
+    {
+      "content": {
+        "dbt_exit_code": 1,
+        "failed_nodes": [
+          "model.jaffle_shop.customers"
+        ],
+        "kind": "DBT_RUN_RESULTS",
+        "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+        "run_status": "FAILED",
+        "skipped_nodes": [
+          "test.jaffle_shop.not_null_customers_customer_id.5c9bf9911d",
+          "test.jaffle_shop.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2",
+          "test.jaffle_shop.unique_customers_customer_id.c5af1ff4b1"
+        ]
+      },
+      "content_digest": "818f85fd369cec9f873d9655b3ebc9a0108eb33f4e1d1a7a7a28b244c2b21655",
+      "evidence_id": "ev_51718e26c50a41e82805e09cc279bc2b15abb31d6613dcd2a2fd117bdfa1728f",
+      "evidence_type": "DBT_RUN_RESULTS",
+      "observed_at": "2026-09-11T14:42:57.999053Z",
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+      "source": "dbt_artifact:run_results.json",
+      "subject": "26600b5dbc5dc583232e2eb48aac16c7"
+    },
+    {
+      "content": {
+        "kind": "DBT_NODE_ERROR",
+        "message": "Database Error in model customers (models/customers.sql)\n  operator does not exist: integer = text\n  LINE 73:         on customers.customer_id = customer_orders.customer_...\n                                            ^\n  HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.",
+        "node_id": "model.jaffle_shop.customers",
+        "resource_type": "model",
+        "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+        "status": "error"
+      },
+      "content_digest": "0e6b870c9bd141568696e2d82a3f43a259cee25082cfb8c4143fdccd8f8919ac",
+      "evidence_id": "ev_5de6fd643b20d8eee437f1d8cf764b8bb8a8287600ba8f377211aafa9563367b",
+      "evidence_type": "DBT_NODE_ERROR",
+      "observed_at": "2026-09-11T14:42:57.999053Z",
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+      "source": "dbt_artifact:run_results.json",
+      "subject": "model.jaffle_shop.customers"
+    },
+    {
+      "content": {
+        "columns": [
+          {
+            "data_type": "integer",
+            "name": "id",
+            "nullable": true,
+            "ordinal_position": 1
+          },
+          {
+            "data_type": "text",
+            "name": "first_name",
+            "nullable": true,
+            "ordinal_position": 2
+          },
+          {
+            "data_type": "text",
+            "name": "last_name",
+            "nullable": true,
+            "ordinal_position": 3
+          }
+        ],
+        "kind": "RELATION_SCHEMA",
+        "relation_name": "raw_customers",
+        "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+        "schema_name": "analytics"
+      },
+      "content_digest": "b052573b81a15f75fa95516859e80d6597b2d282ad09d2ede7a99d7db15deb1f",
+      "evidence_id": "ev_b95380adf21ae81771ee8f483253b43721e2f081f662484e99eee3da25f70c62",
+      "evidence_type": "RELATION_SCHEMA",
+      "observed_at": "2026-09-11T14:43:19.938624Z",
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+      "source": "postgres_catalog",
+      "subject": "analytics.raw_customers"
+    },
+    {
+      "content": {
+        "columns": [
+          {
+            "data_type": "integer",
+            "name": "id",
+            "nullable": true,
+            "ordinal_position": 1
+          },
+          {
+            "data_type": "integer",
+            "name": "order_id",
+            "nullable": true,
+            "ordinal_position": 2
+          },
+          {
+            "data_type": "text",
+            "name": "payment_method",
+            "nullable": true,
+            "ordinal_position": 3
+          },
+          {
+            "data_type": "integer",
+            "name": "amount",
+            "nullable": true,
+            "ordinal_position": 4
+          },
+          {
+            "data_type": "text",
+            "name": "source_batch_note",
+            "nullable": true,
+            "ordinal_position": 5
+          }
+        ],
+        "kind": "RELATION_SCHEMA",
+        "relation_name": "raw_payments",
+        "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+        "schema_name": "analytics"
+      },
+      "content_digest": "4cf774a7698fe63b07460b755b10b38845c084f3dc42ed03ccd8652df264767b",
+      "evidence_id": "ev_7cf6d03adc7d09bad7f80598bf8042b02f5d3687edb21a9601c76072170dc2e3",
+      "evidence_type": "RELATION_SCHEMA",
+      "observed_at": "2026-09-11T14:43:19.989137Z",
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+      "source": "postgres_catalog",
+      "subject": "analytics.raw_payments"
+    },
+    {
+      "content": {
+        "kind": "RELATION_DATA_PROFILE",
+        "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+        "profile_spec_version": "profile_spec.v1",
+        "relation_name": "raw_customers",
+        "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+        "snapshot": {
+          "business_fingerprint_duplicates": [],
+          "business_key_duplicates": [
+            {
+              "duplicate_count": 0,
+              "name": "id"
+            }
+          ],
+          "columns": [
+            {
+              "column_name": "id",
+              "distinct_count": 100,
+              "null_count": 0
+            },
+            {
+              "column_name": "first_name",
+              "distinct_count": 79,
+              "null_count": 0
+            },
+            {
+              "column_name": "last_name",
+              "distinct_count": 19,
+              "null_count": 0
+            }
+          ],
+          "groups": [],
+          "relation_name": "raw_customers",
+          "relationship_violations": [],
+          "row_count": 100
+        }
+      },
+      "content_digest": "9d913bec74e98b5f4dfa3413bbb7a0a0bcd5569cc436e0f1992466108136e473",
+      "evidence_id": "ev_a977bd7207cc52429f3acec93221ae325a14f9047de422d0a554cb1c0426e69b",
+      "evidence_type": "RELATION_DATA_PROFILE",
+      "observed_at": "2026-09-11T14:43:19.076688Z",
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+      "source": "postgres_profile_snapshot",
+      "subject": "raw_customers"
+    },
+    {
+      "content": {
+        "kind": "RELATION_DATA_PROFILE",
+        "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+        "profile_spec_version": "profile_spec.v1",
+        "relation_name": "raw_orders",
+        "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+        "snapshot": {
+          "business_fingerprint_duplicates": [],
+          "business_key_duplicates": [
+            {
+              "duplicate_count": 0,
+              "name": "id"
+            }
+          ],
+          "columns": [
+            {
+              "column_name": "id",
+              "distinct_count": 99,
+              "null_count": 0
+            },
+            {
+              "column_name": "user_id",
+              "distinct_count": 62,
+              "null_count": 0
+            },
+            {
+              "column_name": "order_date",
+              "distinct_count": 69,
+              "null_count": 0
+            },
+            {
+              "column_name": "status",
+              "distinct_count": 5,
+              "null_count": 0
+            }
+          ],
+          "groups": [],
+          "relation_name": "raw_orders",
+          "relationship_violations": [
+            {
+              "name": "user_id_to_raw_customers_id",
+              "violation_count": 0
+            },
+            {
+              "name": "id_to_raw_payments_order_id",
+              "violation_count": 0
+            }
+          ],
+          "row_count": 99
+        }
+      },
+      "content_digest": "b3d9f2407367affd2bd208e1dbadf8e508c9d0c05c1ced52d2c5e9198bdf4a95",
+      "evidence_id": "ev_3f058fb3290b6ab77692b56d6ead2cca006e93b2402632386964c586ca16f104",
+      "evidence_type": "RELATION_DATA_PROFILE",
+      "observed_at": "2026-09-11T14:43:19.121231Z",
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+      "source": "postgres_profile_snapshot",
+      "subject": "raw_orders"
+    },
+    {
+      "content": {
+        "kind": "RELATION_DATA_PROFILE",
+        "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+        "profile_spec_version": "profile_spec.v1",
+        "relation_name": "raw_payments",
+        "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+        "snapshot": {
+          "business_fingerprint_duplicates": [
+            {
+              "duplicate_count": 0,
+              "name": "order_payment_amount"
+            }
+          ],
+          "business_key_duplicates": [
+            {
+              "duplicate_count": 0,
+              "name": "id"
+            }
+          ],
+          "columns": [
+            {
+              "column_name": "id",
+              "distinct_count": 113,
+              "null_count": 0
+            },
+            {
+              "column_name": "order_id",
+              "distinct_count": 99,
+              "null_count": 0
+            },
+            {
+              "column_name": "payment_method",
+              "distinct_count": 4,
+              "null_count": 0
+            },
+            {
+              "column_name": "amount",
+              "distinct_count": 30,
+              "null_count": 0
+            }
+          ],
+          "groups": [
+            {
+              "columns": [
+                "payment_method"
+              ],
+              "counts": [
+                33,
+                13,
+                55,
+                12
+              ],
+              "name": "payment_method",
+              "values": [
+                [
+                  "bank_transfer"
+                ],
+                [
+                  "coupon"
+                ],
+                [
+                  "credit_card"
+                ],
+                [
+                  "gift_card"
+                ]
+              ]
+            }
+          ],
+          "relation_name": "raw_payments",
+          "relationship_violations": [
+            {
+              "name": "order_id_to_raw_orders_id",
+              "violation_count": 0
+            }
+          ],
+          "row_count": 113
+        }
+      },
+      "content_digest": "24eca51d5bf70895670a34b15b645eab8aef7a07767befe74f2104137e99b50b",
+      "evidence_id": "ev_e95a46d7a8f5f9356b924776a2df869bdcf8afcbbd60d535cac2171f3759cfea",
+      "evidence_type": "RELATION_DATA_PROFILE",
+      "observed_at": "2026-09-11T14:43:19.165016Z",
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+      "source": "postgres_profile_snapshot",
+      "subject": "raw_payments"
+    },
+    {
+      "content": {
+        "kind": "RELATION_HISTORY",
+        "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+        "profile_spec_version": "profile_spec.v1",
+        "relation_name": "raw_orders",
+        "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+        "snapshot": {
+          "histories": [
+            {
+              "metric": "count",
+              "name": "order_count_by_day",
+              "points": [
+                {
+                  "bucket": "2018-01-01",
+                  "periodic_key": "1",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-02",
+                  "periodic_key": "2",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-04",
+                  "periodic_key": "4",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-05",
+                  "periodic_key": "5",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-01-07",
+                  "periodic_key": "7",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-09",
+                  "periodic_key": "2",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-11",
+                  "periodic_key": "4",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-12",
+                  "periodic_key": "5",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-14",
+                  "periodic_key": "7",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-01-15",
+                  "periodic_key": "1",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-17",
+                  "periodic_key": "3",
+                  "value": 3
+                },
+                {
+                  "bucket": "2018-01-18",
+                  "periodic_key": "4",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-01-20",
+                  "periodic_key": "6",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-22",
+                  "periodic_key": "1",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-23",
+                  "periodic_key": "2",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-01-24",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-26",
+                  "periodic_key": "5",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-27",
+                  "periodic_key": "6",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-01-28",
+                  "periodic_key": "7",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-01-29",
+                  "periodic_key": "1",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-01-31",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-02",
+                  "periodic_key": "5",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-02-04",
+                  "periodic_key": "7",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-02-06",
+                  "periodic_key": "2",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-08",
+                  "periodic_key": "4",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-10",
+                  "periodic_key": "6",
+                  "value": 3
+                },
+                {
+                  "bucket": "2018-02-11",
+                  "periodic_key": "7",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-13",
+                  "periodic_key": "2",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-14",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-16",
+                  "periodic_key": "5",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-17",
+                  "periodic_key": "6",
+                  "value": 3
+                },
+                {
+                  "bucket": "2018-02-19",
+                  "periodic_key": "1",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-20",
+                  "periodic_key": "2",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-21",
+                  "periodic_key": "3",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-02-23",
+                  "periodic_key": "5",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-24",
+                  "periodic_key": "6",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-25",
+                  "periodic_key": "7",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-26",
+                  "periodic_key": "1",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-02-27",
+                  "periodic_key": "2",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-02-28",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-01",
+                  "periodic_key": "4",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-03-02",
+                  "periodic_key": "5",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-03",
+                  "periodic_key": "6",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-03-05",
+                  "periodic_key": "1",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-06",
+                  "periodic_key": "2",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-07",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-08",
+                  "periodic_key": "4",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-10",
+                  "periodic_key": "6",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-11",
+                  "periodic_key": "7",
+                  "value": 3
+                },
+                {
+                  "bucket": "2018-03-12",
+                  "periodic_key": "1",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-03-14",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-16",
+                  "periodic_key": "5",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-17",
+                  "periodic_key": "6",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-18",
+                  "periodic_key": "7",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-20",
+                  "periodic_key": "2",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-21",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-23",
+                  "periodic_key": "5",
+                  "value": 4
+                },
+                {
+                  "bucket": "2018-03-24",
+                  "periodic_key": "6",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-03-26",
+                  "periodic_key": "1",
+                  "value": 3
+                },
+                {
+                  "bucket": "2018-03-27",
+                  "periodic_key": "2",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-03-28",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-30",
+                  "periodic_key": "5",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-03-31",
+                  "periodic_key": "6",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-04-02",
+                  "periodic_key": "1",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-04-03",
+                  "periodic_key": "2",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-04-04",
+                  "periodic_key": "3",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-04-06",
+                  "periodic_key": "5",
+                  "value": 1
+                },
+                {
+                  "bucket": "2018-04-07",
+                  "periodic_key": "6",
+                  "value": 2
+                },
+                {
+                  "bucket": "2018-04-09",
+                  "periodic_key": "1",
+                  "value": 1
+                }
+              ],
+              "sla_seconds": 86400,
+              "watermark_column": "order_date",
+              "watermark_value": "2018-04-09"
+            }
+          ],
+          "relation_name": "raw_orders"
+        }
+      },
+      "content_digest": "14cf809f635f6943b142284f88aedc6a492e22bd152f2a8e245d0c46323d06a5",
+      "evidence_id": "ev_791f98001c8b2466af47fd3ed5dd53b3914bc8a5178b258dff04a7be6606ae71",
+      "evidence_type": "RELATION_HISTORY",
+      "observed_at": "2026-09-11T14:43:19.198386Z",
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+      "source": "postgres_profile_snapshot",
+      "subject": "raw_orders"
+    }
+  ],
+  "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+  "schema_version": "p1.evidence.v1"
+}

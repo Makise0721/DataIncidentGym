@@ -550,7 +550,7 @@ def _confirmed_run_result(
             strategy=DiagnosticStrategy.DIAGNOSTIC_KERNEL,
             base_prompt_version="p1.base.v1",
             base_prompt_sha256="0" * 64,
-            strategy_prompt_version="p1.kernel.v15",
+            strategy_prompt_version="p1.kernel.v16",
             strategy_prompt_sha256="1" * 64,
             controller_protocol_version="p1.controller.v16",
             controller_protocol_sha256="2" * 64,

@@ -642,6 +642,13 @@ def test_semantic_duplicate_rejects_node_error_without_run_results() -> None:
 # ------------------------------------------------------- prompt contract checks
 
 
+def _flattened(prompt: str) -> str:
+    """Whitespace-normalised prompt text, so assertions survive re-wrapping."""
+
+    return " ".join(prompt.split())
+
+
+
 def test_kernel_prompt_states_per_claim_citation_duties() -> None:
     """Few, load-bearing checks: claims cite their own records, the branches stay
     distinguishable, and the independent payment branches are excluded from the
@@ -698,24 +705,25 @@ def test_two_independent_payment_branches_confirm_without_a_node_error() -> None
 
 
 def test_kernel_prompt_requires_a_receipt_before_declaring() -> None:
-    """Receipt self-check and the (narrow) probe prohibitions.
+    """Receipt handling: reuse first, probe only under the boundary rules, never
+    fabricate, and never treat one relation's receipt as another's.
 
-    The existing contract allows a probe after a rejected decision while the tool
-    budget lasts, so the prompt must not forbid that; it forbids only probing
-    once the budget is gone, repeating a rejected call, and probing variants.
+    The probe prohibitions themselves live in the boundary-authorization paragraph
+    (one probe, no repeat, no variant); this test pins that the self-check defers
+    to it instead of restating a wider rule.
     """
 
     from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
 
-    assert "verify that a receipt for that" in KERNEL_PROMPT
-    assert "do not declare that item at all" in KERNEL_PROMPT
-    # A rejected decision does not bar a later, budgeted probe.
-    assert "A\nrejected decision does not by itself bar a later probe" in KERNEL_PROMPT
-    assert "take the one permitted boundary probe in a following" in KERNEL_PROMPT
-    # The actual prohibitions.
-    assert "probing once the tool\nbudget is exhausted" in KERNEL_PROMPT
-    assert "repeating a call whose relation was already rejected" in KERNEL_PROMPT
-    assert "probing a\nvariant of a blocked relation" in KERNEL_PROMPT
+    assert "reuse the existing receipt for that exact tool and subject" in KERNEL_PROMPT
+    assert "collect normally when the relation is allowed" in KERNEL_PROMPT
+    assert "take the permitted boundary\nprobe under the boundary rules above" in KERNEL_PROMPT
+    assert "Never\nfabricate a receipt" in KERNEL_PROMPT
+    # A rejection does not forbid a later permitted probe.
+    assert "A rejection does not prohibit a later permitted probe" in KERNEL_PROMPT
+    assert "never exceed the existing budgets or repeat a blocked business call" in KERNEL_PROMPT
+    # The boundary paragraph stays the single authorization source.
+    assert "never probe a variant of a blocked relation or repeat a blocked call" in KERNEL_PROMPT
     # The over-broad wording the audit flagged must stay gone.
     assert "never probe after a rejection" not in KERNEL_PROMPT
 
@@ -833,41 +841,46 @@ def test_a_source_downstream_relation_reaches_the_downstream_models() -> None:
     assert "raw_orders" not in {node.name for node in nodes}
 
 
-def test_kernel_prompt_requires_collection_check_for_both_terminal_statuses() -> None:
-    """The ledger reports what is allowed but not yet collected; the prompt must
-    ask for that check before either terminal status, keep it conditional on
-    relevance, and name the ledger field it refers to."""
+def test_kernel_prompt_requires_a_decisive_evidence_check_before_finalizing() -> None:
+    """The pre-decision check stays conditional on decisiveness and relevance, and
+    the ledger inventory is still named as an inventory rather than a checklist."""
 
     from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
 
-    assert "uncollected_relations" in KERNEL_PROMPT
-    assert "Before submitting either a confirmed or an\ninsufficient-evidence decision" in (
-        KERNEL_PROMPT
-    )
+    flat = _flattened(KERNEL_PROMPT)
+    assert "uncollected_relations" in flat
+    assert (
+        "Before a final decision, check whether decisive, queryable evidence remains missing"
+        " for the competing causes"
+    ) in flat
     # Fact, not a to-do list.
-    assert "reports what is allowed and still uncollected" in KERNEL_PROMPT
-    assert "it is not a list of calls to make" in KERNEL_PROMPT
-    # The relevance condition survives the rewrite.
-    assert "still\nrelevant to distinguishing the registered candidate causes" in KERNEL_PROMPT
+    assert "uncollected_relations is an inventory" in flat
+    assert "of allowed missing evidence, not a checklist" in flat
 
 
 def test_kernel_prompt_separates_history_receipts_from_a_watermark_declaration() -> None:
-    """Two history receipts do not produce a watermark declaration, and a blocked
-    history request must not be reported as unobservable. The watermark sentence
-    states its own trigger and its own prohibition."""
+    """Receipts never produce a watermark declaration, and the watermark subject
+    is derived from the public settled-boundary observation rather than guessed
+    from the brief's subject list."""
 
     from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
 
-    # The watermark rule stands on its own trigger.
-    assert "When a settled boundary is necessary to separate an ingestion loss" in KERNEL_PROMPT
-    assert "cannot be determined from this run's public evidence" in KERNEL_PROMPT
-    assert "declare\nINGESTION_WATERMARK with reason NOT_OBSERVABLE" in KERNEL_PROMPT
-    assert "do not\ndeclare it when a usable watermark is already available" in KERNEL_PROMPT
-    assert "a rejected history request\nalone does not establish" in KERNEL_PROMPT
-    # Queryable-but-uncollected history is collected, not probed.
-    assert "collect it rather than probe it" in KERNEL_PROMPT
-    # Receipts are reused, not retried.
-    assert "reuse the receipt you already have" in KERNEL_PROMPT
+    flat = _flattened(KERNEL_PROMPT)
+    # Independent declaration, with its own subject rule.
+    assert (
+        "Separately check whether a decisive watermark, event-identity or transformation fact"
+        " in flat"
+    )
+    assert "Relation receipts do not automatically create these declarations" in flat
+    assert "A failed lookup alone does not prove that every related fact is unobservable" in flat
+    assert "Preserve other justified gaps when correcting an invalid item" in flat
+    # The public derivation of the subject.
+    assert "SETTLED_PAYMENT_WINDOW_END observation" in flat
+    assert "Do not infer this subject merely from membership in the brief's subject list" in flat
+    assert (
+        "do not declare the gap when accepted evidence already proves the required boundary"
+        " in flat"
+    )
 
 
 def test_kernel_prompt_requires_one_receipt_per_decisive_history_gap() -> None:
@@ -876,8 +889,9 @@ def test_kernel_prompt_requires_one_receipt_per_decisive_history_gap() -> None:
 
     from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
 
-    assert "Each decisive history gap needs\nits own receipt" in KERNEL_PROMPT
-    assert "one receipt does not cover another relation" in KERNEL_PROMPT
+    flat = _flattened(KERNEL_PROMPT)
+    assert "Apply the receipt checks separately to each decisive history gap" in flat
+    assert "one relation's receipt cannot establish another relation's gap" in flat
 
 
 def test_blocked_history_gaps_are_derived_without_a_watermark() -> None:
@@ -938,3 +952,37 @@ def test_blocked_history_gaps_are_derived_without_a_watermark() -> None:
         ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED"),
     ]
     assert all(item.evidence_kind != "INGESTION_WATERMARK" for item in outcome.unresolved_evidence)
+
+def test_kernel_prompt_plans_calls_against_both_budgets() -> None:
+    """The planning rule replaces unconditional batching: calls are chosen by the
+    question they resolve and counted against both budgets, including probes."""
+
+    from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
+
+    flat = _flattened(KERNEL_PROMPT)
+    assert "select calls by the public question they resolve" in flat
+    assert "do not sweep the relation whitelist" in flat
+    assert "a rejected boundary probe also costs one call" in flat
+    assert "Preserve a model request for the final decision" in flat
+    assert "Prefer decisive checks over optional corroboration" in flat
+    assert "Do not spend remaining calls merely because they are available" in flat
+    # The unconditional sweep instruction must stay gone.
+    assert "batch every evidence query you can already justify" not in flat
+
+
+def test_kernel_prompt_requires_reassessment_after_a_rejection() -> None:
+    """A rejection must be answered by fixing the failed prerequisite — never by
+    swapping the verdict without evidence, and never by only adding citations."""
+
+    from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
+
+    flat = _flattened(KERNEL_PROMPT)
+    assert "identify the failed prerequisite from the feedback" in flat
+    assert "repair that binding or citation without another tool call" in flat
+    assert "collect it and reassess" in flat
+    assert "adding more evidence IDs does not establish a missing fact" in flat
+    assert "Retry the same substantive claim only when the correction addresses" in flat
+    # The two directions of the symmetry rule.
+    assert "A rejected healthy claim does not prove an incident" in flat
+    assert "a rejected incident claim does not prove health" in flat
+    assert "Confirm only when the alternative conclusion has its own required evidence" in flat

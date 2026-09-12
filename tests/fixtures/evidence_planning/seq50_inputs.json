@@ -1,0 +1,50 @@
+{
+  "incident_subjects": [
+    "seed.jaffle_shop.raw_payments",
+    "raw_payments",
+    "raw_orders",
+    "payment_count_by_order_date"
+  ],
+  "lineage_node_candidates": [
+    "seed.jaffle_shop.raw_payments"
+  ],
+  "logical_observed_at": "2018-04-09T12:00:00Z",
+  "observable_relations": {
+    "history": [
+      "raw_orders",
+      "raw_payments"
+    ],
+    "profile": [
+      "raw_orders",
+      "raw_payments"
+    ],
+    "schema": [
+      "raw_payments"
+    ]
+  },
+  "observations": [
+    {
+      "kind": "CURRENT_PERIOD_COUNT",
+      "subject": "raw_payments/payment_count_by_order_date/2018-03-23",
+      "value": "3"
+    },
+    {
+      "kind": "EXPECTED_PERIOD_COUNT",
+      "subject": "raw_payments/payment_count_by_order_date/2018-03-23",
+      "value": "5"
+    },
+    {
+      "kind": "CURRENT_RELATION_COUNT",
+      "subject": "raw_payments",
+      "value": "111"
+    },
+    {
+      "kind": "SETTLED_PAYMENT_WINDOW_END",
+      "subject": "raw_orders",
+      "value": "2018-03-23"
+    }
+  ],
+  "schema_version": "p1.evidence_planning_fixture.v1",
+  "sequence": 50,
+  "source_run_id": "d5059a8477a5acfadd079fff22525bb2"
+}

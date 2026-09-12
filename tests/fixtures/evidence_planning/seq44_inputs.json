@@ -1,0 +1,33 @@
+{
+  "incident_subjects": [
+    "model.jaffle_shop.customers"
+  ],
+  "lineage_node_candidates": [
+    "model.jaffle_shop.customers"
+  ],
+  "logical_observed_at": "2018-04-09T12:00:00Z",
+  "observable_relations": {
+    "history": [
+      "raw_orders"
+    ],
+    "profile": [
+      "raw_orders",
+      "raw_customers",
+      "raw_payments"
+    ],
+    "schema": [
+      "raw_customers",
+      "raw_payments"
+    ]
+  },
+  "observations": [
+    {
+      "kind": "DBT_MODEL_FAILURE",
+      "subject": "model.jaffle_shop.customers",
+      "value": "error"
+    }
+  ],
+  "schema_version": "p1.evidence_planning_fixture.v1",
+  "sequence": 44,
+  "source_run_id": "26600b5dbc5dc583232e2eb48aac16c7"
+}

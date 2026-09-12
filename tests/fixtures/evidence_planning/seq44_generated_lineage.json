@@ -1,0 +1,55 @@
+[
+  {
+    "content": {
+      "direction": "upstream",
+      "kind": "DBT_LINEAGE",
+      "node_id": "model.jaffle_shop.customers",
+      "related_nodes": [
+        {
+          "distance": 1,
+          "name": "stg_customers",
+          "node_id": "model.jaffle_shop.stg_customers",
+          "resource_type": "model"
+        },
+        {
+          "distance": 1,
+          "name": "stg_orders",
+          "node_id": "model.jaffle_shop.stg_orders",
+          "resource_type": "model"
+        },
+        {
+          "distance": 1,
+          "name": "stg_payments",
+          "node_id": "model.jaffle_shop.stg_payments",
+          "resource_type": "model"
+        },
+        {
+          "distance": 2,
+          "name": "raw_customers",
+          "node_id": "seed.jaffle_shop.raw_customers",
+          "resource_type": "seed"
+        },
+        {
+          "distance": 2,
+          "name": "raw_orders",
+          "node_id": "seed.jaffle_shop.raw_orders",
+          "resource_type": "seed"
+        },
+        {
+          "distance": 2,
+          "name": "raw_payments",
+          "node_id": "seed.jaffle_shop.raw_payments",
+          "resource_type": "seed"
+        }
+      ],
+      "run_id": "26600b5dbc5dc583232e2eb48aac16c7"
+    },
+    "content_digest": "70b12af4675ace8414b3948b992a470b1041cd66899aa7ce2471ff1a8759332f",
+    "evidence_id": "ev_2c4b507b174eeda7b3b60a7bf486acbc8f918d25a8c740bdc91c92934f0910b9",
+    "evidence_type": "DBT_LINEAGE",
+    "observed_at": "2026-09-11T14:42:53.199982Z",
+    "run_id": "26600b5dbc5dc583232e2eb48aac16c7",
+    "source": "dbt_artifact:manifest.json",
+    "subject": "model.jaffle_shop.customers"
+  }
+]

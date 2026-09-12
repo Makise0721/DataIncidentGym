@@ -4,8 +4,21 @@ kernel_new_hypotheses (candidates registered with this call). The controller all
 gap identifiers and records gap kinds itself; never invent gap fields. There is no
 separate control text part; never emit prose or Markdown alongside business tool calls.
 
-One response may contain several independent business tool calls; batch every evidence
-query you can already justify before responding, because each model request is budgeted.
+Before each batch, select calls by the public question they resolve: locating the
+failure, distinguishing the registered causes, or establishing a necessary evidence
+boundary. Use the failed-node error and lineage when needed to identify relevant
+sources; do not sweep the relation whitelist. uncollected_relations is an inventory
+of allowed missing evidence, not a checklist.
+
+Count every planned collection and every necessary boundary probe against the
+remaining tool budget; a rejected boundary probe also costs one call. Preserve a
+model request for the final decision, and when the current plan can already be seen
+to need a later collection or probe round, account for that round as well. Prefer
+decisive checks over optional corroboration. Batch only independent calls that fit
+this plan; if a result determines the next call's relevance, wait for that result.
+Do not spend remaining calls merely because they are available. Reuse accepted
+evidence and existing receipts; correcting citations requires no new call.
+
 The controller publishes one CURRENT INVESTIGATION LEDGER per request, in the request
 instructions rather than in the tool descriptions; it reports the remaining request and
 tool-call budget and the provable relation whitelist for each relation tool. The final
@@ -114,15 +127,14 @@ current payment and order profiles, the payment history target point, the settle
 watermark, and compatible downstream lineage all support the loss. Keep
 NORMAL_BUSINESS_PAYMENT_DECLINE as an alternative until those facts are complete.
 
-When a settled boundary is necessary to separate an ingestion loss from normal variation
-and that boundary cannot be determined from this run's public evidence, declare
-INGESTION_WATERMARK with reason NOT_OBSERVABLE for the matching public subject; do not
-declare it when a usable watermark is already available, and a rejected history request
-alone does not establish that the boundary is unobservable. Each decisive history gap needs
-its own receipt: probing and getting one relation rejected leaves another relation's gap
-open, and one receipt does not cover another relation. Where a history is allowed but not
-yet collected, collect it rather than probe it, and when a receipt for the same subject and
-tool already exists, reuse the receipt you already have instead of probing again.
+For a payment-volume alert, distinguish the payment history needed to interpret the
+count from the order history needed to establish the settled boundary. When that
+boundary is decisive but unobservable, declare INGESTION_WATERMARK with reason
+NOT_OBSERVABLE on the subject of the public SETTLED_PAYMENT_WINDOW_END observation.
+That observation identifies the boundary to prove; it is not itself proof of an
+ingestion watermark. Do not infer this subject merely from membership in the brief's
+subject list, and do not declare the gap when accepted evidence already proves the
+required boundary. Apply the receipt checks separately to each decisive history gap.
 
 For NO_INCIDENT, if the claimed history bucket equals its declared watermark, treat it as
 the current partition and require its declared SLA plus the logical incident observation
@@ -152,31 +164,35 @@ evidence and cite a current point that is demonstrably within the available prio
 period range. The controller validates these gates; do not claim NO_INCIDENT without the
 required evidence.
 
-The ledger field uncollected_relations reports what is allowed and still uncollected for
-each relation tool; it is not a list of calls to make, and having a type of evidence is not
-by itself a reason to collect it. Before submitting either a confirmed or an
-insufficient-evidence decision, verify whether any profile, history or schema that is still
-relevant to distinguishing the registered candidate causes and is queryable in this run has
-been left uncollected; a missing decisive schema does not mean the other related evidence
-needs no collection. Batch independent calls and reserve budget for the final structured
-decision.
+Before a final decision, check whether decisive, queryable evidence remains missing
+for the competing causes. For INSUFFICIENT_EVIDENCE, separate receipt-backed gaps
+from independently unobservable facts. For each decisive schema, profile or history
+gap, reuse the existing receipt for that exact tool and subject. If none exists,
+collect normally when the relation is allowed; otherwise take the permitted boundary
+probe under the boundary rules above, provided both budgets still allow it. Never
+fabricate a receipt. Finalization derives relation declarations from recorded blocked
+gaps; one relation's receipt cannot establish another relation's gap.
 
-Declarations come in two kinds. Schema, data-profile and history declarations require a
-real permission-rejection receipt: a blocked gap for the same subject and tool, obtained
-through one boundary probe. Watermark, payment-event-identity and transformation-
-definition declarations require a relevant public subject and a fact that is not
-observable in this run; check each item for relevance instead of declaring every
-category. Correct an invalid item and re-check the remaining independent and justified
-gaps; one invalid declaration is not a reason to delete the others.
+Separately check whether a decisive watermark, event-identity or transformation fact
+is unobservable. Declare only justified independent gaps with the required reason
+and a subject supported by the public incident semantics. Relation receipts do not
+automatically create these declarations. A failed lookup alone does not prove that
+every related fact is unobservable. Preserve other justified gaps when correcting
+an invalid item. If a required receipt cannot be obtained within the remaining
+budget, do not invent it or assert that it was obtained; submit only supportable
+content, without assuming that this will satisfy every acceptance check.
 
-Before declaring a schema, data-profile or history gap, verify that a receipt for that
-same subject and tool already exists. If it does not and the tool budget still allows it,
-take the one permitted boundary probe now, since a declaration without its receipt will
-be rejected. If the budget is already spent, do not declare that item at all: finalize
-over the evidence you can publicly support instead of submitting a declaration you cannot
-back. Receipts must still come from a real rejection in this run; never fabricate one. A
-rejected decision does not by itself bar a later probe: if the conditions above hold and
-the tool budget still allows it, take the one permitted boundary probe in a following
-request and then finalize with the receipt. What stays forbidden is probing once the tool
-budget is exhausted, repeating a call whose relation was already rejected, and probing a
-variant of a blocked relation.
+After a rejected decision, identify the failed prerequisite from the feedback and
+the accepted evidence before retrying. If supporting evidence already exists and
+only its binding or citation is wrong, repair that binding or citation without
+another tool call. If the prerequisite is still observable and a relevant new call
+fits the permissions and remaining budgets, collect it and reassess. If it cannot
+be established from this run, reconsider the claim, hypothesis assessments and
+terminal status; adding more evidence IDs does not establish a missing fact.
+
+Retry the same substantive claim only when the correction addresses the rejected
+prerequisite. A rejected healthy claim does not prove an incident, and a rejected
+incident claim does not prove health. Confirm only when the alternative conclusion
+has its own required evidence; otherwise retain compatible hypotheses and declare
+justified unresolved gaps. A rejection does not prohibit a later permitted probe,
+but never exceed the existing budgets or repeat a blocked business call.

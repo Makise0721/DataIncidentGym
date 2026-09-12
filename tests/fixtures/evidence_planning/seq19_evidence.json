@@ -1,0 +1,254 @@
+{
+  "incident_case_id": "silent_payment_drop_partition_b",
+  "records": [
+    {
+      "content": {
+        "dbt_exit_code": 0,
+        "failed_nodes": [],
+        "kind": "DBT_RUN_RESULTS",
+        "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+        "run_status": "SUCCEEDED",
+        "skipped_nodes": []
+      },
+      "content_digest": "f045246393207cbff4af26d6d7dc8acef77dd9a385efa8490300a2b227e3f335",
+      "evidence_id": "ev_62387eb5b049260fa71eaf613dd459abfe840ece281de7827e4c394a4d916f66",
+      "evidence_type": "DBT_RUN_RESULTS",
+      "observed_at": "2026-09-11T14:40:06.446724Z",
+      "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+      "source": "dbt_artifact:run_results.json",
+      "subject": "e147f5e9b21a862de6ba38d90ebf1fb5"
+    },
+    {
+      "content": {
+        "kind": "RELATION_DATA_PROFILE",
+        "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+        "profile_spec_version": "profile_spec.v1",
+        "relation_name": "raw_payments",
+        "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+        "snapshot": {
+          "business_fingerprint_duplicates": [
+            {
+              "duplicate_count": 0,
+              "name": "order_payment_amount"
+            }
+          ],
+          "business_key_duplicates": [
+            {
+              "duplicate_count": 0,
+              "name": "id"
+            }
+          ],
+          "columns": [
+            {
+              "column_name": "id",
+              "distinct_count": 111,
+              "null_count": 0
+            },
+            {
+              "column_name": "order_id",
+              "distinct_count": 97,
+              "null_count": 0
+            },
+            {
+              "column_name": "payment_method",
+              "distinct_count": 4,
+              "null_count": 0
+            },
+            {
+              "column_name": "amount",
+              "distinct_count": 30,
+              "null_count": 0
+            }
+          ],
+          "groups": [
+            {
+              "columns": [
+                "payment_method"
+              ],
+              "counts": [
+                32,
+                13,
+                55,
+                11
+              ],
+              "name": "payment_method",
+              "values": [
+                [
+                  "bank_transfer"
+                ],
+                [
+                  "coupon"
+                ],
+                [
+                  "credit_card"
+                ],
+                [
+                  "gift_card"
+                ]
+              ]
+            }
+          ],
+          "relation_name": "raw_payments",
+          "relationship_violations": [
+            {
+              "name": "order_id_to_raw_orders_id",
+              "violation_count": 0
+            }
+          ],
+          "row_count": 111
+        }
+      },
+      "content_digest": "ed0a57faba7d95eaa78901bf7adfc8e398ac608cddedfe68f71ddb389e949667",
+      "evidence_id": "ev_db86400ccf308e0118e9d2d66eb72588bee9ba8b9477e17583b5daea5924f235",
+      "evidence_type": "RELATION_DATA_PROFILE",
+      "observed_at": "2026-09-11T14:40:20.020668Z",
+      "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+      "source": "postgres_profile_snapshot",
+      "subject": "raw_payments"
+    },
+    {
+      "content": {
+        "kind": "RELATION_DATA_PROFILE",
+        "profile_spec_sha256": "e7853446064b948a93f12e7ba542ead86d0f0b71822566ff9632927d22bb1164",
+        "profile_spec_version": "profile_spec.v1",
+        "relation_name": "raw_orders",
+        "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+        "snapshot": {
+          "business_fingerprint_duplicates": [],
+          "business_key_duplicates": [
+            {
+              "duplicate_count": 0,
+              "name": "id"
+            }
+          ],
+          "columns": [
+            {
+              "column_name": "id",
+              "distinct_count": 99,
+              "null_count": 0
+            },
+            {
+              "column_name": "user_id",
+              "distinct_count": 62,
+              "null_count": 0
+            },
+            {
+              "column_name": "order_date",
+              "distinct_count": 69,
+              "null_count": 0
+            },
+            {
+              "column_name": "status",
+              "distinct_count": 5,
+              "null_count": 0
+            }
+          ],
+          "groups": [],
+          "relation_name": "raw_orders",
+          "relationship_violations": [
+            {
+              "name": "user_id_to_raw_customers_id",
+              "violation_count": 0
+            },
+            {
+              "name": "id_to_raw_payments_order_id",
+              "violation_count": 2
+            }
+          ],
+          "row_count": 99
+        }
+      },
+      "content_digest": "71622eed3c92c3aa680bc942a26f43072424e8a5c9d840492372eacc2c16e6f7",
+      "evidence_id": "ev_657bbc6792de224f09ce7543d6e4f0f015724d45aeb04e11f349635ce8e053fe",
+      "evidence_type": "RELATION_DATA_PROFILE",
+      "observed_at": "2026-09-11T14:40:20.063316Z",
+      "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+      "source": "postgres_profile_snapshot",
+      "subject": "raw_orders"
+    },
+    {
+      "content": {
+        "columns": [
+          {
+            "data_type": "integer",
+            "name": "id",
+            "nullable": true,
+            "ordinal_position": 1
+          },
+          {
+            "data_type": "integer",
+            "name": "order_id",
+            "nullable": true,
+            "ordinal_position": 2
+          },
+          {
+            "data_type": "text",
+            "name": "payment_method",
+            "nullable": true,
+            "ordinal_position": 3
+          },
+          {
+            "data_type": "integer",
+            "name": "amount",
+            "nullable": true,
+            "ordinal_position": 4
+          },
+          {
+            "data_type": "text",
+            "name": "source_batch_note",
+            "nullable": true,
+            "ordinal_position": 5
+          }
+        ],
+        "kind": "RELATION_SCHEMA",
+        "relation_name": "raw_payments",
+        "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+        "schema_name": "analytics"
+      },
+      "content_digest": "faf7a8329b6be1e5ece6660cb09406d0a17c37b257035525b5fe3d1546344524",
+      "evidence_id": "ev_1b4bc54b67bbeccc3adaa09bfa32f12667fdeda29a4a2caf3ea9c5e5fd367187",
+      "evidence_type": "RELATION_SCHEMA",
+      "observed_at": "2026-09-11T14:40:19.961340Z",
+      "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+      "source": "postgres_catalog",
+      "subject": "analytics.raw_payments"
+    },
+    {
+      "content": {
+        "direction": "downstream",
+        "kind": "DBT_LINEAGE",
+        "node_id": "seed.jaffle_shop.raw_payments",
+        "related_nodes": [
+          {
+            "distance": 1,
+            "name": "stg_payments",
+            "node_id": "model.jaffle_shop.stg_payments",
+            "resource_type": "model"
+          },
+          {
+            "distance": 2,
+            "name": "customers",
+            "node_id": "model.jaffle_shop.customers",
+            "resource_type": "model"
+          },
+          {
+            "distance": 2,
+            "name": "orders",
+            "node_id": "model.jaffle_shop.orders",
+            "resource_type": "model"
+          }
+        ],
+        "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5"
+      },
+      "content_digest": "e45d0d585c9c8b2c9eb4e3df276a5eeea0ee7b15e3d12069fe46e1ec5e424d65",
+      "evidence_id": "ev_1f24917a04810d91c680cde2906532ea9ef0826df9585b36ce2725f95929e0b9",
+      "evidence_type": "DBT_LINEAGE",
+      "observed_at": "2026-09-11T14:40:02.678449Z",
+      "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+      "source": "dbt_artifact:manifest.json",
+      "subject": "seed.jaffle_shop.raw_payments"
+    }
+  ],
+  "run_id": "e147f5e9b21a862de6ba38d90ebf1fb5",
+  "schema_version": "p1.evidence.v1"
+}
