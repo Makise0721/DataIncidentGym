@@ -96,10 +96,10 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v17"
+KERNEL_PROMPT_VERSION = "p1.kernel.v18"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v18"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v19"
 
 # The model submits one of three terminal-shaped payloads. The name and the
 # description are part of the model-visible contract, so both are recorded in
@@ -116,7 +116,8 @@ _KERNEL_OUTPUT_TOOLS: tuple[tuple[str, str, type[BaseModel]], ...] = (
         "final_result_confirmed",
         "Submit a confirmed incident: select the supported hypothesis and cite the "
         "root cause together with every affected asset the accepted evidence "
-        "supports.",
+        "supports. Affected-asset values are full node identifiers exactly as the "
+        "cited evidence lists them.",
         ConfirmedSubmission,
     ),
     (
@@ -1588,6 +1589,7 @@ def _kernel_retry_message(
     *,
     provable_relations: tuple[str, ...] | None = None,
     provable_lineage_nodes: tuple[str, ...] | None = None,
+    detail: tuple[str, ...] = (),
 ) -> str:
     """Model-facing feedback for one rejection code.
 
@@ -1720,6 +1722,11 @@ def _kernel_retry_message(
             "distance-1 upstream model of the failed node. A profile cannot support an "
             "asset value, so remove any asset claim whose value no cited record names."
         ),
+        "ASSET_CLAIM_NAME_NOT_IDENTIFIER": (
+            "Each affected-asset value must be the full node identifier exactly as the "
+            "cited evidence lists it; a bare node name is not an asset value. Resubmit "
+            "the same claim with that node_id in place of the name."
+        ),
         "CLAIM_EVIDENCE_UNBOUND": (
             "Cite only evidence IDs from the accepted-evidence list that belong to a "
             "closed gap; an unknown or still-open ID rejects the decision."
@@ -1811,6 +1818,17 @@ def _kernel_retry_message(
     if code == "NODE_ARGUMENT_NOT_PROVEN" and provable_lineage_nodes:
         listed = ", ".join(provable_lineage_nodes)
         message += f" Lineage nodes callable in this run: {listed}."
+    if code == "ASSET_CLAIM_NAME_NOT_IDENTIFIER":
+        if detail:
+            message += (
+                f" The records that claim cites map that name to exactly one node: "
+                f"use {detail[0]}."
+            )
+        else:
+            message += (
+                " The records that claim cite map that name to several nodes; pick the "
+                "exact node_id yourself."
+            )
     return f"{code}: {message}"
 
 
@@ -2583,7 +2601,9 @@ class DiagnosisRunner:
                             rejected_decision=rejected_decision,
                         )
                     )
-                    raise ModelRetry(_kernel_retry_message(error.code)) from None
+                    raise ModelRetry(
+                        _kernel_retry_message(error.code, detail=error.detail)
+                    ) from None
                 current.outcome = outcome
                 current.trace.append(
                     EvidenceGateTraceEvent(

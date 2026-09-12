@@ -156,6 +156,71 @@ def validate_root_cause_evidence(
         _require_incident_node_and_upstream_evidence(context, root_records)
 
 
+def _cited_asset_supported(
+    node_errors: tuple[DbtNodeErrorFact, ...],
+    records: list[EvidenceRecord],
+    value: str,
+) -> bool:
+    """True when the value is a node_id the original binding rules accept."""
+
+    if any(
+        isinstance(record.content, DbtNodeErrorFact)
+        and record.content.node_id == value
+        for record in records
+    ):
+        return True
+    for record in records:
+        content = record.content
+        if not isinstance(content, DbtLineageFact):
+            continue
+        if content.direction == "downstream" and any(
+            node.node_id == value for node in content.related_nodes
+        ):
+            return True
+        if (
+            content.direction == "upstream"
+            and content.node_id in {error.node_id for error in node_errors}
+            and any(
+                node.node_id == value
+                and node.resource_type == "model"
+                and node.distance == 1
+                for node in content.related_nodes
+            )
+        ):
+            return True
+    return False
+
+
+def _legal_name_mappings(
+    node_errors: tuple[DbtNodeErrorFact, ...],
+    records: list[EvidenceRecord],
+    name: str,
+) -> set[str]:
+    """Node_ids a bare name maps to under the original binding rules.
+
+    A name only maps when the very node, cited in the very record, would pass
+    the original direction/distance/resource-type/failed-node conditions with
+    its node_id; unsupported same-name nodes never enter the result.
+    """
+
+    legal: set[str] = set()
+    for record in records:
+        content = record.content
+        if not isinstance(content, DbtLineageFact):
+            continue
+        for node in content.related_nodes:
+            if node.name != name:
+                continue
+            if content.direction == "downstream" or (
+                content.direction == "upstream"
+                and content.node_id in {error.node_id for error in node_errors}
+                and node.resource_type == "model"
+                and node.distance == 1
+            ):
+                legal.add(node.node_id)
+    return legal
+
+
 def validate_asset_claims(
     context: ValidationContext,
     asset_claims: tuple[ClaimEvidence, ...],
@@ -169,31 +234,16 @@ def validate_asset_claims(
     )
     for claim in asset_claims:
         records = [inventory[evidence_id] for evidence_id in claim.evidence_ids]
-        if not any(
-            isinstance(record.content, DbtNodeErrorFact)
-            and record.content.node_id == claim.value
-            for record in records
-        ) and not any(
-            isinstance(record.content, DbtLineageFact)
-            and record.content.direction == "downstream"
-            and any(
-                node.node_id == claim.value or node.name == claim.value
-                for node in record.content.related_nodes
-            )
-            for record in records
-        ) and not any(
-            isinstance(record.content, DbtLineageFact)
-            and record.content.direction == "upstream"
-            and record.content.node_id in {error.node_id for error in node_errors}
-            and any(
-                node.node_id == claim.value
-                and node.resource_type == "model"
-                and node.distance == 1
-                for node in record.content.related_nodes
-            )
-            for record in records
-        ):
-            raise KernelError("ASSET_CLAIM_EVIDENCE_INCOMPATIBLE") from None
+        if _cited_asset_supported(node_errors, records, claim.value):
+            continue
+        legal = _legal_name_mappings(node_errors, records, claim.value)
+        if len(legal) == 1:
+            raise KernelError(
+                "ASSET_CLAIM_NAME_NOT_IDENTIFIER", detail=(next(iter(legal)),)
+            ) from None
+        if len(legal) > 1:
+            raise KernelError("ASSET_CLAIM_NAME_NOT_IDENTIFIER") from None
+        raise KernelError("ASSET_CLAIM_EVIDENCE_INCOMPATIBLE") from None
 
 
 def validate_health_run_evidence(context: ValidationContext) -> None:

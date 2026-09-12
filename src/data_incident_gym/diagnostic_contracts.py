@@ -490,9 +490,18 @@ class KernelOutcome(BaseModel):
 
 
 class KernelError(RuntimeError):
-    def __init__(self, code: str, *, fingerprint: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        fingerprint: str | None = None,
+        detail: tuple[str, ...] = (),
+    ) -> None:
         self.code = code
         self.fingerprint = fingerprint
+        # Only public, model-cited evidence content may travel here; the value
+        # feeds the retry message and never reaches trace events.
+        self.detail = detail
         super().__init__(code)
         self.__cause__ = None
         self.__context__ = None

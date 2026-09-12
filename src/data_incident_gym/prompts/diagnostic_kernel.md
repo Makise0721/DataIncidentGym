@@ -144,7 +144,9 @@ to a historical range for that current partition.
 When the decision is CONFIRMED, check the affected assets against the accepted evidence
 before submitting, not against whatever the current claims happen to cite: citing fewer
 records does not shrink the set you must check, and each asset claim must then cite the
-records that support it. This is the project's scope convention for a confirmed incident,
+records that support it. Asset values are node identifiers: use the full node_id exactly
+as the cited evidence lists it; a bare relation name or short node name is not a valid
+asset value. This is the project's scope convention for a confirmed incident,
 so apply it from the public evidence only:
 - a failed model is an affected asset together with every model its accepted downstream
   lineage names; the failed model itself never appears in its own lineage neighbours, so
