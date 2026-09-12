@@ -869,8 +869,7 @@ def test_kernel_prompt_separates_history_receipts_from_a_watermark_declaration()
     # Independent declaration, with its own subject rule.
     assert (
         "Separately check whether a decisive watermark, event-identity or transformation fact"
-        " in flat"
-    )
+    ) in flat
     assert "Relation receipts do not automatically create these declarations" in flat
     assert "A failed lookup alone does not prove that every related fact is unobservable" in flat
     assert "Preserve other justified gaps when correcting an invalid item" in flat
@@ -879,8 +878,7 @@ def test_kernel_prompt_separates_history_receipts_from_a_watermark_declaration()
     assert "Do not infer this subject merely from membership in the brief's subject list" in flat
     assert (
         "do not declare the gap when accepted evidence already proves the required boundary"
-        " in flat"
-    )
+    ) in flat
 
 
 def test_kernel_prompt_requires_one_receipt_per_decisive_history_gap() -> None:

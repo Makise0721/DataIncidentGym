@@ -7,9 +7,12 @@ evaluator. Fixtures are independent copies under
 ``tests/fixtures/evidence_planning``, so nothing here reads ``artifacts/`` or
 ``.dig/``.
 
-Scope: these tests prove the routes exist, fit the budget and satisfy the
-contract. They do **not** show that a model would choose them — the prompt rules
-are pinned separately by text contracts.
+Scope: the replays drive the kernel's own ``prepare_tool`` / ``record_tool_result``
+/ ``finalize`` path and score through the real evaluator on a hand-built trace, so
+they cover the kernel contract, the tool budget and the acceptance checks. They do
+**not** exercise the runner or SDK wiring, model request scheduling, or the route
+choice a model would make — the prompt rules are pinned separately by text
+contracts.
 """
 
 from __future__ import annotations
@@ -130,6 +133,14 @@ def _inputs(seq: int) -> dict:
     return json.loads((FIXTURES / f"seq{seq}_inputs.json").read_text(encoding="utf-8"))
 
 
+def _observation_subject(inputs: dict, kind: str) -> str:
+    """The subject the public brief binds to one named incident observation."""
+
+    return next(
+        item["subject"] for item in inputs["observations"] if item["kind"] == kind
+    )
+
+
 def _record_index(seq: int) -> dict[tuple[str, str], EvidenceRecord]:
     payload = json.loads((FIXTURES / f"seq{seq}_evidence.json").read_text(encoding="utf-8"))
     index: dict[tuple[str, str], EvidenceRecord] = {}
@@ -148,8 +159,8 @@ def _generated_lineage() -> EvidenceRecord:
     return EvidenceRecord.model_validate(payload[0])
 
 
-def _kernel(seq: int) -> DiagnosticKernel:
-    inputs = _inputs(seq)
+def _kernel(seq: int, inputs: dict | None = None) -> DiagnosticKernel:
+    inputs = inputs or _inputs(seq)
     observations = tuple(
         (item["kind"], item["subject"], item["value"]) for item in inputs["observations"]
     )
@@ -408,19 +419,22 @@ def _seq19_plan(second_probe: bool = True) -> list[tuple]:
     return plan
 
 
-def _seq19_decision(with_watermark: bool) -> KernelDecision:
+def _seq19_decision(with_watermark: bool, inputs: dict | None = None) -> KernelDecision:
+    """The declared subject is read from the public settled-window observation."""
+
+    source = inputs or _inputs(19)
     declarations: tuple[dict[str, str], ...] = ()
     if with_watermark:
         declarations = (
             {
                 "evidence_kind": "INGESTION_WATERMARK",
-                "subject": "raw_orders",
+                "subject": _observation_subject(source, "SETTLED_PAYMENT_WINDOW_END"),
                 "reason_code": "NOT_OBSERVABLE",
             },
         )
     return KernelDecision(
         status="INSUFFICIENT_EVIDENCE",
-        run_id=_inputs(19)["source_run_id"],
+        run_id=source["source_run_id"],
         unresolved_evidence=declarations,
         summary="Payment and order history are not observable in this run.",
         recommended_actions=("Grant read access for payment history.",),
@@ -477,6 +491,59 @@ def test_seq19_receipts_alone_do_not_declare_the_watermark() -> None:
         check for check in evaluation.checks if check.code.value == GAP_CHECK
     )
     assert gap_check.actual == (GAP_MATRIX_INVALID,)
+
+
+def _seq19_role_swapped_inputs() -> dict:
+    """The same public brief with the settled-window role held by the other relation.
+
+    Both relations stay legitimate incident subjects, and ``raw_orders`` is now
+    listed first, so a subject taken from a name or from the brief's order would
+    disagree with the observation.
+    """
+
+    inputs = _inputs(19)
+    inputs["incident_subjects"] = [
+        "seed.jaffle_shop.raw_payments",
+        "raw_orders",
+        "raw_payments",
+        "payment_count_by_order_date",
+    ]
+    inputs["observations"] = [
+        {**observation, "subject": "raw_payments"}
+        if observation["kind"] == "SETTLED_PAYMENT_WINDOW_END"
+        else observation
+        for observation in inputs["observations"]
+    ]
+    return inputs
+
+
+def test_seq19_watermark_subject_follows_the_public_role_not_the_name() -> None:
+    """Both relations are legitimate subjects in both briefs, so only the
+    settled-window observation decides which one the declaration names. The swapped
+    brief is judged by the kernel alone: this is public derivability and
+    expressibility, never the original case's private expectations."""
+
+    original = _inputs(19)
+    swapped = _seq19_role_swapped_inputs()
+
+    def rank(inputs: dict) -> dict[str, int]:
+        return {name: index for index, name in enumerate(inputs["incident_subjects"])}
+
+    assert rank(original)["raw_payments"] < rank(original)["raw_orders"]
+    assert rank(swapped)["raw_orders"] < rank(swapped)["raw_payments"]
+    assert _observation_subject(original, "SETTLED_PAYMENT_WINDOW_END") == "raw_orders"
+    assert _observation_subject(swapped, "SETTLED_PAYMENT_WINDOW_END") == "raw_payments"
+
+    kernel = _kernel(19, swapped)
+    _replay(19, kernel, _seq19_plan())
+    outcome = kernel.finalize(_seq19_decision(True, swapped))
+
+    declared = [(item.evidence_kind, item.subject) for item in outcome.unresolved_evidence]
+    assert declared == [
+        ("RELATION_HISTORY", "raw_payments"),
+        ("RELATION_HISTORY", "raw_orders"),
+        ("INGESTION_WATERMARK", "raw_payments"),
+    ]
 
 
 # -------------------------------------------------------------------- seq50
@@ -539,14 +606,47 @@ def _seq50_decision(kernel: DiagnosticKernel, assets: tuple[str, ...]) -> Kernel
     )
 
 
-def test_seq50_six_calls_confirm_and_declare_all_three_assets() -> None:
-    kernel = _kernel(50)
-    log = _replay(50, kernel, _seq50_plan())
-    assets = tuple(
+def _seq50_assets() -> tuple[str, ...]:
+    return tuple(
         node.node_id
         for node in _record_index(50)[DOWNSTREAM_LINEAGE].content.related_nodes
         if node.resource_type == "model"
     )
+
+
+def _seq50_payment_series():
+    return _record_index(50)[_history("raw_payments")].content.snapshot.histories[0]
+
+
+def _seq50_health_decision(kernel: DiagnosticKernel) -> KernelDecision:
+    series = _seq50_payment_series()
+    return KernelDecision(
+        status="NO_INCIDENT",
+        run_id=_inputs(50)["source_run_id"],
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.HEALTH_STATE,
+                value="raw_payments",
+                relation_name="raw_payments",
+                history_name=series.name,
+                bucket="2018-03-23",
+                current_value=3,
+                evidence_ids=tuple(r.evidence_id for r in kernel.evidence_records),
+            ),
+        ),
+        summary="The payment series is healthy.",
+        recommended_actions=(),
+        confidence=0.4,
+    )
+
+
+def test_seq50_six_calls_confirm_and_declare_all_three_assets() -> None:
+    """The correct incident path submitted straight to a fresh kernel; the
+    rejection-then-recovery control on a single kernel is the next test."""
+
+    kernel = _kernel(50)
+    log = _replay(50, kernel, _seq50_plan())
+    assets = _seq50_assets()
     outcome, snapshot, evaluation = _evaluate(50, kernel, _seq50_decision(kernel, assets), log)
 
     assert snapshot.tool_calls_used == 6
@@ -566,30 +666,36 @@ def test_seq50_health_claim_for_the_payment_relation_is_structurally_refused() -
     log = _replay(50, kernel, _seq50_plan())
     assert len(log) == 6
 
-    series = _record_index(50)[_history("raw_payments")].content.snapshot.histories[0]
+    series = _seq50_payment_series()
     assert series.watermark_column is None
     assert series.watermark_value is None
     assert series.sla_seconds is None
 
-    decision = KernelDecision(
-        status="NO_INCIDENT",
-        run_id=_inputs(50)["source_run_id"],
-        claims=(
-            ClaimEvidence(
-                kind=ClaimKind.HEALTH_STATE,
-                value="raw_payments",
-                relation_name="raw_payments",
-                history_name=series.name,
-                bucket="2018-03-23",
-                current_value=3,
-                evidence_ids=tuple(r.evidence_id for r in kernel.evidence_records),
-            ),
-        ),
-        summary="The payment series is healthy.",
-        recommended_actions=(),
-        confidence=0.4,
-    )
     with pytest.raises(KernelError) as error:
-        kernel.finalize(decision)
+        kernel.finalize(_seq50_health_decision(kernel))
 
     assert error.value.code == "HEALTH_WATERMARK_NOT_PROVEN"
+
+
+def test_seq50_recovers_on_the_same_kernel_after_the_health_claim_is_refused() -> None:
+    """The refused healthy conclusion and the corrected incident conclusion share
+    one kernel state: the refusal leaves no accepted claim behind, and the
+    corrected decision is accepted on that same state."""
+
+    kernel = _kernel(50)
+    log = _replay(50, kernel, _seq50_plan())
+
+    with pytest.raises(KernelError) as error:
+        kernel.finalize(_seq50_health_decision(kernel))
+    assert error.value.code == "HEALTH_WATERMARK_NOT_PROVEN"
+
+    refused = kernel.snapshot(model_requests_used=len(log))
+    assert refused.final_status is None
+    assert refused.claims == ()
+
+    outcome, _snapshot, evaluation = _evaluate(
+        50, kernel, _seq50_decision(kernel, _seq50_assets()), log
+    )
+
+    assert outcome.status.value == "CONFIRMED"
+    assert evaluation.status is EvaluationStatus.PASSED, _failed_checks(evaluation)
