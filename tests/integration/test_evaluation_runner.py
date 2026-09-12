@@ -71,7 +71,7 @@ def _submit(agent_info: AgentInfo, payload: dict[str, object], call_id: str) -> 
 
     status = payload.get("status")
     if not isinstance(status, str) or len(agent_info.output_tools) == 1:
-        return _submit(agent_info, payload, call_id)
+        return _tool_call(agent_info.output_tools[0].name, payload, call_id)
     shaped = {
         key: value
         for key, value in payload.items()
@@ -82,6 +82,13 @@ def _submit(agent_info: AgentInfo, payload: dict[str, object], call_id: str) -> 
             {"evidence_kind": item["evidence_kind"], "subject": item["subject"]}
             for item in payload.get("unresolved_evidence", [])  # type: ignore[union-attr]
             if not str(item["evidence_kind"]).startswith("RELATION_")
+        ]
+    if status == "NO_INCIDENT":
+        # The health tool fixes the claim kind and value, so a decision-shaped
+        # claim is reduced to the facts it accepts.
+        shaped["claims"] = [
+            {key: value for key, value in claim.items() if key not in ("kind", "value")}
+            for claim in payload.get("claims", [])  # type: ignore[union-attr]
         ]
     tool = agent_info.output_tools[_KERNEL_TOOL_BY_STATUS[status]]
     return _tool_call(tool.name, shaped, call_id)
