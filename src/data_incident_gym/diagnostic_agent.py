@@ -99,7 +99,7 @@ BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v17"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v17"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v18"
 
 # The model submits one of three terminal-shaped payloads. The name and the
 # description are part of the model-visible contract, so both are recorded in
@@ -1411,6 +1411,8 @@ def _overflow(items: Sequence[object], limit: int) -> int:
     return max(0, len(items) - limit)
 
 
+_MAX_RECEIPT_CANDIDATES = 12
+
 _RELATION_EVIDENCE_TYPES = {
     "get_relation_schema": EvidenceType.RELATION_SCHEMA,
     "get_relation_data_profile": EvidenceType.RELATION_DATA_PROFILE,
@@ -1448,9 +1450,57 @@ def _uncollected_relations(kernel: DiagnosticKernel) -> dict[str, list[str]]:
     }
 
 
-def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState) -> str:
+def _unreceipted_relation_candidates(
+    kernel: DiagnosticKernel,
+    snapshot: InvestigationState,
+    *,
+    enabled_tools: frozenset[str],
+    limit: int = _MAX_RECEIPT_CANDIDATES,
+) -> tuple[list[dict[str, str]], int]:
+    """Public relation/tool pairs that may not be read and have no receipt yet.
+
+    The relation set is the union of the enabled relation tools' own public
+    whitelists, so every name has a public source and nothing is guessed from
+    free text. A pair is listed only when that tool does not allow the relation
+    and no call for the pair was recorded; since a refused probe records a
+    blocked gap, that single check also removes the pairs that already hold a
+    receipt. The projection states a fact about missing receipts, not that a
+    probe is warranted. Candidates are sorted and truncated with a count, so a
+    shortened list is never presented as complete.
+    """
+
+    whitelists = {
+        tool_name: relations
+        for tool_name, relations in kernel.provable_relations_by_tool().items()
+        if tool_name in enabled_tools
+    }
+    known_relations = sorted(
+        {relation for relations in whitelists.values() for relation in relations}
+    )
+    attempted = {(gap.tool_name, gap.subject) for gap in snapshot.gaps}
+    candidates = [
+        {"tool_name": tool_name, "relation_name": relation}
+        for tool_name, relations in whitelists.items()
+        for relation in known_relations
+        if relation not in relations and (tool_name, relation) not in attempted
+    ]
+    candidates.sort(key=lambda item: (item["tool_name"], item["relation_name"]))
+    return candidates[:limit], max(0, len(candidates) - limit)
+
+
+def _kernel_state_summary(
+    kernel: DiagnosticKernel,
+    snapshot: InvestigationState,
+    *,
+    enabled_tools: frozenset[str],
+) -> str:
     """Project the model-visible investigation ledger for the current request."""
 
+    candidates, omitted = _unreceipted_relation_candidates(
+        kernel,
+        snapshot,
+        enabled_tools=enabled_tools,
+    )
     payload = {
         "hypotheses": [
             {"hypothesis_id": item.hypothesis_id, "root_cause_code": item.root_cause_code}
@@ -1480,6 +1530,8 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
             for tool_name, relations in kernel.provable_relations_by_tool().items()
         },
         "uncollected_relations": _uncollected_relations(kernel),
+        "unreceipted_relation_candidates": candidates,
+        "unreceipted_relation_candidates_omitted": omitted,
         "provable_lineage_nodes": list(kernel.provable_lineage_nodes()),
         "model_requests_remaining": snapshot.model_requests_remaining,
         "tool_calls_remaining": snapshot.tool_calls_remaining,
@@ -1500,7 +1552,13 @@ def _kernel_state_summary(kernel: DiagnosticKernel, snapshot: InvestigationState
         "already-recorded fingerprint for the same tool and arguments, or a recorded "
         "receipt for a blocked relation can still block a call, while a request rejected "
         "while it was being prepared is corrected per its own feedback and does not by "
-        "itself make the relation unusable. One boundary probe per blocked-relevant "
+        "itself make the relation unusable. unreceipted_relation_candidates names the "
+        "public relation/tool pairs that tool may not read and for which no permission "
+        "receipt is recorded yet; it is a fact about missing receipts, not a work list, "
+        "and the candidate count says how many further pairs were omitted. Whether a "
+        "candidate is decisive is judged from the public evidence, and a candidate grants "
+        "no call: the enabled tools, the budgets and the duplicate-call rules still decide "
+        "what can be attempted. One boundary probe per blocked-relevant "
         "relation is allowed to record its permission receipt; it counts against the "
         "budget and returns no data. Budget remaining requests conservatively."
     )
@@ -1518,7 +1576,11 @@ def _kernel_ledger_instructions(ctx: RunContext[_RunState]) -> str | None:
     if kernel is None:
         return None
     snapshot = kernel.snapshot(model_requests_used=ctx.deps.usage.requests)
-    return _kernel_state_summary(kernel, snapshot)
+    return _kernel_state_summary(
+        kernel,
+        snapshot,
+        enabled_tools=frozenset(_enabled_tool_names(ctx.deps.strategy)),
+    )
 
 
 def _kernel_retry_message(

@@ -584,7 +584,11 @@ def test_ledger_text_and_kernel_rejection_agree_on_relation_allowlist() -> None:
     )
     kernel.record_tool_result(prepared, (lineage,))
 
-    summary = _kernel_state_summary(kernel, kernel.snapshot(model_requests_used=0))
+    summary = _kernel_state_summary(
+        kernel,
+        kernel.snapshot(model_requests_used=0),
+        enabled_tools=frozenset(TOOL_NAMES),
+    )
     ledger = json.loads(summary.splitlines()[1])
 
     assert "already returned by accepted evidence" not in summary

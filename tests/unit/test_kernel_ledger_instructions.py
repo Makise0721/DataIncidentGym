@@ -26,6 +26,13 @@ from data_incident_gym.evidence import (
 )
 from data_incident_gym.run_context import IncidentBrief
 
+# The ledger projection is built for the enabled relation tools.
+_RELATION_TOOL_NAMES = (
+    "get_relation_schema",
+    "get_relation_data_profile",
+    "get_relation_history",
+)
+
 RUN_ID = "c" * 32
 MODEL_BASE_URL = "http://127.0.0.1:11434/v1"
 LEDGER_HEADER = "CURRENT INVESTIGATION LEDGER"
@@ -494,7 +501,11 @@ def test_ledger_explanation_limits_what_blocks_a_listed_relation() -> None:
     from data_incident_gym.diagnostic_agent import _kernel_state_summary
 
     kernel = _projection_kernel()
-    summary = _kernel_state_summary(kernel, kernel.snapshot(model_requests_used=0))
+    summary = _kernel_state_summary(
+        kernel,
+        kernel.snapshot(model_requests_used=0),
+        enabled_tools=frozenset(_RELATION_TOOL_NAMES),
+    )
 
     assert "not what is callable" in summary
     assert "a spent tool budget" in summary
@@ -646,7 +657,11 @@ def _uncollected(kernel) -> dict[str, list[str]]:
     from data_incident_gym.diagnostic_agent import _kernel_state_summary
 
     payload = json.loads(
-        _kernel_state_summary(kernel, kernel.snapshot(model_requests_used=0)).splitlines()[1]
+        _kernel_state_summary(
+            kernel,
+            kernel.snapshot(model_requests_used=0),
+            enabled_tools=frozenset(_RELATION_TOOL_NAMES),
+        ).splitlines()[1]
     )
     return payload["uncollected_relations"]
 
@@ -711,7 +726,11 @@ def test_uncollected_projection_does_not_mutate_kernel_state() -> None:
 
     kernel = _projection_kernel()
     before = kernel.snapshot(model_requests_used=0)
-    _kernel_state_summary(kernel, before)
-    _kernel_state_summary(kernel, kernel.snapshot(model_requests_used=0))
+    _kernel_state_summary(kernel, before, enabled_tools=frozenset(_RELATION_TOOL_NAMES))
+    _kernel_state_summary(
+        kernel,
+        kernel.snapshot(model_requests_used=0),
+        enabled_tools=frozenset(_RELATION_TOOL_NAMES),
+    )
 
     assert kernel.snapshot(model_requests_used=0) == before
