@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
@@ -491,6 +492,50 @@ def test_seq19_receipts_alone_do_not_declare_the_watermark() -> None:
         check for check in evaluation.checks if check.code.value == GAP_CHECK
     )
     assert gap_check.actual == (GAP_MATRIX_INVALID,)
+
+
+def test_seq19_open_gap_close_out_keeps_the_gate_and_cannot_pass_the_gap_check() -> None:
+    """A call that was accepted but never recorded leaves an OPEN gap: it still
+    satisfies the close-out gate, but nothing may be declared from it. With no
+    receipt and no independent fact the Diagnosis contract refuses the abstention,
+    so an unproven close-out cannot be assembled into a result.
+
+    This pins the contract, not the runner: the assembly below is hand-built, and
+    whether an abnormal exit can leave a gap OPEN is not established here."""
+
+    kernel = _kernel(19)
+    log = _replay(
+        19,
+        kernel,
+        [
+            _call("LOCATE_FAILURE", "get_dbt_run_results", RUN_RESULTS, hyps=PAYMENT_HYPS),
+            _lineage_call("downstream", DOWNSTREAM_LINEAGE),
+            _call("PROFILE_RELATION", "get_relation_data_profile", _profile("raw_payments")),
+        ],
+    )
+    kernel.prepare_tool(
+        intent=InvestigationIntent(gap_id="g_open", gap_kind=EvidenceGapKind.PROFILE_RELATION),
+        tool_name="get_relation_data_profile",
+        arguments={"relation_name": "raw_orders"},
+    )
+
+    # finalize accepts the OPEN gap; assembling the result then refuses it,
+    # because an abstention artifact must carry something it can name.
+    with pytest.raises(ValidationError, match="requires unresolved evidence"):
+        _evaluate(19, kernel, _seq19_decision(False), log)
+
+    # The gate itself is unchanged: with no open/blocked gap and no declaration
+    # a close-out is still refused outright.
+    bare = _kernel(19)
+    _replay(
+        19,
+        bare,
+        [_call("LOCATE_FAILURE", "get_dbt_run_results", RUN_RESULTS, hyps=PAYMENT_HYPS)],
+    )
+    with pytest.raises(KernelError) as error:
+        bare.finalize(_seq19_decision(False))
+
+    assert error.value.code == "INSUFFICIENCY_GAP_REQUIRED"
 
 
 def _seq19_role_swapped_inputs() -> dict:

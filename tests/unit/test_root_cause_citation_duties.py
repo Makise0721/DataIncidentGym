@@ -23,6 +23,7 @@ from data_incident_gym.diagnostic_kernel import (
     ClaimKind,
     DiagnosticKernel,
     EvidenceGapKind,
+    EvidenceGapStatus,
     Hypothesis,
     HypothesisAssessment,
     HypothesisVerdict,
@@ -950,6 +951,99 @@ def test_blocked_history_gaps_are_derived_without_a_watermark() -> None:
         ("RELATION_HISTORY", "raw_orders", "RELATION_NOT_ALLOWED"),
     ]
     assert all(item.evidence_kind != "INGESTION_WATERMARK" for item in outcome.unresolved_evidence)
+
+def _payment_kernel(**overrides) -> DiagnosticKernel:
+    return DiagnosticKernel.start(
+        run_id=RUN_ID,
+        allowed_root_cause_codes=(
+            "SOURCE_PAYMENT_INGESTION_LOSS",
+            "NORMAL_BUSINESS_PAYMENT_DECLINE",
+        ),
+        model_request_limit=8,
+        tool_call_limit=8,
+        **overrides,
+    )
+
+
+def _payment_hypotheses() -> tuple[Hypothesis, ...]:
+    return (
+        Hypothesis(hypothesis_id="h_loss", root_cause_code="SOURCE_PAYMENT_INGESTION_LOSS"),
+        Hypothesis(hypothesis_id="h_decline", root_cause_code="NORMAL_BUSINESS_PAYMENT_DECLINE"),
+    )
+
+
+def test_open_gap_close_out_derives_no_unobservable_relation_declaration() -> None:
+    """An accepted call whose result was never recorded leaves an OPEN gap, and
+    an OPEN gap proves nothing about observability: only a recorded refusal may
+    be declared. The gap itself stays OPEN."""
+
+    kernel = _payment_kernel(observable_profile_relations=("raw_orders",))
+    kernel.prepare_tool(
+        intent=InvestigationIntent(
+            gap_id="g_open",
+            gap_kind=EvidenceGapKind.PROFILE_RELATION,
+            new_hypotheses=_payment_hypotheses(),
+        ),
+        tool_name="get_relation_data_profile",
+        arguments={"relation_name": "raw_orders"},
+    )
+
+    outcome = kernel.finalize(
+        KernelDecision(
+            status="INSUFFICIENT_EVIDENCE",
+            run_id=RUN_ID,
+            summary="One prepared call never returned a recorded result.",
+            recommended_actions=(),
+            confidence=0.2,
+        )
+    )
+
+    assert outcome.unresolved_evidence == ()
+    gaps = kernel.snapshot(model_requests_used=0).gaps
+    assert [(gap.status, gap.error_code) for gap in gaps] == [(EvidenceGapStatus.OPEN, None)]
+
+
+def test_preparation_refusal_records_a_blocked_receipt_that_still_derives() -> None:
+    """A probe refused while it is being prepared is the one preparation-time
+    path that records a receipt: the attempt counts against the budget, the
+    accompanying hypotheses register, and the blocked gap is still derived at
+    close-out."""
+
+    kernel = _payment_kernel(observable_profile_relations=("raw_orders",))
+    with pytest.raises(KernelError) as error:
+        kernel.prepare_tool(
+            intent=InvestigationIntent(
+                gap_id="g_probe",
+                gap_kind=EvidenceGapKind.PROFILE_RELATION,
+                new_hypotheses=_payment_hypotheses(),
+            ),
+            tool_name="get_relation_data_profile",
+            arguments={"relation_name": "raw_payments"},
+        )
+    assert error.value.code == "RELATION_NOT_ALLOWED"
+
+    snapshot = kernel.snapshot(model_requests_used=0)
+    assert snapshot.tool_calls_used == 1
+    assert [(gap.subject, gap.status, gap.error_code) for gap in snapshot.gaps] == [
+        ("raw_payments", EvidenceGapStatus.BLOCKED, "RELATION_NOT_ALLOWED")
+    ]
+    assert [item.hypothesis_id for item in snapshot.hypotheses] == ["h_loss", "h_decline"]
+
+    outcome = kernel.finalize(
+        KernelDecision(
+            status="INSUFFICIENT_EVIDENCE",
+            run_id=RUN_ID,
+            summary="The payment profile is not observable in this run.",
+            recommended_actions=(),
+            confidence=0.2,
+        )
+    )
+
+    assert [
+        (item.evidence_kind, item.subject, item.reason_code)
+        for item in outcome.unresolved_evidence
+    ] == [("RELATION_DATA_PROFILE", "raw_payments", "RELATION_NOT_ALLOWED")]
+
 
 def test_kernel_prompt_plans_calls_against_both_budgets() -> None:
     """The planning rule replaces unconditional batching: calls are chosen by the

@@ -707,6 +707,9 @@ class DiagnosticKernel:
         self._final_status = KernelFinalStatus.INSUFFICIENT_EVIDENCE
         self._gate_reason = "INSUFFICIENT_EVIDENCE"
         self._revision += 1
+        # Only a recorded refusal proves a relation cannot be queried. An OPEN
+        # gap is an accepted call whose result was never recorded, so it says
+        # nothing about observability and must not be declared as unobservable.
         derived_unresolved = tuple(
             UnresolvedEvidence(
                 evidence_kind=(
@@ -719,12 +722,10 @@ class DiagnosticKernel:
                     )
                 ),
                 subject=gap.subject,
-                reason_code="RELATION_NOT_ALLOWED"
-                if gap.status is EvidenceGapStatus.BLOCKED
-                else "NOT_OBSERVABLE",
+                reason_code="RELATION_NOT_ALLOWED",
             )
             for gap in self._gaps
-            if gap.status in {EvidenceGapStatus.OPEN, EvidenceGapStatus.BLOCKED}
+            if gap.status is EvidenceGapStatus.BLOCKED
             and gap.gap_kind
             in {
                 EvidenceGapKind.DISCRIMINATE_SCHEMA,
