@@ -106,16 +106,12 @@ class _Tools:
 def _base_payload() -> dict[str, object]:
     return {
         "schema_version": "p1.kernel_decision.v1",
-        "status": "INSUFFICIENT_EVIDENCE",
         "run_id": RUN_ID,
-        "selected_hypothesis_id": None,
         "assessments": [],
-        "claims": [],
         "unresolved_evidence": [
             {
                 "evidence_kind": "INGESTION_WATERMARK",
                 "subject": "raw_payments",
-                "reason_code": "NOT_OBSERVABLE",
             }
         ],
         "summary": "Synthetic decision.",
@@ -433,7 +429,7 @@ async def test_kernel_rejection_with_typed_business_arguments_is_unknown(
     # Both calls parsed as JSON objects; only the type contract differs.
     assert [call.arguments_parse for call in event.call_shapes] == ["OBJECT", "OBJECT"]
     assert {call.tool_name for call in event.call_shapes} == {
-        "final_result",
+        "final_result_abstention",
         "get_dbt_run_results",
     }
     assert "<output>" in event.retry_prompt_targets

@@ -171,13 +171,13 @@ def _four_round_scripted(
     }
 
     def decision(unresolved: list[dict[str, str]]) -> dict[str, object]:
+        """The abstention submission: no status, no claims, and declarations
+        that name only independent facts; relation receipts are derived."""
+
         return {
             "schema_version": "p1.kernel_decision.v1",
-            "status": "INSUFFICIENT_EVIDENCE",
             "run_id": run_id,
-            "selected_hypothesis_id": None,
             "assessments": [],
-            "claims": [],
             "unresolved_evidence": unresolved,
             "summary": "The payment profile is not observable in this run.",
             "recommended_actions": [],
@@ -219,7 +219,8 @@ def _four_round_scripted(
                 ]
             )
         if "final-1" not in sent:
-            # Unbound declaration: rejected, so the next request is an output retry.
+            # A declaration whose subject no accepted record can bind is
+            # rejected, so the next request is an output retry.
             return ModelResponse(
                 parts=[
                     ToolCallPart(
@@ -227,9 +228,8 @@ def _four_round_scripted(
                         decision(
                             [
                                 {
-                                    "evidence_kind": "RELATION_DATA_PROFILE",
-                                    "subject": "raw_customers",
-                                    "reason_code": "NOT_OBSERVABLE",
+                                    "evidence_kind": "TRANSFORMATION_DEFINITION",
+                                    "subject": "model.jaffle_shop.unrecorded",
                                 }
                             ]
                         ),
@@ -241,15 +241,8 @@ def _four_round_scripted(
             parts=[
                 ToolCallPart(
                     agent_info.output_tools[0].name,
-                    decision(
-                        [
-                            {
-                                "evidence_kind": "RELATION_DATA_PROFILE",
-                                "subject": "raw_customers",
-                                "reason_code": "RELATION_NOT_ALLOWED",
-                            }
-                        ]
-                    ),
+                    # The blocked profile receipt is derived, not declared.
+                    decision([]),
                     tool_call_id="final-2",
                 )
             ]
@@ -386,17 +379,15 @@ def _ablation_scripted(
                 ToolCallPart(
                     agent_info.output_tools[0].name,
                     {
+                        # The abstention submission: no status, no claims, and
+                        # a declaration that names only the unobservable fact.
                         "schema_version": "p1.kernel_decision.v1",
-                        "status": "INSUFFICIENT_EVIDENCE",
                         "run_id": run_id,
-                        "selected_hypothesis_id": None,
                         "assessments": [],
-                        "claims": [],
                         "unresolved_evidence": [
                             {
                                 "evidence_kind": "INGESTION_WATERMARK",
                                 "subject": "raw_payments",
-                                "reason_code": "NOT_OBSERVABLE",
                             }
                         ],
                         "summary": "No decisive evidence was collected.",

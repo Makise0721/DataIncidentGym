@@ -222,9 +222,9 @@ def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> No
 
     assert expected == P1_ROOT_CAUSE_CODES
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
-        "p1.kernel.v16",
+        "p1.kernel.v17",
         "p1.static.v5",
-        "p1.controller.v16",
+        "p1.controller.v17",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)
@@ -572,7 +572,10 @@ async def test_output_schema_rejection_records_safe_field_path(tmp_path: Path) -
 async def test_kernel_output_enum_rejection_is_classified_and_located(
     tmp_path: Path,
 ) -> None:
-    """An invalid status literal surfaces the field path and error kind."""
+    """A submitted status surfaces the field path and error kind.
+
+    The terminal status is chosen by the output tool, so a payload that still
+    carries one is rejected on the field; the location names it."""
 
     _write_public_run(tmp_path)
 
@@ -609,32 +612,40 @@ async def test_kernel_output_enum_rejection_is_classified_and_located(
     event = _protocol_event(result)
     assert event is not None
     assert event.category == "OUTPUT_SCHEMA_REJECTED"
-    assert "status" in event.error_loc
-    assert event.error_kind == ("literal_error",)
+    assert event.error_loc == ("status",)
+    assert event.error_kind == ("extra_forbidden",)
+    assert event.error_reason == ("UNEXPECTED_DECISION_FIELD",)
 
 
 @pytest.mark.asyncio
 async def test_kernel_cross_field_contract_rejection_records_error_kind(
     tmp_path: Path,
 ) -> None:
-    """A decision that violates a model validator is classified safely."""
+    """A decision that violates a cross-entry validator is classified safely.
+
+    The submission is structurally valid; the duplicated claim pair is only
+    visible once the decision is built, so the reason code is what identifies it.
+    """
 
     _write_public_run(tmp_path)
 
     def return_bad(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        claim = {
+            "kind": "ROOT_CAUSE",
+            "value": "SOURCE_REQUIRED_FIELD_NULL",
+            "evidence_ids": ["ev_" + "0" * 64],
+        }
         return ModelResponse(
             parts=[
                 ToolCallPart(
-                    agent_info.output_tools[0].name,
+                    agent_info.output_tools[1].name,
                     {
                         "schema_version": "p1.kernel_decision.v1",
-                        "status": "CONFIRMED",
                         "run_id": RUN_ID,
-                        "selected_hypothesis_id": None,
+                        "selected_hypothesis_id": "h_loss",
                         "assessments": [],
-                        "claims": [],
-                        "unresolved_evidence": [],
-                        "summary": "CONFIRMED without a selected hypothesis.",
+                        "claims": [claim, dict(claim)],
+                        "summary": "The same claim kind and value twice.",
                         "recommended_actions": [],
                         "confidence": 0.9,
                     },
@@ -659,6 +670,7 @@ async def test_kernel_cross_field_contract_rejection_records_error_kind(
     assert event is not None
     assert event.category == "OUTPUT_SCHEMA_REJECTED"
     assert event.error_kind == ("value_error",)
+    assert event.error_reason == ("CLAIM_VALUES_DUPLICATED",)
 
 
 @pytest.mark.asyncio

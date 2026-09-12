@@ -61,6 +61,9 @@ from data_incident_gym.scenarios import (
 )
 
 RUN_ID = "a" * 32
+
+# Output tools are ordered: abstention, confirmed, health.
+_ABSTENTION_TOOL, _CONFIRMED_TOOL, _HEALTH_TOOL = 0, 1, 2
 MODEL_BASE_URL = "http://127.0.0.1:11434/v1"
 
 
@@ -366,7 +369,6 @@ async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result
     )
     final_payload = {
         "schema_version": "p1.kernel_decision.v1",
-        "status": "CONFIRMED",
         "run_id": RUN_ID,
         "selected_hypothesis_id": "h_type",
         "assessments": [
@@ -404,7 +406,6 @@ async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result
                 "evidence_ids": [records[4].evidence_id],
             },
         ],
-        "unresolved_evidence": [],
         "summary": "The payment amount source type changed.",
         "recommended_actions": ["Restore the source contract before the next build."],
         "confidence": 0.9,
@@ -433,7 +434,7 @@ async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result
         return ModelResponse(
             parts=[
                 ToolCallPart(
-                    agent_info.output_tools[0].name,
+                    agent_info.output_tools[_CONFIRMED_TOOL].name,
                     final_payload,
                     tool_call_id="final",
                 )
@@ -535,7 +536,6 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
     )
     final_payload = {
         "schema_version": "p1.kernel_decision.v1",
-        "status": "CONFIRMED",
         "run_id": RUN_ID,
         "selected_hypothesis_id": "h_type",
         "assessments": [
@@ -573,7 +573,6 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
                 "evidence_ids": [records[4].evidence_id],
             },
         ],
-        "unresolved_evidence": [],
         "summary": "The payment amount source type changed.",
         "recommended_actions": ["Restore the source contract before the next build."],
         "confidence": 0.9,
@@ -614,7 +613,7 @@ async def test_kernel_batches_multiple_business_calls_per_request(tmp_path: Path
         return ModelResponse(
             parts=[
                 ToolCallPart(
-                    agent_info.output_tools[0].name,
+                    agent_info.output_tools[_CONFIRMED_TOOL].name,
                     final_payload,
                     tool_call_id="final",
                 )

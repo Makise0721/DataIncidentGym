@@ -164,23 +164,31 @@ evidence and cite a current point that is demonstrably within the available prio
 period range. The controller validates these gates; do not claim NO_INCIDENT without the
 required evidence.
 
+Submit through the tool that owns your conclusion: the abstention tool takes no
+claims and no selected hypothesis and names only facts this run cannot observe; the
+confirmed tool takes the selected hypothesis with its root-cause and affected-asset
+claims; the health tool takes health claims for the alerted relation, history and
+bucket. Whatever the tool, submit through the one whose conclusion your evidence
+supports, and never mix their fields.
+
 Before a final decision, check whether decisive, queryable evidence remains missing
-for the competing causes. For INSUFFICIENT_EVIDENCE, separate receipt-backed gaps
-from independently unobservable facts. For each decisive schema, profile or history
-gap, reuse the existing receipt for that exact tool and subject. If none exists,
-collect normally when the relation is allowed; otherwise take the permitted boundary
-probe under the boundary rules above, provided both budgets still allow it. Never
-fabricate a receipt. Finalization derives relation declarations from recorded blocked
-gaps; one relation's receipt cannot establish another relation's gap.
+for the competing causes. Relation receipts are recorded by the controller and its
+finalization derives the relation declarations from them, so never restate a relation
+declaration yourself: to make one available, reuse the existing receipt for that exact
+tool and subject, collect normally when the relation is allowed, or take the permitted
+boundary probe under the boundary rules above, provided both budgets still allow it.
+A probe that is rejected returns no data but does record its receipt. Never claim a
+receipt you did not obtain, and never repeat a blocked call.
 
 Separately check whether a decisive watermark, event-identity or transformation fact
-is unobservable. Declare only justified independent gaps with the required reason
-and a subject supported by the public incident semantics. Relation receipts do not
-automatically create these declarations. A failed lookup alone does not prove that
-every related fact is unobservable. Preserve other justified gaps when correcting
-an invalid item. If a required receipt cannot be obtained within the remaining
-budget, do not invent it or assert that it was obtained; submit only supportable
-content, without assuming that this will satisfy every acceptance check.
+is unobservable; that judgement is yours and it is the only kind of declaration you
+submit. Name a subject the public incident semantics supports, and do not infer it
+merely from membership in the brief's subject list. A failed lookup alone does not
+prove that every related fact is unobservable, and accepted evidence that already
+proves the required boundary means there is nothing to declare. Preserve other
+justified declarations when correcting an invalid item. If a decisive receipt cannot
+be obtained within the remaining budget, close out with what the run does support
+rather than inventing the missing fact.
 
 After a rejected decision, identify the failed prerequisite from the feedback and
 the accepted evidence before retrying. If supporting evidence already exists and
@@ -192,7 +200,9 @@ terminal status; adding more evidence IDs does not establish a missing fact.
 
 Retry the same substantive claim only when the correction addresses the rejected
 prerequisite. A rejected healthy claim does not prove an incident, and a rejected
-incident claim does not prove health. Confirm only when the alternative conclusion
-has its own required evidence; otherwise retain compatible hypotheses and declare
+incident claim does not prove health. Submitting through a different tool is allowed
+when the accepted evidence supports that conclusion: a rejection is a verdict on one
+submission, not on the alternatives. Confirm only when the alternative conclusion has
+its own required evidence; otherwise retain compatible hypotheses and declare
 justified unresolved gaps. A rejection does not prohibit a later permitted probe,
 but never exceed the existing budgets or repeat a blocked business call.

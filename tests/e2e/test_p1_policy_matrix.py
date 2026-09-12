@@ -155,6 +155,48 @@ def _tool_call(name: str, arguments: dict[str, object], call_id: str) -> ModelRe
     return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
 
 
+# Kernel strategies expose three output tools in a fixed order: abstention,
+# confirmed, health. A static strategy keeps one tool whose payload is the
+# diagnosis itself.
+_KERNEL_TOOL_BY_STATUS = {
+    "INSUFFICIENT_EVIDENCE": 0,
+    "CONFIRMED": 1,
+    "NO_INCIDENT": 2,
+}
+_KERNEL_DROPPED_FIELDS = {
+    "INSUFFICIENT_EVIDENCE": ("status", "selected_hypothesis_id", "claims"),
+    "CONFIRMED": ("status", "unresolved_evidence"),
+    "NO_INCIDENT": ("status", "selected_hypothesis_id", "unresolved_evidence"),
+}
+
+
+def _submit(agent_info: AgentInfo, payload: dict[str, object], call_id: str) -> ModelResponse:
+    """Submit a decision-shaped payload through the tool that owns its status.
+
+    The kernel no longer accepts one combined decision shape, and relation
+    receipts are derived by the controller instead of being restated, so a
+    kernel payload is reshaped at the submission point. A static payload is
+    passed through unchanged.
+    """
+
+    status = payload.get("status")
+    if not isinstance(status, str) or len(agent_info.output_tools) == 1:
+        return _submit(agent_info, payload, call_id)
+    shaped = {
+        key: value
+        for key, value in payload.items()
+        if key not in _KERNEL_DROPPED_FIELDS[status]
+    }
+    if status == "INSUFFICIENT_EVIDENCE":
+        shaped["unresolved_evidence"] = [
+            {"evidence_kind": item["evidence_kind"], "subject": item["subject"]}
+            for item in payload.get("unresolved_evidence", [])  # type: ignore[union-attr]
+            if not str(item["evidence_kind"]).startswith("RELATION_")
+        ]
+    tool = agent_info.output_tools[_KERNEL_TOOL_BY_STATUS[status]]
+    return _tool_call(tool.name, shaped, call_id)
+
+
 def _intent(**values: object) -> dict[str, object]:
     binding: dict[str, object] = {
         "kernel_hypothesis_ids": [],
@@ -271,7 +313,7 @@ def _silent_insufficient_response(
             "recommended_actions": ["Collect both payment and order history boundaries."],
             "confidence": 0.2,
         }
-    return _tool_call(agent_info.output_tools[0].name, payload, "silent-insufficient")
+    return _submit(agent_info, payload, "silent-insufficient")
 
 
 def _silent_confirmed_response(
@@ -402,7 +444,7 @@ def _silent_confirmed_response(
             "recommended_actions": ["Reconcile the missing settled payment events."],
             "confidence": 0.9,
         }
-    return _tool_call(agent_info.output_tools[0].name, payload, "silent-confirmed")
+    return _submit(agent_info, payload, "silent-confirmed")
 
 
 def _silent_payment_response(
@@ -680,7 +722,7 @@ def _model_response(
                 "recommended_actions": ["Continue observing the order-volume history."],
                 "confidence": 0.95,
             }
-        return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+        return _submit(agent_info, payload, "diagnosis")
 
     if not node_errors:
         node_id = run_fact.failed_nodes[0]  # type: ignore[union-attr]
@@ -856,7 +898,7 @@ def _model_response(
                     ],
                     "confidence": 0.3,
                 }
-            return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+            return _submit(agent_info, payload, "diagnosis")
 
         source_profile_id = source_profile.evidence_id
         root_evidence_ids = [node_error_id, source_profile_id]
@@ -919,7 +961,7 @@ def _model_response(
                 "recommended_actions": ["Restore the required source field."],
                 "confidence": 0.9,
             }
-        return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+        return _submit(agent_info, payload, "diagnosis")
 
     if schema_attempts == 0:
         new_hypotheses = [
@@ -1032,7 +1074,7 @@ def _model_response(
                 "recommended_actions": ["Collect the unavailable source and transformation facts."],
                 "confidence": 0.3,
             }
-        return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+        return _submit(agent_info, payload, "diagnosis")
 
     if lineage_attempts < 2:
         tool = _tool_call(
@@ -1148,7 +1190,7 @@ def _model_response(
             "recommended_actions": ["Restore the source schema contract."],
             "confidence": 0.9,
         }
-    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+    return _submit(agent_info, payload, "diagnosis")
 
 
 def _orphan_hypotheses() -> list[dict[str, str]]:
@@ -1218,7 +1260,7 @@ def _orphan_insufficient_response(
             "recommended_actions": ["Collect order history and its ingestion watermark."],
             "confidence": 0.2,
         }
-    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+    return _submit(agent_info, payload, "diagnosis")
 
 
 def _orphan_confirmed_response(
@@ -1328,7 +1370,7 @@ def _orphan_confirmed_response(
             "recommended_actions": ["Reconcile the orphan payment with order ingestion."],
             "confidence": 0.9,
         }
-    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+    return _submit(agent_info, payload, "diagnosis")
 
 
 def _orphan_payment_response(
@@ -1556,7 +1598,7 @@ def _duplicate_confirmed_response(
             ],
             "confidence": 0.9,
         }
-    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+    return _submit(agent_info, payload, "diagnosis")
 
 
 def _duplicate_insufficient_response(
@@ -1616,7 +1658,7 @@ def _duplicate_insufficient_response(
             ],
             "confidence": 0.2,
         }
-    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+    return _submit(agent_info, payload, "diagnosis")
 
 
 def _duplicate_payment_response(

@@ -18,7 +18,7 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from data_incident_gym.diagnosis import DiagnosticStrategy
+from data_incident_gym.diagnosis import DiagnosisStatus, DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import DiagnosisRunner, ModelIdentity
 from data_incident_gym.evidence import (
     DbtRunResultsFact,
@@ -102,16 +102,12 @@ class _Tools:
 def _base_payload() -> dict[str, object]:
     return {
         "schema_version": "p1.kernel_decision.v1",
-        "status": "INSUFFICIENT_EVIDENCE",
         "run_id": RUN_ID,
-        "selected_hypothesis_id": None,
         "assessments": [],
-        "claims": [],
         "unresolved_evidence": [
             {
                 "evidence_kind": "INGESTION_WATERMARK",
                 "subject": "raw_payments",
-                "reason_code": "NOT_OBSERVABLE",
             }
         ],
         "summary": "Synthetic decision.",
@@ -128,12 +124,11 @@ def _kernel_invalid_payload() -> dict[str, object]:
     return payload
 
 
-def _model_rule_violating_payload() -> dict[str, object]:
-    """Model-level rule violation: an abstention carrying claims.
-
-    ``KernelDecision``'s own validator rejects the whole payload, so the
-    recorded location stays empty and the Pydantic kind is only ``value_error``;
-    the reason code is what makes this distinguishable.
+def _unexpected_field_payload() -> dict[str, object]:
+    """An abstention that still carries claims: the tool has no such field, so
+    the parser rejects it before any decision is built. The reason code is what
+    makes the rejection readable, and it is keyed by error type rather than by
+    the SDK's wording.
     """
 
     payload = _base_payload()
@@ -219,12 +214,22 @@ def _shape_scripted(mode: str) -> FunctionModel:
                     )
                 ]
             )
-        if mode == "model_rule_violation":
+        if mode == "unexpected_field":
             return ModelResponse(
                 parts=[
                     ToolCallPart(
                         output_name,
-                        _model_rule_violating_payload(),
+                        _unexpected_field_payload(),
+                        tool_call_id=f"final-{step}",
+                    )
+                ]
+            )
+        if mode == "normalization_failure":
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        output_name,
+                        {**_base_payload(), "summary": "   "},
                         tool_call_id=f"final-{step}",
                     )
                 ]
@@ -266,7 +271,7 @@ async def test_output_validation_failure_is_attributed_to_output(tmp_path: Path)
     assert event.response_ended_with == "OUTPUT_CALL"
     assert event.retry_prompt_targets == ("<output>",)
     assert [(call.tool_name, call.arguments_parse) for call in event.call_shapes] == [
-        ("final_result", "OBJECT")
+        ("final_result_abstention", "OBJECT")
     ]
     # The decision never became schema-valid, so the kernel output validator was
     # never reached and no output retry was recorded through it.
@@ -274,23 +279,43 @@ async def test_output_validation_failure_is_attributed_to_output(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_model_rule_violation_records_a_classifiable_reason(tmp_path: Path) -> None:
-    """A model-level rule rejection carries an empty location and only
-    ``value_error`` as its kind, so the reason code is the only field that says
-    which rule was broken. This is the v14 seq19 case, which was recordable but
-    not interpretable before the code was added."""
+async def test_unexpected_field_records_a_classifiable_reason(tmp_path: Path) -> None:
+    """The abstention tool has no claim fields, so sending one is a parser-level
+    rejection: the location names the field and the reason code comes from the
+    type-keyed table. This is what the v14 seq19 case looks like now that the
+    illegal combination is no longer expressible."""
 
     _write_public_run(tmp_path)
-    result = await _run(tmp_path, _shape_scripted("model_rule_violation"))
+    result = await _run(tmp_path, _shape_scripted("unexpected_field"))
     event = _protocol_event(result)
 
     assert event.category == "OUTPUT_SCHEMA_REJECTED"
     assert event.error_origin == "OUTPUT_VALIDATION"
+    assert event.error_loc == ("claims",)
+    assert event.error_kind == ("extra_forbidden",)
+    assert event.error_reason == ("UNEXPECTED_DECISION_FIELD",)
+    # Only the code is recorded: no payload text, no parser message.
+    assert all(" " not in reason for reason in event.error_reason)
+
+
+@pytest.mark.asyncio
+async def test_normalization_failure_keeps_its_code_in_the_persisted_event(
+    tmp_path: Path,
+) -> None:
+    """A structurally valid submission can still map onto an invalid decision.
+    The failure is recorded with its stable code and the output origin instead of
+    being recomputed as UNKNOWN with no reason."""
+
+    _write_public_run(tmp_path)
+    result = await _run(tmp_path, _shape_scripted("normalization_failure"))
+    event = _protocol_event(result)
+
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert event.error_origin == "OUTPUT_VALIDATION"
+    assert event.error_type == "UNEXPECTED_MODEL_BEHAVIOR"
+    assert event.error_reason == ("DECISION_TEXT_BLANK",)
     assert event.error_loc == ()
     assert event.error_kind == ("value_error",)
-    assert event.error_reason == ("ABSTENTION_WITH_CLAIMS",)
-    # Only the code is recorded: no payload text, no validator message.
-    assert all(" " not in reason for reason in event.error_reason)
 
 
 @pytest.mark.asyncio
@@ -360,7 +385,7 @@ async def test_mixed_response_separates_category_from_origin(tmp_path: Path) -> 
     assert event.response_ended_with == "BUSINESS_CALL"
     shapes = [(call.tool_name, call.arguments_parse) for call in event.call_shapes]
     assert shapes == [
-        ("final_result", "OBJECT"),
+        ("final_result_abstention", "OBJECT"),
         ("get_dbt_run_results", "INVALID_JSON"),
     ]
     # No output-retry budget was spent: the decision itself was schema-valid.
@@ -459,3 +484,298 @@ def test_protocol_observation_fields_are_additive_defaults() -> None:
     assert legacy.error_type is None
     assert legacy.error_origin is None
     assert legacy.retry_prompt_targets == ()
+
+
+# ------------------------------- candidate attribution and normalization duty
+
+_ABSTENTION_TOOL, _CONFIRMED_TOOL = 0, 1
+_BINDING = {
+    "kernel_hypothesis_ids": ["h_loss", "h_decline"],
+    "kernel_new_hypotheses": [
+        {"hypothesis_id": "h_loss", "root_cause_code": "SOURCE_PAYMENT_INGESTION_LOSS"},
+        {"hypothesis_id": "h_decline", "root_cause_code": "NORMAL_BUSINESS_PAYMENT_DECLINE"},
+    ],
+}
+_EVIDENCE_ID = "ev_" + "0" * 64
+
+
+def _abstention(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "run_id": RUN_ID,
+        "assessments": [],
+        "unresolved_evidence": [
+            {"evidence_kind": "INGESTION_WATERMARK", "subject": "raw_payments"}
+        ],
+        "summary": "The settled boundary is unobservable.",
+        "recommended_actions": [],
+        "confidence": 0.2,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _confirmed(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "run_id": RUN_ID,
+        "selected_hypothesis_id": "h_loss",
+        "assessments": [],
+        "claims": [
+            {
+                "kind": "ROOT_CAUSE",
+                "value": "SOURCE_PAYMENT_INGESTION_LOSS",
+                "evidence_ids": [_EVIDENCE_ID],
+            }
+        ],
+        "summary": "One root cause is supported.",
+        "recommended_actions": [],
+        "confidence": 0.9,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _round_scripted(*rounds: tuple[tuple[int, dict[str, object]], ...]) -> FunctionModel:
+    """One response per request, each carrying the given (tool, payload) calls."""
+
+    state = {"index": -1}
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        state["index"] += 1
+        if state["index"] == 0:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_dbt_run_results",
+                        {"run_id": RUN_ID, **_BINDING},
+                        tool_call_id="call-0",
+                    )
+                ]
+            )
+        position = min(state["index"] - 1, len(rounds) - 1)
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[tool].name,
+                    payload,
+                    tool_call_id=f"final-{position}-{tool}",
+                )
+                for tool, payload in rounds[position]
+            ]
+        )
+
+    return FunctionModel(scripted)
+
+
+def _unbound_abstention() -> dict[str, object]:
+    """A subject no accepted record can bind, so the kernel refuses it."""
+
+    return _abstention(
+        unresolved_evidence=[{"evidence_kind": "INGESTION_WATERMARK", "subject": "raw_orders"}]
+    )
+
+
+_NORMALIZATION_FAILURES = {
+    "DECISION_TEXT_BLANK": (_ABSTENTION_TOOL, _abstention(summary="   ")),
+    "RECOMMENDED_ACTIONS_DUPLICATED": (
+        _ABSTENTION_TOOL,
+        _abstention(recommended_actions=["Act.", "Act."]),
+    ),
+    "ASSESSMENT_HYPOTHESES_DUPLICATED": (
+        _ABSTENTION_TOOL,
+        _abstention(
+            assessments=[
+                {"hypothesis_id": "h_loss", "verdict": "SUPPORTED", "evidence_ids": [_EVIDENCE_ID]},
+                {"hypothesis_id": "h_loss", "verdict": "REFUTED", "evidence_ids": [_EVIDENCE_ID]},
+            ]
+        ),
+    ),
+    "CLAIM_VALUES_DUPLICATED": (
+        _CONFIRMED_TOOL,
+        _confirmed(
+            claims=[
+                {
+                    "kind": "ROOT_CAUSE",
+                    "value": "SOURCE_PAYMENT_INGESTION_LOSS",
+                    "evidence_ids": [_EVIDENCE_ID],
+                },
+                {
+                    "kind": "ROOT_CAUSE",
+                    "value": "SOURCE_PAYMENT_INGESTION_LOSS",
+                    "evidence_ids": [_EVIDENCE_ID],
+                },
+            ]
+        ),
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", sorted(_NORMALIZATION_FAILURES))
+async def test_each_normalization_failure_keeps_its_code_in_the_event(
+    tmp_path: Path, code: str
+) -> None:
+    """A structurally valid submission whose decision is refused is recorded with
+    its own code, the tool it came from, and the output origin."""
+
+    _write_public_run(tmp_path)
+    tool, payload = _NORMALIZATION_FAILURES[code]
+    result = await _run(tmp_path, _round_scripted(((tool, payload),)))
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert event.error_origin == "OUTPUT_VALIDATION"
+    assert event.error_reason == (code,)
+    assert event.tool_name == (
+        "final_result_confirmed" if tool == _CONFIRMED_TOOL else "final_result_abstention"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_normalization_failure_does_not_survive_a_later_success(tmp_path: Path) -> None:
+    """The refusal is answered by a valid submission in the next request, so the
+    run completes and no protocol failure is recorded."""
+
+    _write_public_run(tmp_path)
+    result = await _run(
+        tmp_path,
+        _round_scripted(
+            ((_ABSTENTION_TOOL, _abstention(summary="   ")),),
+            ((_ABSTENTION_TOOL, _abstention()),),
+        ),
+    )
+
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+    assert [
+        event
+        for event in result.trace
+        if getattr(event, "event_type", None) == "MODEL_PROTOCOL"
+    ] == []
+
+
+@pytest.mark.asyncio
+async def test_a_later_kernel_verdict_does_not_inherit_earlier_details(tmp_path: Path) -> None:
+    """A kernel rejection in a later request owns the attribution, so the earlier
+    normalization details are not paired with it."""
+
+    _write_public_run(tmp_path)
+    result = await _run(
+        tmp_path,
+        _round_scripted(
+            ((_ABSTENTION_TOOL, _abstention(summary="   ")),),
+            ((_ABSTENTION_TOOL, _unbound_abstention()),),
+        ),
+    )
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event.error_origin == "KERNEL_DECISION"
+    assert event.error_reason == ()
+    assert event.error_loc == ()
+    assert event.tool_name == "final_result_abstention"
+
+
+@pytest.mark.asyncio
+async def test_a_kernel_verdict_does_not_own_a_later_candidate_failure(tmp_path: Path) -> None:
+    """The audited sequence: the confirmed tool's retries are spent first, then one
+    response carries an unbound abstention followed by another blank confirmed.
+    The kernel verdict is refused before the normalization failure, so the event
+    must be the latter's — never the kernel verdict carrying its details."""
+
+    _write_public_run(tmp_path)
+    result = await _run(
+        tmp_path,
+        _round_scripted(
+            ((_CONFIRMED_TOOL, _confirmed(summary="   ")),),
+            ((_CONFIRMED_TOOL, _confirmed(summary="   ")),),
+            (
+                (_ABSTENTION_TOOL, _unbound_abstention()),
+                (_CONFIRMED_TOOL, _confirmed(summary="   ")),
+            ),
+        ),
+    )
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event.error_origin == "OUTPUT_VALIDATION"
+    assert event.error_reason == ("DECISION_TEXT_BLANK",)
+    assert event.tool_name == "final_result_confirmed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kernel_first", [True, False])
+async def test_two_candidates_in_one_response_do_not_share_attribution(
+    tmp_path: Path, kernel_first: bool
+) -> None:
+    """When one candidate is refused by the kernel and another fails
+    normalization, the event names the candidate that ended the request."""
+
+    _write_public_run(tmp_path)
+    # The two candidates come through different tools, so a request-level marker
+    # could otherwise let one tool's verdict name the other tool's failure.
+    kernel_candidate = (_ABSTENTION_TOOL, _unbound_abstention())
+    blank_candidate = (_CONFIRMED_TOOL, _confirmed(summary="   "))
+    rounds = (
+        (kernel_candidate, blank_candidate)
+        if kernel_first
+        else (blank_candidate, kernel_candidate)
+    )
+    result = await _run(tmp_path, _round_scripted(rounds))
+
+    event = _protocol_event(result)
+    if kernel_first:
+        # The abstention candidate is refused last, so its verdict names the
+        # failure and the confirmed candidate's details are not attached to it.
+        assert event.error_origin == "KERNEL_DECISION"
+        assert event.error_reason == ()
+        assert event.tool_name == "final_result_abstention"
+    else:
+        # Here the blank confirmed candidate is refused last; the triple stays
+        # consistent with that candidate.
+        assert event.error_origin == "OUTPUT_VALIDATION"
+        assert event.error_reason == ("DECISION_TEXT_BLANK",)
+        assert event.tool_name == "final_result_confirmed"
+    # Either way the origin, the details and the tool come from one candidate.
+    assert (event.error_reason == ()) is (event.error_origin == "KERNEL_DECISION")
+
+
+@pytest.mark.asyncio
+async def test_a_pre_validated_candidate_does_not_own_a_later_candidates_failure(
+    tmp_path: Path,
+) -> None:
+    """The audited sequence: two schema-level candidates in one response, where
+    the SDK ends the request on the second. Neither is located by the response
+    alone, so the event keeps the call shapes and states nothing else."""
+
+    _write_public_run(tmp_path)
+    missing_selection = {
+        key: value
+        for key, value in _confirmed().items()
+        if key != "selected_hypothesis_id"
+    }
+    result = await _run(
+        tmp_path,
+        _round_scripted(
+            ((_CONFIRMED_TOOL, missing_selection),),
+            ((_CONFIRMED_TOOL, missing_selection),),
+            (
+                (_ABSTENTION_TOOL, _abstention(claims=[])),
+                (_CONFIRMED_TOOL, missing_selection),
+            ),
+        ),
+    )
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    # The first candidate's pre-validation details must not speak for a request
+    # that ended on the second one.
+    assert event.error_origin == "UNKNOWN"
+    assert event.error_loc == ()
+    assert event.error_kind == ()
+    assert event.error_reason == ()
+    assert event.tool_name is None
+    assert [call.tool_name for call in event.call_shapes] == [
+        "final_result_abstention",
+        "final_result_confirmed",
+    ]

@@ -706,8 +706,9 @@ def test_two_independent_payment_branches_confirm_without_a_node_error() -> None
 
 
 def test_kernel_prompt_requires_a_receipt_before_declaring() -> None:
-    """Receipt handling: reuse first, probe only under the boundary rules, never
-    fabricate, and never treat one relation's receipt as another's.
+    """Receipt handling: the controller records receipts and derives the relation
+    declarations, so the model reuses or earns one and never asserts a fact the
+    run did not record.
 
     The probe prohibitions themselves live in the boundary-authorization paragraph
     (one probe, no repeat, no variant); this test pins that the self-check defers
@@ -716,10 +717,11 @@ def test_kernel_prompt_requires_a_receipt_before_declaring() -> None:
 
     from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
 
-    assert "reuse the existing receipt for that exact tool and subject" in KERNEL_PROMPT
-    assert "collect normally when the relation is allowed" in KERNEL_PROMPT
-    assert "take the permitted boundary\nprobe under the boundary rules above" in KERNEL_PROMPT
-    assert "Never\nfabricate a receipt" in KERNEL_PROMPT
+    flat = _flattened(KERNEL_PROMPT)
+    assert "reuse the existing receipt for that exact tool and subject" in flat
+    assert "collect normally when the relation is allowed" in flat
+    assert "take the permitted boundary probe under the boundary rules above" in flat
+    assert "Never claim a receipt you did not obtain" in flat
     # A rejection does not forbid a later permitted probe.
     assert "A rejection does not prohibit a later permitted probe" in KERNEL_PROMPT
     assert "never exceed the existing budgets or repeat a blocked business call" in KERNEL_PROMPT
@@ -871,26 +873,33 @@ def test_kernel_prompt_separates_history_receipts_from_a_watermark_declaration()
     assert (
         "Separately check whether a decisive watermark, event-identity or transformation fact"
     ) in flat
-    assert "Relation receipts do not automatically create these declarations" in flat
+    assert "that judgement is yours and it is the only kind of declaration you submit" in flat
     assert "A failed lookup alone does not prove that every related fact is unobservable" in flat
-    assert "Preserve other justified gaps when correcting an invalid item" in flat
+    assert "Preserve other justified declarations when correcting an invalid item" in flat
     # The public derivation of the subject.
     assert "SETTLED_PAYMENT_WINDOW_END observation" in flat
-    assert "Do not infer this subject merely from membership in the brief's subject list" in flat
+    assert "do not infer it merely from membership in the brief's subject list" in flat
     assert (
-        "do not declare the gap when accepted evidence already proves the required boundary"
+        "accepted evidence that already proves the required boundary means there is nothing to"
+        " declare"
     ) in flat
 
 
-def test_kernel_prompt_requires_one_receipt_per_decisive_history_gap() -> None:
-    """Each decisive history gap needs its own receipt; a second relation's gap
-    is not covered by the first relation's receipt."""
+def test_kernel_prompt_leaves_relation_receipts_to_the_controller() -> None:
+    """The submission no longer restates relation declarations: the controller
+    records the receipts and derives them, so the prompt keeps the duty to earn a
+    receipt and drops the per-relation restatement rule."""
 
     from data_incident_gym.diagnostic_agent import KERNEL_PROMPT
 
     flat = _flattened(KERNEL_PROMPT)
-    assert "Apply the receipt checks separately to each decisive history gap" in flat
-    assert "one relation's receipt cannot establish another relation's gap" in flat
+    assert "Relation receipts are recorded by the controller" in flat
+    assert "never restate a relation declaration yourself" in flat
+    assert "A probe that is rejected returns no data but does record its receipt" in flat
+    # The obligation the restatement rule used to carry stays: a decisive receipt
+    # still has to be obtained, reused or probed for within the budgets.
+    assert "reuse the existing receipt for that exact tool and subject" in flat
+    assert "never repeat a blocked call" in flat
 
 
 def test_blocked_history_gaps_are_derived_without_a_watermark() -> None:
@@ -1078,3 +1087,8 @@ def test_kernel_prompt_requires_reassessment_after_a_rejection() -> None:
     assert "A rejected healthy claim does not prove an incident" in flat
     assert "a rejected incident claim does not prove health" in flat
     assert "Confirm only when the alternative conclusion has its own required evidence" in flat
+    # The submission can switch conclusion, which is what the three tools allow.
+    assert (
+        "Submitting through a different tool is allowed when the accepted evidence supports"
+    ) in flat
+    assert "a rejection is a verdict on one submission, not on the alternatives" in flat

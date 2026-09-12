@@ -110,16 +110,12 @@ class _Tools:
 def _base_payload() -> dict[str, object]:
     return {
         "schema_version": "p1.kernel_decision.v1",
-        "status": "INSUFFICIENT_EVIDENCE",
         "run_id": RUN_ID,
-        "selected_hypothesis_id": None,
         "assessments": [],
-        "claims": [],
         "unresolved_evidence": [
             {
                 "evidence_kind": "INGESTION_WATERMARK",
                 "subject": "raw_payments",
-                "reason_code": "NOT_OBSERVABLE",
             }
         ],
         "summary": "Synthetic decision.",

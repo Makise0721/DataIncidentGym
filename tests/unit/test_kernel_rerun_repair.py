@@ -131,6 +131,11 @@ def _accept(
     kernel.record_tool_result(prepared, (record,))
 
 
+
+# The controller sends three output tools in a fixed order: abstention,
+# confirmed, health. A probe submits through the slot that owns its status.
+_ABSTENTION_TOOL, _CONFIRMED_TOOL, _HEALTH_TOOL = 0, 1, 2
+
 def _record_by(
     kind: str,
     relation: str | None = None,
@@ -517,21 +522,12 @@ def _schema_b_scripted(
                     agent_info.output_tools[0].name,
                     {
                         "schema_version": "p1.kernel_decision.v1",
-                        "status": "INSUFFICIENT_EVIDENCE",
                         "run_id": RUN_IDS[59],
-                        "selected_hypothesis_id": None,
                         "assessments": [],
-                        "claims": [],
                         "unresolved_evidence": [
-                            {
-                                "evidence_kind": "RELATION_SCHEMA",
-                                "subject": "raw_orders",
-                                "reason_code": "RELATION_NOT_ALLOWED",
-                            },
                             {
                                 "evidence_kind": "TRANSFORMATION_DEFINITION",
                                 "subject": "model.jaffle_shop.stg_orders",
-                                "reason_code": "NOT_OBSERVABLE",
                             },
                         ],
                         "summary": (
@@ -676,19 +672,14 @@ def _dup_b_scripted(with_identity_declaration: bool) -> FunctionModel:
                         )
                     ]
                 )
-        unresolved = [
-            {
-                "evidence_kind": "RELATION_DATA_PROFILE",
-                "subject": "raw_payments",
-                "reason_code": "RELATION_NOT_ALLOWED",
-            }
-        ]
+        # The blocked profile receipt is derived from the recorded refusal; the
+        # submission only carries the independent fact.
+        unresolved: list[dict[str, str]] = []
         if with_identity_declaration:
             unresolved.append(
                 {
                     "evidence_kind": "PAYMENT_EVENT_IDENTITY",
                     "subject": "raw_payments",
-                    "reason_code": "NOT_OBSERVABLE",
                 }
             )
         return ModelResponse(
@@ -697,11 +688,8 @@ def _dup_b_scripted(with_identity_declaration: bool) -> FunctionModel:
                     agent_info.output_tools[0].name,
                     {
                         "schema_version": "p1.kernel_decision.v1",
-                        "status": "INSUFFICIENT_EVIDENCE",
                         "run_id": RUN_IDS[67],
-                        "selected_hypothesis_id": None,
                         "assessments": [],
-                        "claims": [],
                         "unresolved_evidence": unresolved,
                         "summary": "The duplicate profile and channel identity are unavailable.",
                         "recommended_actions": [],
@@ -914,21 +902,12 @@ def _capture_ledger_scripted() -> tuple[FunctionModel, list[dict[str, object]]]:
                     agent_info.output_tools[0].name,
                     {
                         "schema_version": "p1.kernel_decision.v1",
-                        "status": "INSUFFICIENT_EVIDENCE",
                         "run_id": RUN_IDS[67],
-                        "selected_hypothesis_id": None,
                         "assessments": [],
-                        "claims": [],
                         "unresolved_evidence": [
-                            {
-                                "evidence_kind": "RELATION_DATA_PROFILE",
-                                "subject": "raw_payments",
-                                "reason_code": "RELATION_NOT_ALLOWED",
-                            },
                             {
                                 "evidence_kind": "PAYMENT_EVENT_IDENTITY",
                                 "subject": "raw_payments",
-                                "reason_code": "NOT_OBSERVABLE",
                             },
                         ],
                         "summary": "The duplicate profile and channel identity are unavailable.",
@@ -1092,7 +1071,6 @@ def _silent_confirm_payload(
     )
     return {
         "schema_version": "p1.kernel_decision.v1",
-        "status": "CONFIRMED",
         "run_id": run_id,
         "selected_hypothesis_id": selected,
         "assessments": [
@@ -1119,7 +1097,6 @@ def _silent_confirm_payload(
                 "evidence_ids": [lineage.evidence_id],
             },
         ],
-        "unresolved_evidence": [],
         "summary": "SYNTHETIC corrected confirm over the seq50 evidence shape.",
         "recommended_actions": [],
         "confidence": 0.9,
@@ -1163,7 +1140,7 @@ def _silent_recovery_scripted(
             return ModelResponse(
                 parts=[
                     ToolCallPart(
-                        agent_info.output_tools[0].name,
+                        agent_info.output_tools[_CONFIRMED_TOOL].name,
                         _silent_confirm_payload(necessary[:-1], lineage, run_id=RUN_IDS[50]),
                         tool_call_id="final-1",
                     )
@@ -1174,7 +1151,7 @@ def _silent_recovery_scripted(
         return ModelResponse(
             parts=[
                 ToolCallPart(
-                    agent_info.output_tools[0].name,
+                    agent_info.output_tools[_CONFIRMED_TOOL].name,
                     _silent_confirm_payload(necessary, lineage, run_id=RUN_IDS[50]),
                     tool_call_id="final-2",
                 )
@@ -1363,21 +1340,12 @@ def _dup_b_subject_fix_scripted(retry_text: list[str]) -> FunctionModel:
         def payload() -> dict[str, object]:
             return {
                 "schema_version": "p1.kernel_decision.v1",
-                "status": "INSUFFICIENT_EVIDENCE",
                 "run_id": RUN_IDS[67],
-                "selected_hypothesis_id": None,
                 "assessments": [],
-                "claims": [],
                 "unresolved_evidence": [
-                    {
-                        "evidence_kind": "RELATION_DATA_PROFILE",
-                        "subject": "raw_payments",
-                        "reason_code": "RELATION_NOT_ALLOWED",
-                    },
                     {
                         "evidence_kind": "PAYMENT_EVENT_IDENTITY",
                         "subject": subject,
-                        "reason_code": "NOT_OBSERVABLE",
                     },
                 ],
                 "summary": "The duplicate profile and channel identity are unavailable.",
@@ -1515,21 +1483,15 @@ async def test_seq59_unbound_finalize_recovers_via_one_probe_within_budget(
                         agent_info.output_tools[0].name,
                         {
                             "schema_version": "p1.kernel_decision.v1",
-                            "status": "INSUFFICIENT_EVIDENCE",
                             "run_id": RUN_IDS[59],
-                            "selected_hypothesis_id": None,
                             "assessments": [],
-                            "claims": [],
                             "unresolved_evidence": [
                                 {
-                                    "evidence_kind": "RELATION_SCHEMA",
-                                    "subject": "raw_orders",
-                                    "reason_code": "RELATION_NOT_ALLOWED",
-                                },
-                                {
+                                    # No accepted record can bind this subject, so
+                                    # the declaration is rejected and the model has
+                                    # to probe before it can close out.
                                     "evidence_kind": "TRANSFORMATION_DEFINITION",
-                                    "subject": "model.jaffle_shop.stg_orders",
-                                    "reason_code": "NOT_OBSERVABLE",
+                                    "subject": "model.jaffle_shop.unrecorded",
                                 },
                             ],
                             "summary": (
@@ -1565,21 +1527,12 @@ async def test_seq59_unbound_finalize_recovers_via_one_probe_within_budget(
                     agent_info.output_tools[0].name,
                     {
                         "schema_version": "p1.kernel_decision.v1",
-                        "status": "INSUFFICIENT_EVIDENCE",
                         "run_id": RUN_IDS[59],
-                        "selected_hypothesis_id": None,
                         "assessments": [],
-                        "claims": [],
                         "unresolved_evidence": [
-                            {
-                                "evidence_kind": "RELATION_SCHEMA",
-                                "subject": "raw_orders",
-                                "reason_code": "RELATION_NOT_ALLOWED",
-                            },
                             {
                                 "evidence_kind": "TRANSFORMATION_DEFINITION",
                                 "subject": "model.jaffle_shop.stg_orders",
-                                "reason_code": "NOT_OBSERVABLE",
                             },
                         ],
                         "summary": (

@@ -14,7 +14,7 @@ from typing import Annotated, Any, Literal, Protocol
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, StrictStr, ValidationError
-from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
+from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, ToolOutput, UsageLimits
 from pydantic_ai.exceptions import (
     IncompleteToolCall,
     ModelAPIError,
@@ -34,6 +34,7 @@ from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.tools import GenerateToolJsonSchema
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import (
@@ -62,9 +63,15 @@ from data_incident_gym.diagnosis import (
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.diagnostic_contracts import (
+    MODEL_ERROR_TYPE_REASONS,
     MODEL_RULE_REASONS,
     UNCLASSIFIED_MODEL_RULE,
+    AbstentionSubmission,
+    ConfirmedSubmission,
+    HealthSubmission,
+    Submission,
     gap_kind_for_tool,
+    to_kernel_decision,
 )
 from data_incident_gym.diagnostic_kernel import (
     _HYPOTHESIS_ID_PATTERN,
@@ -89,10 +96,98 @@ from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v16"
+KERNEL_PROMPT_VERSION = "p1.kernel.v17"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v16"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v17"
+
+# The model submits one of three terminal-shaped payloads. The name and the
+# description are part of the model-visible contract, so both are recorded in
+# the controller identity exactly as the SDK sends them.
+_KERNEL_OUTPUT_TOOLS: tuple[tuple[str, str, type[BaseModel]], ...] = (
+    (
+        "final_result_abstention",
+        "Submit an abstention: the accepted evidence neither confirms an incident "
+        "nor establishes health. Name the facts that remain unobservable; this tool "
+        "takes no claims and no selected hypothesis.",
+        AbstentionSubmission,
+    ),
+    (
+        "final_result_confirmed",
+        "Submit a confirmed incident: select the supported hypothesis and cite the "
+        "root cause together with every affected asset the accepted evidence "
+        "supports.",
+        ConfirmedSubmission,
+    ),
+    (
+        "final_result_health",
+        "Submit a no-incident conclusion: claim the alerted relation's current "
+        "bucket is healthy and cite the profile and history records that prove it "
+        "within the declared SLA.",
+        HealthSubmission,
+    ),
+)
+_KERNEL_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
+    name: model for name, _description, model in _KERNEL_OUTPUT_TOOLS
+}
+_KERNEL_OUTPUT_TOOLS_BY_MODEL: dict[type[BaseModel], str] = {
+    model: name for name, _description, model in _KERNEL_OUTPUT_TOOLS
+}
+
+
+def _kernel_output_tool_for(output: object) -> str | None:
+    """The output tool that owns a submitted payload, if it is one of ours."""
+
+    return _KERNEL_OUTPUT_TOOLS_BY_MODEL.get(type(output))
+
+
+def _sole_output_call_name(
+    response: ModelResponse,
+    parameters: ModelRequestParameters,
+) -> str | None:
+    """The output tool a response calls, when exactly one call is present.
+
+    A response carrying several candidates cannot be narrowed to one before the
+    validator has refused any of them, so this returns nothing there.
+    """
+
+    output_names = {tool.name for tool in parameters.output_tools}
+    called = [
+        part.tool_name
+        for part in response.parts
+        if isinstance(part, ToolCallPart) and part.tool_name in output_names
+    ]
+    return called[0] if len(called) == 1 else None
+
+
+def _kernel_output_definitions() -> list[ToolOutput[Any]]:
+    """The exact output tools handed to the SDK, in recorded order."""
+
+    return [
+        ToolOutput(model, name=name, description=description)
+        for name, description, model in _KERNEL_OUTPUT_TOOLS
+    ]
+
+
+def _kernel_output_schema_payload() -> list[dict[str, object]]:
+    """The decision surface the controller records for its identity.
+
+    ``GenerateToolJsonSchema`` is the SDK's own parameter-schema generator, so
+    this is the SDK's pre-send definition rather than an approximation through
+    ``model_json_schema()``. A provider may still rewrite it on the way out (the
+    OpenAI profile drops titles and rewrites references), so the wire contract
+    test compares the sent schema through that provider transformation instead of
+    expecting these bytes verbatim.
+    """
+
+    return [
+        {
+            "name": name,
+            "description": description,
+            "parameters": model.model_json_schema(schema_generator=GenerateToolJsonSchema),
+        }
+        for name, description, model in _KERNEL_OUTPUT_TOOLS
+    ]
 
 P1_ROOT_CAUSE_CODES = (
     "SOURCE_SCHEMA_COLUMN_RENAMED",
@@ -363,6 +458,11 @@ class _RunState:
     current_output_details: (
         tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]] | None
     ) = None
+    # The output tool whose call produced the failure recorded in
+    # ``current_output_details``. A response may carry several candidates and a
+    # later one may end the request, so this is only ever written together with
+    # that failure and never inferred from call order.
+    current_output_tool: str | None = None
     current_response_shape: tuple[tuple[ModelCallShape, ...], str] | None = None
     current_error_type: str | None = None
     current_error_origin: str | None = None
@@ -412,6 +512,7 @@ class _RunState:
         self.last_response = None
         self.last_observation = None
         self.current_output_details = None
+        self.current_output_tool = None
         self.current_response_shape = None
         self.current_error_type = None
         self.current_error_origin = None
@@ -711,10 +812,17 @@ class _ModelObservationAdapter(Model):
         self._state.begin_request_attempt(messages, model_request_parameters)
         response = await self._model.request(messages, model_settings, model_request_parameters)
         self._state.record_model_response(response, model_request_parameters)
-        self._state.current_output_details = _output_call_details(
-            response,
-            model_request_parameters,
-            self._state.strategy,
+        # A response that carries several candidates cannot be attributed to one
+        # of them before a validator refuses any: the SDK may end the request on
+        # a later candidate, so pre-filling the first one's details would pair a
+        # failure with a call that did not cause it. Those responses record the
+        # call shapes only, and the refusal path names the candidate instead.
+        sole_output_tool = _sole_output_call_name(response, model_request_parameters)
+        self._state.current_output_tool = sole_output_tool
+        self._state.current_output_details = (
+            _output_call_details(response, model_request_parameters, self._state.strategy)
+            if sole_output_tool is not None
+            else None
         )
         self._state.current_response_shape = _response_shape(response, model_request_parameters)
         return response
@@ -847,13 +955,19 @@ def _model_rule_reasons(error: ValidationError) -> tuple[str, ...]:
     recorded location is empty and the Pydantic kind is only ``value_error``:
     the two together cannot tell a duplicated entry from a blank text or a
     status/field conflict. The validators' own messages are mapped to stable
-    codes so the failure can be classified offline. Only the mapped code leaves
-    this function; the message itself never reaches the trace.
+    codes so the failure can be classified offline. Rules the parser itself
+    raises are keyed by error type instead, because their message is the SDK's
+    wording rather than ours. Only the mapped code leaves this function; the
+    message itself never reaches the trace.
     """
 
     reasons: list[str] = []
     for item in error.errors()[:_MAX_ERROR_ITEMS]:
-        if item.get("type") != "value_error":
+        error_type = item.get("type")
+        if isinstance(error_type, str) and error_type in MODEL_ERROR_TYPE_REASONS:
+            reasons.append(MODEL_ERROR_TYPE_REASONS[error_type])
+            continue
+        if error_type != "value_error":
             continue
         message = str(item.get("msg", "")).removeprefix("Value error, ")
         reasons.append(MODEL_RULE_REASONS.get(message, UNCLASSIFIED_MODEL_RULE))
@@ -879,13 +993,21 @@ def _output_call_details(
         if not output_names:
             return None
         payload: object | None = None
+        called_tool: str | None = None
         for part in response.parts:
             if isinstance(part, ToolCallPart) and part.tool_name in output_names:
                 payload = part.args_as_dict()
+                called_tool = part.tool_name
                 break
         if not isinstance(payload, dict):
             return None
-        model_type = KernelDecision if _is_kernel_strategy(strategy) else _StaticDecision
+        model_type: type[BaseModel] | None = (
+            _KERNEL_OUTPUT_MODELS.get(called_tool or "")
+            if _is_kernel_strategy(strategy)
+            else _StaticDecision
+        )
+        if model_type is None:
+            return None
         model_type.model_validate(payload)
     except ValidationError as error:
         locs, kinds = _safe_validation_details(error)
@@ -1025,7 +1147,10 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
             state.set_protocol_failure(
                 category="OUTPUT_SCHEMA_REJECTED",
                 stage="OUTPUT_SCHEMA_VALIDATION",
-                tool_name=observation[1][-1],
+                # The tool the recorded refusal belongs to; a response with
+                # several candidates and no recorded refusal stays unnamed
+                # rather than naming a call that may not have terminated it.
+                tool_name=state.current_output_tool,
                 error_loc=details[0],
                 error_kind=details[1],
                 error_reason=details[2],
@@ -1113,6 +1238,10 @@ def _closing_shape_origin(
     if has_output and has_business:
         return "UNKNOWN"
     if has_output:
+        # The two markers are mutually exclusive: each refusal recorded by the
+        # validator clears the other, so only the candidate that was refused last
+        # can name the terminating failure. With neither set the class is not
+        # knowable from the current response.
         if state.kernel_rejection_attempt == state.request_attempt:
             return "KERNEL_DECISION"
         if state.current_output_details is not None:
@@ -1466,6 +1595,22 @@ def _kernel_retry_message(
         "DUPLICATE_EVIDENCE": (
             "This evidence was already accepted by another gap, so a repeated record "
             "cannot close a second gap; query a different subject."
+        ),
+        # Decision-level rules a submission cannot express, so they surface when
+        # its mapped decision is built.
+        "DECISION_TEXT_BLANK": (
+            "Write a non-blank summary and no blank recommended actions; "
+            "whitespace-only text is rejected."
+        ),
+        "RECOMMENDED_ACTIONS_DUPLICATED": (
+            "List each recommended action once; duplicate entries are rejected."
+        ),
+        "ASSESSMENT_HYPOTHESES_DUPLICATED": (
+            "Assess each hypothesis at most once; merge repeated assessments into one "
+            "entry per hypothesis_id."
+        ),
+        "CLAIM_VALUES_DUPLICATED": (
+            "Submit each claim kind and value once; duplicate pairs are rejected."
         ),
         # Decision validation: confirmed path first, then the abstention path.
         "ALTERNATIVE_HYPOTHESIS_REQUIRED": (
@@ -1895,9 +2040,8 @@ def _build_policy_surface(
     strategy = DiagnosticStrategy(strategy)
     if strategy not in MODEL_STRATEGIES:
         raise ValueError("strategy is not model-backed")
-    output_type: type[BaseModel] = (
-        KernelDecision if _is_kernel_strategy(strategy) else _StaticDecision
-    )
+    kernel_mode = _is_kernel_strategy(strategy)
+    output_type: Any = _kernel_output_definitions() if kernel_mode else _StaticDecision
     schema_agent = Agent(
         model or FunctionModel(lambda _messages, _info: None),
         deps_type=_RunState,
@@ -1932,11 +2076,13 @@ def _build_policy_surface(
                 "output_retry_limit": OUTPUT_RETRY_LIMIT,
                 "timeout_seconds": TIMEOUT_SECONDS,
             },
-            "decision_schema": output_type.model_json_schema(),
+            "decision_schema": (
+                _kernel_output_schema_payload()
+                if kernel_mode
+                else _StaticDecision.model_json_schema()
+            ),
             "state_schema": (
-                InvestigationState.model_json_schema()
-                if _is_kernel_strategy(strategy)
-                else None
+                InvestigationState.model_json_schema() if kernel_mode else None
             ),
         }
     )
@@ -2288,8 +2434,8 @@ class DiagnosisRunner:
         )
 
     def _agent(self, state: _RunState) -> Agent[_RunState, Any]:
-        output_type: type[BaseModel] = (
-            KernelDecision
+        output_type: Any = (
+            _kernel_output_definitions()
             if _is_kernel_strategy(self._strategy)
             else _StaticDecision
         )
@@ -2321,16 +2467,37 @@ class DiagnosisRunner:
             current.output_retry_used = ctx.retry
             current.output_retry_limit = ctx.max_retries
             if _is_kernel_strategy(current.strategy):
-                if not isinstance(output, KernelDecision) or current.kernel is None:
+                if not isinstance(output, Submission) or current.kernel is None:
                     raise ModelRetry("MODEL_PROTOCOL_ERROR")
                 try:
-                    outcome = current.kernel.finalize(output)
+                    decision = to_kernel_decision(output)
+                except ValidationError as error:
+                    # The submission is structurally valid but its decision is
+                    # not: record the details where the terminal handler re-reads
+                    # them, together with the tool they belong to. This refusal is
+                    # now the last one in the request, so it also clears an
+                    # earlier kernel verdict rather than letting that verdict
+                    # name a failure it did not cause.
+                    locs, kinds = _safe_validation_details(error)
+                    reasons = _model_rule_reasons(error)
+                    current.current_output_details = (locs, kinds, reasons)
+                    current.current_output_tool = _kernel_output_tool_for(output)
+                    current.kernel_rejection_attempt = None
+                    code = reasons[0] if reasons else "MODEL_PROTOCOL_ERROR"
+                    raise ModelRetry(_kernel_retry_message(code)) from None
+                try:
+                    outcome = current.kernel.finalize(decision)
                 except KernelError as error:
                     # KERNEL_FINALIZED means an earlier decision in this same
                     # attempt already succeeded; that is a state conflict, not a
                     # domain verdict, so it must not claim KERNEL_DECISION.
                     if error.code != "KERNEL_FINALIZED":
                         current.kernel_rejection_attempt = current.request_attempt
+                        # This verdict is the last refusal in the request, so an
+                        # earlier candidate's normalization failure must not be
+                        # paired with it.
+                        current.current_output_details = None
+                        current.current_output_tool = _kernel_output_tool_for(output)
                     current.set_protocol_failure(
                         category="DECISION_CONTRACT_REJECTED",
                         stage="OUTPUT_VALIDATION",
@@ -2340,7 +2507,7 @@ class DiagnosisRunner:
                     rejected_decision = None
                     try:
                         rejected_decision = _rejected_decision_summary(
-                            output,
+                            decision,
                             current.kernel,
                             current.usage.requests,
                         )

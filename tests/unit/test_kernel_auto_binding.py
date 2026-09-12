@@ -321,9 +321,10 @@ def _hypotheses_payload() -> dict[str, object]:
 
 
 def _insufficient_payload() -> dict[str, object]:
+    """The abstention submission shape (output_tools[0] owns that status)."""
+
     return {
         "schema_version": "p1.kernel_decision.v1",
-        "status": "INSUFFICIENT_EVIDENCE",
         "run_id": RUN_ID,
         "unresolved_evidence": [],
         "summary": "More evidence is required.",

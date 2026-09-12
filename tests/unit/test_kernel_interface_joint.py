@@ -198,17 +198,15 @@ async def test_identical_redeclaration_runs_two_queries_with_one_ledger(
                 ToolCallPart(
                     agent_info.output_tools[0].name,
                     {
+                        # The abstention submission: no status, no claims, and a
+                        # declaration that names only the unobservable fact.
                         "schema_version": "p1.kernel_decision.v1",
-                        "status": "INSUFFICIENT_EVIDENCE",
                         "run_id": RUN_ID,
-                        "selected_hypothesis_id": None,
                         "assessments": [],
-                        "claims": [],
                         "unresolved_evidence": [
                             {
                                 "evidence_kind": "INGESTION_WATERMARK",
                                 "subject": "raw_payments",
-                                "reason_code": "NOT_OBSERVABLE",
                             }
                         ],
                         "summary": "Synthetic joint-interface terminal.",

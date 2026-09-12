@@ -14,6 +14,7 @@ import pydantic_ai.models
 import pytest
 from openai import AsyncOpenAI
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.profiles.openai import OpenAIJsonSchemaTransformer
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from data_incident_gym.diagnosis import DiagnosisStatus, DiagnosticStrategy
@@ -393,7 +394,7 @@ async def test_openai_wire_kernel_binding_tool_return_fails_closed_on_bad_final(
                         "id": f"call-final-{calls}",
                         "type": "function",
                         "function": {
-                            "name": _output_tool_name(request),
+                            "name": "final_result_abstention",
                             "arguments": "{}",
                         },
                     }
@@ -610,6 +611,8 @@ async def test_openai_wire_sends_one_fresh_ledger_per_request(
             )
         # The first finalize declares nothing while every gap is closed, which
         # the kernel rejects; the third request is the resulting output retry.
+        # Relation receipts are derived by the controller, so the submission
+        # only ever names the independent fact.
         unresolved = (
             []
             if calls == 2
@@ -617,7 +620,6 @@ async def test_openai_wire_sends_one_fresh_ledger_per_request(
                 {
                     "evidence_kind": "INGESTION_WATERMARK",
                     "subject": "raw_payments",
-                    "reason_code": "NOT_OBSERVABLE",
                 }
             ]
         )
@@ -629,14 +631,11 @@ async def test_openai_wire_sends_one_fresh_ledger_per_request(
                         "id": f"call-final-{calls}",
                         "type": "function",
                         "function": {
-                            "name": _output_tool_name(request),
+                            "name": "final_result_abstention",
                             "arguments": json.dumps(
                                 {
-                                    "status": "INSUFFICIENT_EVIDENCE",
                                     "run_id": run_id,
-                                    "selected_hypothesis_id": None,
                                     "assessments": [],
-                                    "claims": [],
                                     "unresolved_evidence": unresolved,
                                     "summary": "The payment profile is unavailable.",
                                     "recommended_actions": [],
@@ -680,3 +679,118 @@ async def test_openai_wire_sends_one_fresh_ledger_per_request(
     assert _ledger_payload(wire.requests[0])["evidence"] == []
     assert len(_ledger_payload(wire.requests[1])["evidence"]) == 1
     assert wire.requests[0]["messages"] != wire.requests[2]["messages"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_openai_wire_kernel_sends_three_matching_output_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kernel submission surface is three output tools, and what goes on the
+    wire is exactly what the controller identity records: order, names,
+    descriptions and parameter schemas."""
+
+    from data_incident_gym.diagnostic_agent import _kernel_output_schema_payload
+
+    monkeypatch.setattr(pydantic_ai.models, "ALLOW_MODEL_REQUESTS", True)
+    run_id = "b" * 32
+    call_count = 0
+
+    def respond(request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return 200, _chat_response(
+                {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-run-results",
+                            "type": "function",
+                            "function": {
+                                "name": "get_dbt_run_results",
+                                "arguments": json.dumps(
+                                    {
+                                        "run_id": run_id,
+                                        "kernel_hypothesis_ids": ["h_loss", "h_decline"],
+                                        "kernel_new_hypotheses": [
+                                            {
+                                                "hypothesis_id": "h_loss",
+                                                "root_cause_code": (
+                                                    "SOURCE_PAYMENT_INGESTION_LOSS"
+                                                ),
+                                            },
+                                            {
+                                                "hypothesis_id": "h_decline",
+                                                "root_cause_code": (
+                                                    "NORMAL_BUSINESS_PAYMENT_DECLINE"
+                                                ),
+                                            },
+                                        ],
+                                    }
+                                ),
+                            },
+                        }
+                    ],
+                }
+            )
+        return 200, _chat_response(
+            {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-final",
+                        "type": "function",
+                        "function": {
+                            "name": "final_result_abstention",
+                            "arguments": json.dumps(
+                                {
+                                    "run_id": run_id,
+                                    "assessments": [],
+                                    "unresolved_evidence": [
+                                        {
+                                            "evidence_kind": "INGESTION_WATERMARK",
+                                            "subject": "raw_payments",
+                                        }
+                                    ],
+                                    "summary": "The settled boundary is unobservable.",
+                                    "recommended_actions": [],
+                                    "confidence": 0.2,
+                                }
+                            ),
+                        },
+                    }
+                ],
+            }
+        )
+
+    _write_public_run(tmp_path, run_id)
+    with _OpenAIWireMock(respond) as wire:
+        runner, client = _diagnosis_runner(
+            tmp_path,
+            wire.base_url,
+            DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+            run_id,
+        )
+        try:
+            result = await runner.diagnose()
+        finally:
+            await client.close()
+
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE, (
+        result.diagnosis.summary,
+        wire.requests,
+    )
+    sent = [
+        tool["function"]
+        for tool in wire.requests[1]["tools"]
+        if str(tool["function"]["name"]).startswith("final_result")
+    ]
+    recorded = _kernel_output_schema_payload()
+    assert [tool["name"] for tool in sent] == [item["name"] for item in recorded]
+    assert [tool["description"] for tool in sent] == [item["description"] for item in recorded]
+    # The provider rewrites the parameter schema on the way out, so the recorded
+    # form is checked through that same transformation rather than verbatim.
+    assert [
+        OpenAIJsonSchemaTransformer(item["parameters"]).walk() for item in recorded
+    ] == [tool["parameters"] for tool in sent]

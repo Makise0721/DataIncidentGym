@@ -145,13 +145,14 @@ def _hypothesis_payload() -> dict[str, object]:
 
 
 def _insufficient_payload(unresolved: list[dict[str, str]]) -> dict[str, object]:
+    """The abstention submission (output_tools[0]): no status, no claims, and
+    declarations that name only independent facts; relation receipts are derived
+    from the recorded refusals."""
+
     return {
         "schema_version": "p1.kernel_decision.v1",
-        "status": "INSUFFICIENT_EVIDENCE",
         "run_id": RUN_ID,
-        "selected_hypothesis_id": None,
         "assessments": [],
-        "claims": [],
         "unresolved_evidence": unresolved,
         "summary": "The decisive evidence is not observable in this run.",
         "recommended_actions": [],
@@ -370,14 +371,8 @@ async def test_profile_probe_records_receipt_and_binds_declared_gap(
                     _insufficient_payload(
                         [
                             {
-                                "evidence_kind": "RELATION_DATA_PROFILE",
-                                "subject": "raw_payments",
-                                "reason_code": "RELATION_NOT_ALLOWED",
-                            },
-                            {
                                 "evidence_kind": "PAYMENT_EVENT_IDENTITY",
                                 "subject": "raw_payments",
-                                "reason_code": "NOT_OBSERVABLE",
                             },
                         ]
                     ),
@@ -659,14 +654,8 @@ async def test_schema_probe_records_receipt_and_insufficient_finishes_in_budget(
                     _insufficient_payload(
                         [
                             {
-                                "evidence_kind": "RELATION_SCHEMA",
-                                "subject": "raw_orders",
-                                "reason_code": "RELATION_NOT_ALLOWED",
-                            },
-                            {
                                 "evidence_kind": "TRANSFORMATION_DEFINITION",
                                 "subject": "model.jaffle_shop.stg_orders",
-                                "reason_code": "NOT_OBSERVABLE",
                             },
                         ]
                     ),
@@ -776,7 +765,6 @@ def _ledger_visible_scripted() -> tuple[FunctionModel, list[dict[str, str]]]:
                             {
                                 "evidence_kind": "PAYMENT_EVENT_IDENTITY",
                                 "subject": "raw_payments",
-                                "reason_code": "NOT_OBSERVABLE",
                             }
                         ]
                     ),

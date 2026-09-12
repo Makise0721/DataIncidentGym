@@ -45,6 +45,48 @@ def _tool_call(name: str, arguments: dict[str, object], call_id: str) -> ModelRe
     return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
 
 
+# Kernel strategies expose three output tools in a fixed order: abstention,
+# confirmed, health. A static strategy keeps one tool whose payload is the
+# diagnosis itself.
+_KERNEL_TOOL_BY_STATUS = {
+    "INSUFFICIENT_EVIDENCE": 0,
+    "CONFIRMED": 1,
+    "NO_INCIDENT": 2,
+}
+_KERNEL_DROPPED_FIELDS = {
+    "INSUFFICIENT_EVIDENCE": ("status", "selected_hypothesis_id", "claims"),
+    "CONFIRMED": ("status", "unresolved_evidence"),
+    "NO_INCIDENT": ("status", "selected_hypothesis_id", "unresolved_evidence"),
+}
+
+
+def _submit(agent_info: AgentInfo, payload: dict[str, object], call_id: str) -> ModelResponse:
+    """Submit a decision-shaped payload through the tool that owns its status.
+
+    The kernel no longer accepts one combined decision shape, and relation
+    receipts are derived by the controller instead of being restated, so a
+    kernel payload is reshaped at the submission point. A static payload is
+    passed through unchanged.
+    """
+
+    status = payload.get("status")
+    if not isinstance(status, str) or len(agent_info.output_tools) == 1:
+        return _submit(agent_info, payload, call_id)
+    shaped = {
+        key: value
+        for key, value in payload.items()
+        if key not in _KERNEL_DROPPED_FIELDS[status]
+    }
+    if status == "INSUFFICIENT_EVIDENCE":
+        shaped["unresolved_evidence"] = [
+            {"evidence_kind": item["evidence_kind"], "subject": item["subject"]}
+            for item in payload.get("unresolved_evidence", [])  # type: ignore[union-attr]
+            if not str(item["evidence_kind"]).startswith("RELATION_")
+        ]
+    tool = agent_info.output_tools[_KERNEL_TOOL_BY_STATUS[status]]
+    return _tool_call(tool.name, shaped, call_id)
+
+
 def _static_diagnosis(
     messages: list[ModelMessage],
     agent_info: AgentInfo,
@@ -126,7 +168,7 @@ def _static_diagnosis(
         "recommended_actions": ["Restore the source contract before the next build."],
         "confidence": 0.9,
     }
-    return _tool_call(agent_info.output_tools[0].name, payload, "diagnosis")
+    return _submit(agent_info, payload, "diagnosis")
 
 
 def _runner(project_root: Path) -> EvaluationRunner:

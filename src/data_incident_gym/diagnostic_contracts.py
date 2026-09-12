@@ -20,7 +20,7 @@ from pydantic import (
     model_validator,
 )
 
-from data_incident_gym.diagnosis import KernelStateTraceEvent, UnresolvedEvidence
+from data_incident_gym.diagnosis import KernelStateTraceEvent, NonBlankStr, UnresolvedEvidence
 
 _RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 _HYPOTHESIS_ID_PATTERN = r"^h_[a-z0-9_]{1,32}$"
@@ -89,6 +89,13 @@ MODEL_RULE_REASONS: dict[str, str] = {
     "NO_INCIDENT can contain only health claims": "NO_INCIDENT_WITH_OTHER_CLAIMS",
 }
 UNCLASSIFIED_MODEL_RULE = "UNCLASSIFIED_MODEL_RULE"
+
+# Rules the Pydantic parser raises before any of our validators run. They are
+# keyed by error type, not by message, so a change in the SDK's wording cannot
+# silently turn a known failure into an unclassified one.
+MODEL_ERROR_TYPE_REASONS: dict[str, str] = {
+    "extra_forbidden": "UNEXPECTED_DECISION_FIELD",
+}
 
 
 _GAP_TOOL: dict[EvidenceGapKind, tuple[str, str | None]] = {
@@ -257,6 +264,162 @@ class KernelDecision(BaseModel):
         return self
 
 
+class UnobservedFact(BaseModel):
+    """An independent fact this run cannot observe; never a relation receipt."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evidence_kind: Literal[
+        "INGESTION_WATERMARK",
+        "PAYMENT_EVENT_IDENTITY",
+        "TRANSFORMATION_DEFINITION",
+    ]
+    subject: NonBlankStr
+
+
+class DecisionClaim(BaseModel):
+    """A root-cause or affected-asset claim: no health fields, no health kind."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["ROOT_CAUSE", "AFFECTED_ASSET"]
+    value: StrictStr
+    evidence_ids: tuple[
+        Annotated[StrictStr, Field(pattern=_EVIDENCE_ID_PATTERN)],
+        ...,
+    ]
+    relation_name: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def reject_duplicate_evidence_ids(self) -> Self:
+        reject_duplicates(self.evidence_ids, "claim evidence_ids")
+        return self
+
+
+class HealthClaim(BaseModel):
+    """A health claim; the claim kind and the value are fixed, not submitted."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    relation_name: NonBlankStr
+    history_name: NonBlankStr
+    bucket: NonBlankStr
+    current_value: StrictInt | StrictFloat
+    evidence_ids: tuple[
+        Annotated[StrictStr, Field(pattern=_EVIDENCE_ID_PATTERN)],
+        ...,
+    ]
+
+    @model_validator(mode="after")
+    def reject_duplicate_evidence_ids(self) -> Self:
+        reject_duplicates(self.evidence_ids, "claim evidence_ids")
+        return self
+
+
+class DecisionSubmission(BaseModel):
+    """Fields every submission carries; the terminal status comes from the tool."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["p1.kernel_decision.v1"] = "p1.kernel_decision.v1"
+    run_id: StrictStr = Field(pattern=_RUN_ID_PATTERN)
+    assessments: tuple[HypothesisAssessment, ...] = ()
+    summary: StrictStr
+    recommended_actions: tuple[StrictStr, ...]
+    confidence: Annotated[StrictFloat, Field(ge=0.0, le=1.0)]
+
+
+class AbstentionSubmission(DecisionSubmission):
+    unresolved_evidence: tuple[UnobservedFact, ...] = ()
+
+
+class ConfirmedSubmission(DecisionSubmission):
+    selected_hypothesis_id: StrictStr
+    claims: tuple[DecisionClaim, ...] = Field(min_length=1)
+
+
+class HealthSubmission(DecisionSubmission):
+    claims: tuple[HealthClaim, ...] = Field(min_length=1)
+
+
+Submission = AbstentionSubmission | ConfirmedSubmission | HealthSubmission
+
+
+def to_kernel_decision(submission: object) -> KernelDecision:
+    """Map one submission onto the internal decision.
+
+    Pure mapping: every submitted field is carried over unchanged, and only the
+    constants the submitting tool already fixes are filled in. It performs no
+    I/O and touches no run state; a payload that violates a decision-level rule
+    raises ``ValidationError`` and is classified by the caller.
+    """
+
+    if isinstance(submission, ConfirmedSubmission):
+        return KernelDecision(
+            schema_version=submission.schema_version,
+            status="CONFIRMED",
+            run_id=submission.run_id,
+            selected_hypothesis_id=submission.selected_hypothesis_id,
+            assessments=submission.assessments,
+            claims=tuple(
+                ClaimEvidence(
+                    kind=ClaimKind(claim.kind),
+                    value=claim.value,
+                    evidence_ids=claim.evidence_ids,
+                    relation_name=claim.relation_name,
+                )
+                for claim in submission.claims
+            ),
+            summary=submission.summary,
+            recommended_actions=submission.recommended_actions,
+            confidence=submission.confidence,
+        )
+    if isinstance(submission, HealthSubmission):
+        return KernelDecision(
+            schema_version=submission.schema_version,
+            status="NO_INCIDENT",
+            run_id=submission.run_id,
+            assessments=submission.assessments,
+            claims=tuple(
+                ClaimEvidence(
+                    kind=ClaimKind.HEALTH_STATE,
+                    # The value is not part of the model's submission and is not
+                    # read by the kernel or the evaluator for health claims; it
+                    # is filled from the relation to keep the artifact's shape.
+                    value=claim.relation_name,
+                    evidence_ids=claim.evidence_ids,
+                    relation_name=claim.relation_name,
+                    history_name=claim.history_name,
+                    bucket=claim.bucket,
+                    current_value=claim.current_value,
+                )
+                for claim in submission.claims
+            ),
+            summary=submission.summary,
+            recommended_actions=submission.recommended_actions,
+            confidence=submission.confidence,
+        )
+    if isinstance(submission, AbstentionSubmission):
+        return KernelDecision(
+            schema_version=submission.schema_version,
+            status="INSUFFICIENT_EVIDENCE",
+            run_id=submission.run_id,
+            assessments=submission.assessments,
+            unresolved_evidence=tuple(
+                UnresolvedEvidence(
+                    evidence_kind=fact.evidence_kind,
+                    subject=fact.subject,
+                    reason_code="NOT_OBSERVABLE",
+                )
+                for fact in submission.unresolved_evidence
+            ),
+            summary=submission.summary,
+            recommended_actions=submission.recommended_actions,
+            confidence=submission.confidence,
+        )
+    raise TypeError("submission type is not a decision submission")
+
+
 class PreparedToolCall(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -336,11 +499,17 @@ class KernelError(RuntimeError):
 
 
 __all__ = [
+    "AbstentionSubmission",
     "ClaimEvidence",
     "ClaimKind",
+    "ConfirmedSubmission",
+    "DecisionClaim",
+    "DecisionSubmission",
     "EvidenceGap",
     "EvidenceGapKind",
     "EvidenceGapStatus",
+    "HealthClaim",
+    "HealthSubmission",
     "Hypothesis",
     "HypothesisAssessment",
     "HypothesisVerdict",
@@ -351,8 +520,12 @@ __all__ = [
     "KernelFinalStatus",
     "KernelOutcome",
     "KernelStateTraceEvent",
+    "MODEL_ERROR_TYPE_REASONS",
     "PreparedToolCall",
+    "Submission",
+    "UnobservedFact",
     "expected_tool_for_gap",
     "gap_kind_for_tool",
     "reject_duplicates",
+    "to_kernel_decision",
 ]
