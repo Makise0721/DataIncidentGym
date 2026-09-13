@@ -188,6 +188,7 @@ def test_manifest_path_is_derived_from_manifest_id() -> None:
     assert manifest_path_for("p1-formal-v19") == Path("config/benchmark/p1-formal-v19.json")
     assert manifest_path_for("p1-formal-v20") == Path("config/benchmark/p1-formal-v20.json")
     assert manifest_path_for("p1-formal-v21") == Path("config/benchmark/p1-formal-v21.json")
+    assert manifest_path_for("p1-formal-v22") == Path("config/benchmark/p1-formal-v22.json")
 
 
 def test_manifest_path_rejects_unversioned_identity() -> None:
@@ -196,7 +197,7 @@ def test_manifest_path_rejects_unversioned_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
         manifest_path_for("p2-formal-v1")
     with pytest.raises(BenchmarkManifestError):
-        manifest_path_for("p1-formal-v22")
+        manifest_path_for("p1-formal-v23")
 
 
 def test_build_manifest_accepts_approved_rerun_identities() -> None:
@@ -221,6 +222,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
         "p1-formal-v19",
         "p1-formal-v20",
         "p1-formal-v21",
+        "p1-formal-v22",
     ):
         manifest = build_manifest(
             "b" * 40,
@@ -235,7 +237,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
 
 def test_build_manifest_rejects_unapproved_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
-        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v22")
+        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v23")
 
 
 def test_freeze_manifest_writes_to_id_derived_path(tmp_path: Path) -> None:
