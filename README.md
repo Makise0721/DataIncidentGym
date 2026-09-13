@@ -30,6 +30,9 @@ snapshot，以及六个类型化只读工具。
 - **可复现事故实验**：在固定的 Jaffle Shop 数据集上执行健康构建、故障注入、结果验证和幂等重置。
 - **受限 Agent 调查**：支持 `diagnostic-kernel` 与 `static-skill` 两种策略，不开放 Shell、
   任意文件、任意 SQL 或数据库写入。
+- **诊断 kernel**：维护假设登记、证据缺口与调用预算；终局经确认、弃答、健康三个类型化
+  提交工具交付，资产声明必须使用所引证据中的完整节点标识符；kernel 拒绝附可执行的纠正
+  反馈，弃答格的缺口矩阵由 evaluator 按期望矩阵核验。
 - **证据绑定诊断**：输出 `CONFIRMED`、`INSUFFICIENT_EVIDENCE`、`NO_INCIDENT` 或
   `MODEL_ERROR`，所有事实主张必须引用系统生成的 evidence ID。
 - **确定性评测**：程序化检查根因、影响范围、证据存在性、证据与主张的一致性、策略边界、环境状态
@@ -192,9 +195,9 @@ finally {
 
 ## 正式基准与证据边界
 
-仓库随附 `config/benchmark/p1-formal-v1.json`，其中固定了场景摘要与哈希、实现 revision、
-模型 endpoint、预算、策略身份、106 个确定性 run ID，以及期望的结果输入。CLI 提供不调用
-模型的完整性与漂移检查：
+仓库随附按测量身份冻结的正式 Manifest（`config/benchmark/p1-formal-v1.json` 至
+`p1-formal-v22.json`），各自固定场景摘要与哈希、实现 revision、模型 endpoint、预算、
+策略身份、106 个确定性 run ID 以及期望的结果输入。CLI 提供不调用模型的完整性与漂移检查：
 
 ```powershell
 uv run data-incident-gym benchmark verify --manifest config/benchmark/p1-formal-v1.json
@@ -206,7 +209,9 @@ uv run data-incident-gym benchmark verify --manifest config/benchmark/p1-formal-
 
 正式执行还要求干净 checkout、Manifest SHA-256 的显式确认、通过 preflight、独占 suite lock
 和 append-only ledger；执行过程中不提供重试、替换样本或扩展预算选项。报告命令只读取并校验
-既有 suite，不调用模型、数据库或 evaluator。
+既有 suite，不调用模型、数据库或 evaluator。v2–v22 沿用同一冻结与执行机制，并支持以
+`--only-strategy` / `--only-sequence` 选择确定性子集做探索性测量；子集 suite 会留下
+`subset.json` 且永不出具正式报告。
 
 随附 Manifest 对应的唯一一次历史执行已封存为 `INVALID_HARNESS`：该批次暴露了 setup
 失败物化、恢复传播、fail-stop 和报告适用性判断等 harness 缺陷，因此不能作为真实模型质量
