@@ -20,7 +20,11 @@ from data_incident_gym.benchmark_manifest import (
     manifest_path_for,
     verify_manifest,
 )
-from data_incident_gym.benchmark_report import BenchmarkReporter, BenchmarkReportError
+from data_incident_gym.benchmark_report import (
+    BenchmarkReporter,
+    BenchmarkReportError,
+    analyze_partial_suite,
+)
 from data_incident_gym.benchmark_runner import (
     BenchmarkCellSelector,
     BenchmarkRunner,
@@ -33,9 +37,34 @@ from data_incident_gym.diagnostic_agent import DiagnosisRunner
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.doctor import DoctorRunner, DoctorStatus
 from data_incident_gym.evaluation import EvaluationStatus
+from data_incident_gym.evaluation_inputs import (
+    ArtifactInputStatus,
+    EvaluationInputsError,
+    classify_scoring_inputs,
+)
+from data_incident_gym.evaluation_rescore import (
+    OfflineScoreError,
+    compare_offline_scores,
+    score_run_offline,
+)
 from data_incident_gym.evaluation_runner import EvaluationRunner, EvaluationWorkflowError
 from data_incident_gym.lab import IncidentLab, LabError
 from data_incident_gym.run_context import RunContextError, resolve_active_run
+from data_incident_gym.scenario_admission import (
+    ADMISSIONS_DIRNAME,
+    AdmissionError,
+    ScenarioAdmissionReport,
+    build_admission,
+    write_admission_report,
+)
+from data_incident_gym.scenario_certification import (
+    CERTIFICATION_DIRNAME,
+    CatalogCertificationReport,
+    CertificationError,
+    certify_catalog,
+    write_certification_report,
+)
+from data_incident_gym.scenario_sets import ScenarioSetsError
 from data_incident_gym.scenarios import SUPPORTED_SCENARIO_IDS, ScenarioError
 
 app = typer.Typer(help="可复现的数据事故诊断实验场。")
@@ -59,6 +88,34 @@ STRATEGY_OPTION = typer.Option(
     CliStrategy.DIAGNOSTIC_KERNEL,
     "--strategy",
     help="诊断策略：diagnostic-kernel 或 static-skill。",
+)
+SCORER_OPTION = typer.Option(
+    "deterministic",
+    "--scorer",
+    help="离线评分器：目前仅支持 deterministic。",
+)
+CERTIFY_CASE_OPTION = typer.Option(
+    None,
+    "--case",
+    help="只认证指定案例；可重复传入。默认认证整个目录。",
+)
+CERTIFY_OUTPUT_OPTION = typer.Option(
+    None,
+    "--output",
+    help="认证报告输出路径；默认 artifacts/certifications/<case|all>.json。",
+)
+CERTIFY_OVERWRITE_OPTION = typer.Option(
+    False,
+    "--overwrite",
+    help="允许覆盖既有认证报告。",
+)
+CERTIFY_ADMIT_OPTION = typer.Option(
+    False,
+    "--admit",
+    help=(
+        "改为写入场景准入报告（含认证结果、场景卡片与 A/B 对称性）到 --output；"
+        "默认 artifacts/admissions/<case|all>.json。"
+    ),
 )
 BENCHMARK_ID_OPTION = typer.Option(MANIFEST_ID, "--manifest-id")
 IMPLEMENTATION_REVISION_OPTION = typer.Option(..., "--implementation-revision")
@@ -286,7 +343,206 @@ def eval_run(
     typer.echo(f"status: {result.status.value}")
     typer.echo(f"run_id: {result.run_id}")
     typer.echo(f"artifacts: artifacts/{result.run_id}")
+    if result.scoring_inputs_dir is not None:
+        typer.echo(f"scoring_inputs: {result.scoring_inputs_dir}")
     if result.status != EvaluationStatus.PASSED:
+        raise typer.Exit(code=1)
+
+
+def _exit_scoring_inputs_error(run_id: str, error: EvaluationInputsError) -> None:
+    try:
+        classification = classify_scoring_inputs(PROJECT_ROOT, run_id)
+    except EvaluationInputsError:
+        typer.echo(f"离线评分失败 [{error.code}]。", err=True)
+        raise typer.Exit(code=1) from None
+    reasons = ", ".join(classification.reasons)
+    allowed = {
+        ArtifactInputStatus.RE_SCORABLE: "可完整重评",
+        ArtifactInputStatus.PARTIAL_ANALYSIS: "仅可部分分析，不产出评分",
+        ArtifactInputStatus.NOT_RE_SCORABLE: "不可复评",
+    }[classification.status]
+    typer.echo(
+        f"离线评分失败 [{error.code}]：该运行分类为 {classification.status.value}"
+        f"（{allowed}；{reasons}）。",
+        err=True,
+    )
+    raise typer.Exit(code=1) from None
+
+
+@eval_app.command(
+    "score",
+    help=(
+        "对已归档的评分输入执行只读离线重评。\n"
+        "不调用模型、数据库或 dbt，不修改原始产物，也不改变原批次结论。"
+    ),
+)
+def eval_score(
+    run_id: str,
+    scorer: str = SCORER_OPTION,
+) -> None:
+    """对已归档的评分输入执行只读离线重评。"""
+    if scorer != "deterministic":
+        typer.echo(f"离线评分失败 [SCORER_UNKNOWN]：未知评分器 {scorer}。", err=True)
+        raise typer.Exit(code=1)
+    try:
+        result = score_run_offline(PROJECT_ROOT, run_id)
+    except EvaluationInputsError as error:
+        _exit_scoring_inputs_error(run_id, error)
+    except OfflineScoreError as error:
+        detail = f"：{error.detail}" if error.detail else ""
+        typer.echo(f"离线评分失败 [{error.code}]{detail}。", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo("离线重评完成。" if result.created else "派生评分已存在，返回既有结果。")
+    typer.echo(f"status: {result.evaluation.status.value}")
+    typer.echo(f"run_id: {result.run_id}")
+    typer.echo(f"score_id: {result.score_id}")
+    typer.echo(f"rescore: {result.score_dir}")
+    if not result.diff.available:
+        typer.echo(f"changed_checks: 无法比较（{result.diff.unavailable_reason}）")
+        return
+    changed = result.changed_check_codes
+    if changed:
+        typer.echo(f"changed_checks: {', '.join(changed)}")
+    else:
+        typer.echo("changed_checks: 无（与原归档评分逐项一致）")
+
+
+@eval_app.command(
+    "compare-scores",
+    help="比较同一运行的两个派生评分，输出逐项差异；只读，不重新评分。",
+)
+def eval_compare_scores(
+    run_id: str,
+    score_id_a: str,
+    score_id_b: str,
+) -> None:
+    """比较同一运行的两个派生评分。"""
+    try:
+        comparison = compare_offline_scores(PROJECT_ROOT, run_id, score_id_a, score_id_b)
+    except (OfflineScoreError, EvaluationInputsError) as error:
+        code = getattr(error, "code", "OFFLINE_SCORE_SETUP_FAILED")
+        typer.echo(f"评分比较失败 [{code}]。", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"run_id: {comparison.run_id}")
+    typer.echo(
+        f"A: {comparison.score_id_a[:12]} status={comparison.status_a} "
+        f"scorer={comparison.scorer_a.name}"
+    )
+    typer.echo(
+        f"B: {comparison.score_id_b[:12]} status={comparison.status_b} "
+        f"scorer={comparison.scorer_b.name}"
+    )
+    changed = comparison.changed_check_codes
+    if not changed:
+        typer.echo("两个评分的全部检查逐项一致。")
+        return
+    for item in comparison.changes:
+        if item.change == "UNCHANGED" and not item.details_changed:
+            continue
+        details = "（expected/actual 变化）" if item.details_changed else ""
+        typer.echo(
+            f"[{item.change}] {item.kind} {item.code}: "
+            f"{item.before_passed} -> {item.after_passed}{details}"
+        )
+
+
+@app.command(
+    "certify",
+    help=(
+        "运行公开证据参考解并认证场景可解性；确定性，不需要模型预算。\n"
+        "参考解只见公开 brief 与六个只读工具；私有合同只用于认证侧核对。\n"
+        "--admit 时写入场景准入报告（含场景卡片）。"
+    ),
+)
+def certify(
+    case: list[str] = CERTIFY_CASE_OPTION,
+    output: Path = CERTIFY_OUTPUT_OPTION,
+    overwrite: bool = CERTIFY_OVERWRITE_OPTION,
+    admit: bool = CERTIFY_ADMIT_OPTION,
+) -> None:
+    """运行公开证据参考解并认证场景可解性。"""
+    case_ids = tuple(case) if case else None
+    if case_ids is not None:
+        unknown = sorted({item for item in case_ids if item not in SUPPORTED_SCENARIO_IDS})
+        if unknown:
+            typer.echo(f"认证失败 [UNKNOWN_SCENARIO]：{'、'.join(unknown)}。", err=True)
+            raise typer.Exit(code=1)
+    try:
+        report = asyncio.run(certify_catalog(case_ids, project_root=PROJECT_ROOT))
+    except CertificationError as error:
+        typer.echo(f"认证失败 [{error.code}]。", err=True)
+        raise typer.Exit(code=1) from None
+    except Exception:
+        typer.echo("认证失败 [CERTIFICATION_SETUP_FAILED]。", err=True)
+        raise typer.Exit(code=1) from None
+    default_name = (
+        f"{case_ids[0]}.json" if case_ids is not None and len(case_ids) == 1 else "catalog.json"
+    )
+    if admit:
+        _write_admissions(report, case_ids, output, overwrite)
+        return
+    target = Path(output) if output is not None else CERTIFICATION_DIRNAME / default_name
+    if not target.is_absolute():
+        target = PROJECT_ROOT / target
+    if target.exists() and not overwrite:
+        typer.echo(f"认证报告已存在：{target}（使用 --overwrite 覆盖）。", err=True)
+        raise typer.Exit(code=1)
+    write_certification_report(report, target)
+    for entry in report.entries:
+        verdict = "通过" if entry.certified else "未通过"
+        classes = ",".join(entry.failure_classes) if entry.failure_classes else "-"
+        typer.echo(f"[{verdict}] {entry.case_id} failure_classes={classes}")
+    typer.echo(f"certified: {report.certified_count}/{len(report.entries)}")
+    typer.echo(f"report: {target}")
+    if report.certified_count != len(report.entries):
+        raise typer.Exit(code=1)
+
+
+def _write_admissions(
+    report: CatalogCertificationReport,
+    case_ids: tuple[str, ...] | None,
+    output: Path | None,
+    overwrite: bool,
+) -> None:
+    """从认证报告构建准入报告并写盘；不通过时以非零码退出。"""
+
+    default_name = (
+        f"{case_ids[0]}.json" if case_ids is not None and len(case_ids) == 1 else "all.json"
+    )
+    target = Path(output) if output is not None else ADMISSIONS_DIRNAME / default_name
+    if not target.is_absolute():
+        target = PROJECT_ROOT / target
+    if target.exists() and not overwrite:
+        typer.echo(f"准入报告已存在：{target}（使用 --overwrite 覆盖）。", err=True)
+        raise typer.Exit(code=1)
+    try:
+        entries = tuple(
+            build_admission(entry.case_id, entry, project_root=PROJECT_ROOT)
+            for entry in report.entries
+        )
+        admission_report = ScenarioAdmissionReport(created_at=report.created_at, entries=entries)
+        target = write_admission_report(admission_report, target)
+    except ScenarioSetsError as error:
+        typer.echo(f"准入失败 [{error.code}]。", err=True)
+        raise typer.Exit(code=1) from None
+    except ScenarioError as error:
+        typer.echo(f"准入失败 [SCENARIO_INVALID]：{error}。", err=True)
+        raise typer.Exit(code=1) from None
+    except AdmissionError as error:
+        typer.echo(f"准入失败 [{error.code}]。", err=True)
+        raise typer.Exit(code=1) from None
+    for entry in report.entries:
+        verdict = "通过" if entry.certified else "未通过"
+        classes = ",".join(entry.failure_classes) if entry.failure_classes else "-"
+        typer.echo(f"[{verdict}] {entry.case_id} failure_classes={classes}")
+    for entry in entries:
+        verdict = "准入" if entry.admitted else "拒绝"
+        reasons = ",".join(entry.reasons) if entry.reasons else "-"
+        typer.echo(f"[{verdict}] {entry.case_id} reasons={reasons}")
+    typer.echo(f"certified: {report.certified_count}/{len(report.entries)}")
+    typer.echo(f"admitted: {admission_report.admitted_count}/{len(admission_report.entries)}")
+    typer.echo(f"report: {target}")
+    if admission_report.admitted_count != len(admission_report.entries):
         raise typer.Exit(code=1)
 
 
@@ -419,6 +675,44 @@ def benchmark_report(
         raise typer.Exit(code=1) from None
     typer.echo(f"summary: {summary_path}")
     typer.echo(f"report: {report_path}")
+
+
+@benchmark_app.command("partial")
+def benchmark_partial(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+) -> None:
+    """只读分析未完成 suite 的重复稳定性；不产出正式报告，也不放宽其完整性要求。"""
+    try:
+        _, loaded = _confirmed_benchmark_manifest(manifest, confirm_sha256)
+        suite_root = PROJECT_ROOT / "artifacts" / "benchmarks" / loaded.manifest_id
+        result = analyze_partial_suite(loaded, suite_root)
+    except (
+        BenchmarkManifestError,
+        BenchmarkReportError,
+        BenchmarkRunnerError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"部分分析失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    reliability = result["reliability"]
+    typer.echo(f"protocol: {reliability['protocol_version']}")
+    typer.echo(
+        f"groups: {reliability['groups_complete']} complete / "
+        f"{reliability['groups_incomplete']} incomplete"
+    )
+    macro = reliability["macro_pass_hat"]
+    for key in ("1", "2", "3"):
+        metric = macro[key]
+        value = "n/a" if metric["value"] is None else f"{metric['value']:.3f}"
+        typer.echo(
+            f"macro pass^{key}: {value} ({metric['groups']} groups / {metric['trials']} trials)"
+        )
+    missing = [cell["run_id"] for cell in result["cells"] if cell["state"] == "MISSING"]
+    typer.echo(f"missing cells: {len(missing)}")
+    if missing:
+        typer.echo("缺失格不进入分母；完整子集分析见返回结构的 complete_subset，附覆盖量。")
 
 
 @benchmark_app.command("archive")
