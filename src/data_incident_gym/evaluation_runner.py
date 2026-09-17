@@ -8,10 +8,21 @@ from typing import NoReturn, Self
 
 from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
-from data_incident_gym.artifacts import ArtifactRun, ArtifactWriter, RecoveryStatus
+from data_incident_gym.artifacts import (
+    ArtifactRun,
+    ArtifactWriter,
+    BudgetSummary,
+    RecoveryStatus,
+)
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.diagnosis import RUN_ID_PATTERN, DiagnosisRunResult, DiagnosticStrategy
-from data_incident_gym.diagnostic_agent import DiagnosisRunner
+from data_incident_gym.diagnostic_agent import (
+    MODEL_REQUEST_LIMIT,
+    OUTPUT_RETRY_LIMIT,
+    TIMEOUT_SECONDS,
+    TOOL_CALL_LIMIT,
+    DiagnosisRunner,
+)
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evaluation import (
     DeterministicEvaluator,
@@ -20,6 +31,13 @@ from data_incident_gym.evaluation import (
     EvaluationCheckCode,
     EvaluationResult,
     EvaluationStatus,
+)
+from data_incident_gym.evaluation_inputs import (
+    RecoveryProof,
+    build_evaluation_input_bundle,
+    evaluator_identity_for,
+    scorer_name_for,
+    write_evaluation_input_bundle,
 )
 from data_incident_gym.lab import IncidentLab, ScenarioRun
 from data_incident_gym.lab_verifier import ScenarioVerification
@@ -43,6 +61,7 @@ class EvaluationAttemptResult(BaseModel):
     status: EvaluationStatus
     evaluation: EvaluationResult
     artifact_dir: Path
+    scoring_inputs_dir: Path | None = None
 
     @model_validator(mode="after")
     def validate_result_identity(self) -> Self:
@@ -52,6 +71,8 @@ class EvaluationAttemptResult(BaseModel):
             raise ValueError("attempt case must match evaluation")
         if self.evaluation.run_id != self.run_id or self.artifact_dir.name != self.run_id:
             raise ValueError("attempt run_id must match evaluation and artifact directory")
+        if self.scoring_inputs_dir is not None and self.scoring_inputs_dir.name != self.run_id:
+            raise ValueError("scoring inputs directory must match the run_id")
         return self
 
 
@@ -105,6 +126,7 @@ class EvaluationRunner:
         artifact_writer: ArtifactWriter,
         clock: Callable[[], datetime],
         benchmark_manifest_sha256: str | None = None,
+        project_root: Path = PROJECT_ROOT,
     ) -> None:
         if benchmark_manifest_sha256 is not None and not re.fullmatch(
             r"[0-9a-f]{64}", benchmark_manifest_sha256
@@ -119,6 +141,7 @@ class EvaluationRunner:
         self._artifact_writer = artifact_writer
         self._clock = clock
         self._benchmark_manifest_sha256 = benchmark_manifest_sha256
+        self._project_root = project_root
 
     @classmethod
     def for_project(
@@ -153,6 +176,7 @@ class EvaluationRunner:
             artifact_writer=writer,
             clock=lambda: datetime.now(UTC),
             benchmark_manifest_sha256=benchmark_manifest_sha256,
+            project_root=project_root,
         )
 
     async def run(
@@ -168,6 +192,8 @@ class EvaluationRunner:
         started_at = self._clock()
         recovery_required = True
         recovery_succeeded = False
+        recovery_case: str | None = None
+        recovery_fingerprint: str | None = None
         scenario_run: ScenarioRun | None = None
         diagnosis_run: DiagnosisRunResult | None = None
         primary_error_code: str | None = None
@@ -192,11 +218,23 @@ class EvaluationRunner:
         finally:
             if recovery_required:
                 try:
-                    recovery_succeeded = (
-                        self._lab.restore(incident_case_id).state == "HEALTHY"
+                    restore_result = self._lab.restore(incident_case_id)
+                    restore_state = getattr(restore_result, "state", None)
+                    restore_case = getattr(restore_result, "case_id", None)
+                    fingerprint = getattr(restore_result, "fingerprint", None)
+                    recovery_case = (
+                        restore_case
+                        if isinstance(restore_case, str) and restore_case
+                        else None
                     )
+                    recovery_fingerprint = (
+                        fingerprint if isinstance(fingerprint, str) else None
+                    )
+                    recovery_succeeded = restore_state == "HEALTHY"
                 except Exception:
                     recovery_succeeded = False
+                    recovery_case = None
+                    recovery_fingerprint = None
                     if primary_error_code is None:
                         primary_error_code = "RESTORE_FAILED"
 
@@ -213,6 +251,8 @@ class EvaluationRunner:
                 recovery_succeeded=recovery_succeeded,
             )
 
+        scenario: ScenarioSpec | None = None
+        verification: ScenarioVerification | None = None
         try:
             scenario = self._private_scenario_loader(incident_case_id)
         except Exception:
@@ -268,13 +308,25 @@ class EvaluationRunner:
                 evaluation=evaluation,
             )
             artifact_dir = self._artifact_writer.write(artifact_run)
+            scoring_inputs_dir = self._write_scoring_inputs(
+                scenario=scenario,
+                verification=verification,
+                diagnosis_run=diagnosis_run,
+                recovery_case=recovery_case,
+                recovery_succeeded=recovery_succeeded,
+                recovery_fingerprint=recovery_fingerprint,
+                artifact_dir=artifact_dir,
+            )
             return EvaluationAttemptResult(
                 incident_case_id=incident_case_id,
                 run_id=scenario_run.run_id,
                 status=evaluation.status,
                 evaluation=evaluation,
                 artifact_dir=artifact_dir,
+                scoring_inputs_dir=scoring_inputs_dir,
             )
+        except EvaluationWorkflowError:
+            raise
         except (TypeError, ValueError, ValidationError):
             _raise_workflow_error(
                 "ARTIFACT_WRITE_FAILED",
@@ -283,6 +335,53 @@ class EvaluationRunner:
         except Exception:
             _raise_workflow_error(
                 "ARTIFACT_WRITE_FAILED",
+                recovery_succeeded=recovery_succeeded,
+            )
+
+    def _write_scoring_inputs(
+        self,
+        *,
+        scenario: ScenarioSpec | None,
+        verification: ScenarioVerification | None,
+        diagnosis_run: DiagnosisRunResult,
+        recovery_case: str | None,
+        recovery_succeeded: bool,
+        recovery_fingerprint: str | None,
+        artifact_dir: Path,
+    ) -> Path | None:
+        if scenario is None or verification is None:
+            return None
+        try:
+            bundle = build_evaluation_input_bundle(
+                scenario=scenario,
+                verification=verification,
+                diagnosis_run=diagnosis_run,
+                recovery=RecoveryProof(
+                    source="LAB_RESTORE",
+                    incident_case_id=recovery_case or scenario.incident_case_id,
+                    state="HEALTHY" if recovery_succeeded else "FAILED",
+                    fingerprint=recovery_fingerprint,
+                ),
+                artifact_dir=artifact_dir,
+                budget=BudgetSummary(
+                    model_request_limit=MODEL_REQUEST_LIMIT,
+                    tool_call_limit=TOOL_CALL_LIMIT,
+                    output_retry_limit=OUTPUT_RETRY_LIMIT,
+                    timeout_seconds=TIMEOUT_SECONDS,
+                ),
+                evaluator=evaluator_identity_for(
+                    self._evaluator,
+                    name=scorer_name_for(self._evaluator),
+                ),
+            )
+            return write_evaluation_input_bundle(
+                self._project_root,
+                bundle,
+                created_at=self._clock(),
+            )
+        except Exception:
+            _raise_workflow_error(
+                "SCORING_INPUTS_WRITE_FAILED",
                 recovery_succeeded=recovery_succeeded,
             )
 

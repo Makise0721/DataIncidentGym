@@ -53,6 +53,19 @@ DEFAULT_FORMAL_PROVIDER = "openai-compatible"
 DEFAULT_FORMAL_MODEL = "mimo-v2.5-pro"
 DEFAULT_FORMAL_BASE_URL = "https://api.xiaomimimo.com/v1"
 
+# The frozen formal schedule predates later strategies (for example the
+# scenario-certification reference analyst). Enumerating the live enum here
+# would invalidate every sealed manifest, so the schedule names its six
+# policies explicitly.
+FROZEN_POLICY_STRATEGIES = (
+    DiagnosticStrategy.STATIC_SKILL,
+    DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+    DiagnosticStrategy.NO_TOOL,
+    DiagnosticStrategy.KERNEL_NO_LINEAGE,
+    DiagnosticStrategy.KERNEL_NO_SCHEMA,
+    DiagnosticStrategy.FIXED_RULE,
+)
+
 FORMAL_SCENARIO_IDS = (
     "schema_type_change_order_customer_a",
     "schema_type_change_order_customer_b",
@@ -398,14 +411,7 @@ class BenchmarkManifest(BaseModel):
                 raise ValueError("scenario catalog formal flag is invalid")
 
         policy_strategies = tuple(item.strategy for item in self.policies)
-        if policy_strategies != (
-            DiagnosticStrategy.STATIC_SKILL,
-            DiagnosticStrategy.DIAGNOSTIC_KERNEL,
-            DiagnosticStrategy.NO_TOOL,
-            DiagnosticStrategy.KERNEL_NO_LINEAGE,
-            DiagnosticStrategy.KERNEL_NO_SCHEMA,
-            DiagnosticStrategy.FIXED_RULE,
-        ):
+        if policy_strategies != FROZEN_POLICY_STRATEGIES:
             raise ValueError("policy order must contain the frozen six strategies")
         if len(policy_strategies) != len(set(policy_strategies)):
             raise ValueError("policy strategies must be unique")
@@ -507,7 +513,14 @@ def _policy_for_strategy(strategy: DiagnosticStrategy) -> ManifestPolicy:
     )
 
 
-def _result_inputs_for_project(project_root: Path) -> ManifestResultInputs:
+def result_inputs_for_project(project_root: Path) -> ManifestResultInputs:
+    """Return the result-input identity of the code and contracts on disk.
+
+    Readers that recompute evaluator-derived results for a frozen manifest must
+    compare this against ``manifest.result_inputs`` first: the derived metric is
+    only valid for the evaluator and schemas that manifest froze.
+    """
+
     evaluator_path = project_root / "src" / "data_incident_gym" / "evaluation.py"
     return ManifestResultInputs(
         profile_spec_version="profile_spec.v1",
@@ -555,8 +568,8 @@ def build_manifest(
         artifact_files=ARTIFACT_FILENAMES,
         scenario_catalog=_catalog_for_project(project_root),
         formal_scenario_ids=FORMAL_SCENARIO_IDS,
-        result_inputs=_result_inputs_for_project(project_root),
-        policies=tuple(_policy_for_strategy(strategy) for strategy in DiagnosticStrategy),
+        result_inputs=result_inputs_for_project(project_root),
+        policies=tuple(_policy_for_strategy(strategy) for strategy in FROZEN_POLICY_STRATEGIES),
         cells=generate_cells(manifest_id),
     )
 
@@ -568,8 +581,8 @@ def _current_result_inputs(
 ) -> tuple[tuple[ScenarioCatalogEntry, ...], ManifestResultInputs, tuple[ManifestPolicy, ...]]:
     return (
         _catalog_for_project(project_root),
-        _result_inputs_for_project(project_root),
-        tuple(_policy_for_strategy(strategy) for strategy in DiagnosticStrategy),
+        result_inputs_for_project(project_root),
+        tuple(_policy_for_strategy(strategy) for strategy in FROZEN_POLICY_STRATEGIES),
     )
 
 
@@ -678,6 +691,7 @@ __all__ = [
     "generate_cells",
     "load_manifest",
     "manifest_path_for",
+    "result_inputs_for_project",
     "run_id_for_cell",
     "verify_manifest",
 ]

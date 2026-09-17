@@ -53,7 +53,7 @@ from data_incident_gym.evidence import (
     RelationSchemaFact,
 )
 from data_incident_gym.lab import ScenarioRun
-from data_incident_gym.lab_verifier import ScenarioVerificationStatus
+from data_incident_gym.lab_verifier import ScenarioVerification, ScenarioVerificationStatus
 from data_incident_gym.run_context import IncidentBrief
 from data_incident_gym.scenarios import (
     P1_M7_SCENARIO_IDS,
@@ -747,7 +747,9 @@ def test_static_artifact_writer_persists_exact_six_files_without_kernel_state(
 
 
 @pytest.mark.asyncio
-async def test_runner_freezes_diagnosis_before_loading_private_facts() -> None:
+async def test_runner_freezes_diagnosis_before_loading_private_facts(
+    tmp_path: Path,
+) -> None:
     calls: list[str] = []
     case_id = "schema_type_change_payment_amount"
     scenario_run = ScenarioRun(
@@ -787,9 +789,20 @@ async def test_runner_freezes_diagnosis_before_loading_private_facts() -> None:
         calls.append("scenario.load_private")
         return load_scenario_spec(case_id)
 
-    def verification_loader(_run_id: str):
+    def verification_loader(_run_id: str) -> ScenarioVerification:
         calls.append("verification.load_private")
-        return object()
+        scenario = load_scenario_spec(case_id)
+        return ScenarioVerification(
+            status=ScenarioVerificationStatus.EXPECTED_FAILURE,
+            incident_case_id=case_id,
+            run_id=RUN_ID,
+            dbt_exit_code=1,
+            failed_nodes=(scenario.direct_failure,),
+            skipped_nodes=(),
+            affected_assets=tuple(sorted(scenario.affected_assets)),
+            schema_fingerprint="a" * 64,
+            profile_spec_sha256="b" * 64,
+        )
 
     def evaluator(*_args: object, **_kwargs: object) -> EvaluationResult:
         calls.append("evaluate.frozen_result")
@@ -798,7 +811,11 @@ async def test_runner_freezes_diagnosis_before_loading_private_facts() -> None:
     class FakeWriter:
         def write(self, _artifact_run: object) -> Path:
             calls.append("artifact.write")
-            return Path("artifacts") / RUN_ID
+            artifact_dir = tmp_path / "artifacts" / RUN_ID
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            for name in ARTIFACT_FILENAMES:
+                (artifact_dir / name).write_text("{}\n", encoding="utf-8")
+            return artifact_dir
 
     runner = EvaluationRunner(
         lab=FakeLab(),
@@ -809,11 +826,13 @@ async def test_runner_freezes_diagnosis_before_loading_private_facts() -> None:
         evaluator=evaluator,
         artifact_writer=FakeWriter(),
         clock=lambda: datetime(2026, 8, 30, tzinfo=UTC),
+        project_root=tmp_path,
     )
 
     result = await runner.run(case_id, DiagnosticStrategy.STATIC_SKILL)
 
     assert result.run_id == RUN_ID
+    assert (tmp_path / ".dig" / "scoring-inputs" / RUN_ID).is_dir()
     assert calls == [
         "lab.reset",
         "lab.prepare",

@@ -9,8 +9,12 @@ from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, model_validat
 
 from data_incident_gym.diagnosis import (
     KERNEL_STRATEGIES,
+    AffectedAssetClaim,
+    Diagnosis,
+    DiagnosisClaim,
     DiagnosisRunResult,
     DiagnosisStatus,
+    HealthStateClaim,
     ToolTraceEvent,
 )
 from data_incident_gym.diagnostic_kernel import (
@@ -41,7 +45,19 @@ from data_incident_gym.scenarios import (
     deleted_payment_rows,
 )
 
-EVALUATOR_VERSION = "p1.evaluator.v2"
+EVALUATOR_VERSION = "p1.evaluator.v3"
+
+# Claim kinds the evaluator has deterministic support rules for.
+ALL_CLAIM_KINDS = frozenset({"ROOT_CAUSE", "AFFECTED_ASSET", "HEALTH_STATE"})
+
+# Which claim kinds carry a support rule under a contract's expected status.
+# This mirrors the CLAIM_EVIDENCE_COMPATIBLE applicability gate (CONFIRMED and
+# NO_INCIDENT) and the claim kinds each branch of the rule consumes.
+APPLICABLE_CLAIM_KINDS_BY_EXPECTED_STATUS: dict[str, frozenset[str]] = {
+    "CONFIRMED": frozenset({"ROOT_CAUSE", "AFFECTED_ASSET"}),
+    "NO_INCIDENT": frozenset({"HEALTH_STATE"}),
+    "INSUFFICIENT_EVIDENCE": frozenset(),
+}
 
 
 class EvaluationStatus(StrEnum):
@@ -201,122 +217,152 @@ def _record_ids(records: tuple[EvidenceRecord, ...]) -> tuple[str, ...]:
     return tuple(record.evidence_id for record in records)
 
 
-def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResult) -> bool:
-    inventory = {record.evidence_id: record for record in diagnosis_run.evidence_records}
-    diagnosis = diagnosis_run.diagnosis
-    if diagnosis.status is not DiagnosisStatus.NO_INCIDENT:
-        return False
-    alert_subjects = {
+def _alert_subjects(scenario: ScenarioSpec) -> set[str]:
+    return {
         observation.subject
         for observation in scenario.incident_brief.observations
         if observation.kind == "CURRENT_PERIOD_COUNT"
     }
-    if not alert_subjects:
+
+
+def _health_claim_supported(
+    scenario: ScenarioSpec,
+    claim: HealthStateClaim,
+    records: tuple[EvidenceRecord, ...],
+) -> bool:
+    """Whether one HEALTH_STATE claim is supported by the given records.
+
+    This is the per-claim half of ``_health_evidence_valid``: the claim must
+    name an alert subject and its citations must jointly prove the healthy
+    reading (successful run, profile, history range, watermark freshness).
+    Callers resolve the citations from the run inventory first; a citation that
+    is missing from the inventory is never passed here.
+    """
+
+    if f"{claim.relation_name}/{claim.history_name}/{claim.bucket}" not in _alert_subjects(
+        scenario
+    ):
+        return False
+    profile = next(
+        (
+            record.content
+            for record in records
+            if isinstance(record.content, RelationDataProfileFact)
+            and record.content.relation_name == claim.relation_name
+        ),
+        None,
+    )
+    history = next(
+        (
+            record.content
+            for record in records
+            if isinstance(record.content, RelationHistoryFact)
+            and record.content.relation_name == claim.relation_name
+        ),
+        None,
+    )
+    run = next(
+        (
+            record.content
+            for record in records
+            if isinstance(record.content, DbtRunResultsFact)
+        ),
+        None,
+    )
+    if profile is None or history is None or run is None:
+        return False
+    if (
+        profile.snapshot.relation_name != claim.relation_name
+        or history.snapshot.relation_name != claim.relation_name
+    ):
+        return False
+    if (
+        run.run_status != "SUCCEEDED"
+        or run.dbt_exit_code != 0
+        or run.failed_nodes
+        or run.skipped_nodes
+    ):
+        return False
+    history_series = next(
+        (series for series in history.snapshot.histories if series.name == claim.history_name),
+        None,
+    )
+    if history_series is None:
+        return False
+    current = next(
+        (
+            point
+            for series in (history_series,)
+            for point in series.points
+            if point.bucket == claim.bucket
+        ),
+        None,
+    )
+    if current is None or current.value != claim.current_value:
+        return False
+    if (
+        history_series.watermark_column != "order_date"
+        or history_series.watermark_value is None
+    ):
+        return False
+    is_current_partition = current.bucket == history_series.watermark_value
+    try:
+        watermark = parse_watermark_value(history_series.watermark_value)
+    except (TypeError, ValueError):
+        return False
+    if is_current_partition:
+        if history_series.sla_seconds is None:
+            return False
+        logical_observed_at = scenario.incident_brief.logical_observed_at
+        if logical_observed_at.tzinfo is None or logical_observed_at.utcoffset() is None:
+            return False
+        lag = (logical_observed_at.astimezone(watermark.tzinfo) - watermark).total_seconds()
+        if lag < 0 or lag > history_series.sla_seconds:
+            return False
+    else:
+        try:
+            current_bucket = parse_watermark_value(current.bucket)
+        except (TypeError, ValueError):
+            return False
+        if current_bucket > watermark:
+            return False
+    if not is_current_partition:
+        for series in history.snapshot.histories:
+            if series.name != claim.history_name:
+                continue
+            prior = [
+                point.value
+                for point in series.points
+                if point.periodic_key == current.periodic_key and point.bucket < current.bucket
+            ]
+            return len(prior) >= 4 and min(prior) <= current.value <= max(prior)
+    return True
+
+
+def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResult) -> bool:
+    """Whether every health claim of a NO_INCIDENT diagnosis is supported.
+
+    v3 fixed a defect here: the v2 body returned after the first claim that
+    passed, so a diagnosis with several health claims only ever had its first
+    claim validated. The strict reading — every claim must stand on its own
+    citations — is the intended contract, and this fix is why the evaluator
+    identity moved to ``p1.evaluator.v3``.
+    """
+
+    inventory = {record.evidence_id: record for record in diagnosis_run.evidence_records}
+    diagnosis = diagnosis_run.diagnosis
+    if diagnosis.status is not DiagnosisStatus.NO_INCIDENT:
+        return False
+    if not _alert_subjects(scenario):
         return False
     for claim in diagnosis.claims:
         if claim.kind != "HEALTH_STATE":
             return False
-        if f"{claim.relation_name}/{claim.history_name}/{claim.bucket}" not in alert_subjects:
-            return False
         records = [inventory.get(evidence_id) for evidence_id in claim.evidence_ids]
         if any(record is None for record in records):
             return False
-        profile = next(
-            (
-                record.content
-                for record in records
-                if isinstance(record.content, RelationDataProfileFact)
-                and record.content.relation_name == claim.relation_name
-            ),
-            None,
-        )
-        history = next(
-            (
-                record.content
-                for record in records
-                if isinstance(record.content, RelationHistoryFact)
-                and record.content.relation_name == claim.relation_name
-            ),
-            None,
-        )
-        run = next(
-            (
-                record.content
-                for record in records
-                if isinstance(record.content, DbtRunResultsFact)
-            ),
-            None,
-        )
-        if profile is None or history is None or run is None:
+        if not _health_claim_supported(scenario, claim, tuple(records)):
             return False
-        if (
-            profile.snapshot.relation_name != claim.relation_name
-            or history.snapshot.relation_name != claim.relation_name
-        ):
-            return False
-        if (
-            run.run_status != "SUCCEEDED"
-            or run.dbt_exit_code != 0
-            or run.failed_nodes
-            or run.skipped_nodes
-        ):
-            return False
-        history_series = next(
-            (series for series in history.snapshot.histories if series.name == claim.history_name),
-            None,
-        )
-        if history_series is None:
-            return False
-        current = next(
-            (
-                point
-                for series in (history_series,)
-                for point in series.points
-                if point.bucket == claim.bucket
-            ),
-            None,
-        )
-        if current is None or current.value != claim.current_value:
-            return False
-        if (
-            history_series.watermark_column != "order_date"
-            or history_series.watermark_value is None
-        ):
-            return False
-        is_current_partition = current.bucket == history_series.watermark_value
-        try:
-            watermark = parse_watermark_value(history_series.watermark_value)
-        except (TypeError, ValueError):
-            return False
-        if is_current_partition:
-            if history_series.sla_seconds is None:
-                return False
-            logical_observed_at = scenario.incident_brief.logical_observed_at
-            if logical_observed_at.tzinfo is None or logical_observed_at.utcoffset() is None:
-                return False
-            lag = (
-                logical_observed_at.astimezone(watermark.tzinfo) - watermark
-            ).total_seconds()
-            if lag < 0 or lag > history_series.sla_seconds:
-                return False
-        else:
-            try:
-                current_bucket = parse_watermark_value(current.bucket)
-            except (TypeError, ValueError):
-                return False
-            if current_bucket > watermark:
-                return False
-        if not is_current_partition:
-            for series in history.snapshot.histories:
-                if series.name != claim.history_name:
-                    continue
-                prior = [
-                    point.value
-                    for point in series.points
-                    if point.periodic_key == current.periodic_key and point.bucket < current.bucket
-                ]
-                return len(prior) >= 4 and min(prior) <= current.value <= max(prior)
-        return True
     return bool(diagnosis.claims)
 
 
@@ -799,6 +845,56 @@ def _root_cause_evidence_compatible(
     )
 
 
+def _asset_claim_supported(
+    scenario: ScenarioSpec,
+    claim: AffectedAssetClaim,
+    records: tuple[EvidenceRecord, ...],
+) -> bool:
+    """Whether one AFFECTED_ASSET claim is supported by the given records.
+
+    This is the per-claim rule of ``_claim_evidence_compatible``: the asset must
+    be the direct failure, a downstream relation of it, its upstream test model,
+    and it must not be the failing test itself.
+    """
+
+    direct = any(
+        isinstance(record.content, DbtNodeErrorFact)
+        and record.content.node_id == claim.asset
+        for record in records
+    )
+    downstream = any(
+        isinstance(record.content, DbtLineageFact)
+        and record.content.direction == "downstream"
+        and any(
+            node.node_id == claim.asset or node.name == claim.asset
+            for node in record.content.related_nodes
+        )
+        for record in records
+    )
+    upstream_test_model = any(
+        isinstance(record.content, DbtLineageFact)
+        and record.content.direction == "upstream"
+        and record.content.node_id == scenario.direct_failure
+        and any(
+            node.node_id == claim.asset
+            and node.resource_type == "model"
+            and node.distance == 1
+            for node in record.content.related_nodes
+        )
+        for record in records
+    )
+    failed_test_claim = (
+        any(
+            isinstance(record.content, DbtNodeErrorFact)
+            and record.content.node_id == scenario.direct_failure
+            and record.content.resource_type == "test"
+            for record in records
+        )
+        and claim.asset == scenario.direct_failure
+    )
+    return not failed_test_claim and (direct or downstream or upstream_test_model)
+
+
 def _claim_evidence_compatible(
     scenario: ScenarioSpec,
     diagnosis_run: DiagnosisRunResult,
@@ -827,41 +923,100 @@ def _claim_evidence_compatible(
         records = [inventory.get(item) for item in claim.evidence_ids]
         if any(record is None for record in records):
             return False
-        direct = any(
-            isinstance(record.content, DbtNodeErrorFact)
-            and record.content.node_id == claim.asset
-            for record in records
-        )
-        downstream = any(
-            isinstance(record.content, DbtLineageFact)
-            and record.content.direction == "downstream"
-            and any(
-                node.node_id == claim.asset or node.name == claim.asset
-                for node in record.content.related_nodes
-            )
-            for record in records
-        )
-        upstream_test_model = any(
-            isinstance(record.content, DbtLineageFact)
-            and record.content.direction == "upstream"
-            and record.content.node_id == scenario.direct_failure
-            and any(
-                node.node_id == claim.asset
-                and node.resource_type == "model"
-                and node.distance == 1
-                for node in record.content.related_nodes
-            )
-            for record in records
-        )
-        failed_test_claim = any(
-            isinstance(record.content, DbtNodeErrorFact)
-            and record.content.node_id == scenario.direct_failure
-            and record.content.resource_type == "test"
-            for record in records
-        ) and claim.asset == scenario.direct_failure
-        if failed_test_claim or (not direct and not downstream and not upstream_test_model):
+        if not _asset_claim_supported(scenario, claim, tuple(records)):
             return False
     return True
+
+
+def _claim_label(claim: DiagnosisClaim) -> str:
+    if claim.kind == "HEALTH_STATE":
+        return f"{claim.relation_name}/{claim.history_name}/{claim.bucket}"
+    return claim.value
+
+
+class ClaimSupportVerdict(BaseModel):
+    """One claim's deterministic support verdict under the evaluator's rules.
+
+    ``supported`` is None when the claim kind carries no support rule for this
+    contract's expected status. Such claims are reported next to the coverage
+    rate instead of being scored as unsupported claims.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: StrictStr
+    value: StrictStr
+    evidence_ids: tuple[StrictStr, ...]
+    applicable: StrictBool
+    supported: StrictBool | None
+
+
+def claim_supported_by_records(
+    scenario: ScenarioSpec,
+    claim: DiagnosisClaim,
+    records: tuple[EvidenceRecord, ...],
+    *,
+    all_records: tuple[EvidenceRecord, ...],
+) -> bool:
+    """Whether the given records support one claim, using the evaluator's rules.
+
+    ``records`` are the resolved citations under test; ``all_records`` is the
+    run's full evidence inventory, which the root-cause rule also consults.
+    A claim kind without a rule is unsupported, never silently supported.
+    """
+
+    if claim.kind == "ROOT_CAUSE":
+        return _root_cause_evidence_compatible(
+            scenario, claim.root_cause_code, list(records), all_records
+        )
+    if claim.kind == "AFFECTED_ASSET":
+        return _asset_claim_supported(scenario, claim, records)
+    if claim.kind == "HEALTH_STATE":
+        return _health_claim_supported(scenario, claim, records)
+    return False
+
+
+def claim_support_verdicts(
+    scenario: ScenarioSpec,
+    diagnosis: Diagnosis,
+    records: tuple[EvidenceRecord, ...],
+) -> tuple[ClaimSupportVerdict, ...]:
+    """Per-claim support verdicts for one archived run.
+
+    Applicability follows the evaluator's own gate: claim support is checked for
+    contracts that expect CONFIRMED (root cause and affected assets) and
+    NO_INCIDENT (health state), and is not applicable for contracts that expect
+    INSUFFICIENT_EVIDENCE. A claim whose citations are missing from the run's
+    evidence inventory is unsupported, never silently skipped.
+    """
+
+    inventory = {record.evidence_id: record for record in records}
+    applicable_kinds = APPLICABLE_CLAIM_KINDS_BY_EXPECTED_STATUS.get(
+        scenario.expected_status, frozenset()
+    )
+    verdicts: list[ClaimSupportVerdict] = []
+    for claim in diagnosis.claims:
+        applicable = claim.kind in applicable_kinds
+        supported: bool | None = None
+        if applicable:
+            resolved = tuple(
+                record
+                for item in claim.evidence_ids
+                if (record := inventory.get(item)) is not None
+            )
+            supported = len(resolved) == len(claim.evidence_ids) and claim_supported_by_records(
+                scenario, claim, resolved, all_records=records
+            )
+        verdicts.append(
+            ClaimSupportVerdict(
+                kind=claim.kind,
+                value=_claim_label(claim),
+                evidence_ids=claim.evidence_ids,
+                applicable=applicable,
+                supported=supported,
+            )
+        )
+    return tuple(verdicts)
 
 
 def _insufficiency_matches(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResult) -> bool:
@@ -1178,6 +1333,9 @@ class DeterministicEvaluator:
 
 __all__ = [
     "ALLOWED_DIAGNOSTIC_TOOLS",
+    "ALL_CLAIM_KINDS",
+    "APPLICABLE_CLAIM_KINDS_BY_EXPECTED_STATUS",
+    "ClaimSupportVerdict",
     "ControllerCheck",
     "ControllerCheckCode",
     "DeterministicEvaluator",
@@ -1187,4 +1345,6 @@ __all__ = [
     "EvaluationResult",
     "EvaluationStatus",
     "TRACE_FORBIDDEN_PATTERN",
+    "claim_support_verdicts",
+    "claim_supported_by_records",
 ]

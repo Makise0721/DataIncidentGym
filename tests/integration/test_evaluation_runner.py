@@ -15,6 +15,12 @@ from data_incident_gym.diagnosis import DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import DiagnosisRunner, ModelIdentity
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evaluation import DeterministicEvaluator, EvaluationStatus
+from data_incident_gym.evaluation_inputs import (
+    ArtifactInputStatus,
+    classify_scoring_inputs,
+    load_evaluation_input_bundle,
+)
+from data_incident_gym.evaluation_rescore import score_run_offline
 from data_incident_gym.evaluation_runner import EvaluationRunner
 from data_incident_gym.evidence import EvidenceRecord
 from data_incident_gym.lab import IncidentLab
@@ -211,7 +217,7 @@ def _runner(project_root: Path) -> EvaluationRunner:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_function_model_runner_evaluates_and_writes_static_bundle() -> None:
+async def test_function_model_runner_evaluates_writes_bundle_and_rescores_offline() -> None:
     result = await _runner(PROJECT_ROOT).run(SCENARIO_ID, DiagnosticStrategy.STATIC_SKILL)
 
     assert result.status is EvaluationStatus.PASSED
@@ -222,3 +228,20 @@ async def test_function_model_runner_evaluates_and_writes_static_bundle() -> Non
     assert result.evaluation.status is EvaluationStatus.PASSED
     assert result.evaluation.controller_checks == ()
     assert result.artifact_dir.is_dir()
+
+    scoring_inputs_dir = PROJECT_ROOT / ".dig" / "scoring-inputs" / result.run_id
+    assert result.scoring_inputs_dir == scoring_inputs_dir
+    bundle = load_evaluation_input_bundle(PROJECT_ROOT, result.run_id)
+    assert bundle.run_id == result.run_id
+    assert bundle.recovery.recovered is True
+    assert bundle.recovery.fingerprint is not None
+    assert classify_scoring_inputs(PROJECT_ROOT, result.run_id).status is (
+        ArtifactInputStatus.RE_SCORABLE
+    )
+
+    rescore = score_run_offline(PROJECT_ROOT, result.run_id)
+
+    assert rescore.created is True
+    assert rescore.diff.available is True
+    assert rescore.changed_check_codes == ()
+    assert rescore.evaluation.model_dump() == result.evaluation.model_dump()

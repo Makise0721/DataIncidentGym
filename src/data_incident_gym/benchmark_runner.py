@@ -512,6 +512,7 @@ class BenchmarkRunner:
                 artifact_writer=artifact_writer,
                 clock=lambda: datetime.now(UTC),
                 benchmark_manifest_sha256=manifest_sha256,
+                project_root=project_root,
             )
 
         return cls(

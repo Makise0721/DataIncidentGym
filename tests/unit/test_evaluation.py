@@ -23,7 +23,9 @@ from data_incident_gym.evaluation import (
     EvaluationCheck,
     EvaluationCheckCode,
     EvaluationStatus,
+    _health_evidence_valid,
     _silent_drop_evidence_compatible,
+    claim_support_verdicts,
 )
 from data_incident_gym.evidence import (
     DbtLineageFact,
@@ -1174,6 +1176,60 @@ def test_evaluator_rejects_health_claim_for_a_non_alert_bucket() -> None:
     assert result.status is EvaluationStatus.FAILED
     assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
     assert EvaluationCheckCode.POSITIVE_HEALTH_EVIDENCE in result.failed_check_codes
+
+
+def _with_claims(
+    run: DiagnosisRunResult, claims: tuple[HealthStateClaim, ...]
+) -> DiagnosisRunResult:
+    return run.model_copy(
+        update={"diagnosis": run.diagnosis.model_copy(update={"claims": claims})}
+    )
+
+
+def test_health_validation_covers_every_claim_not_only_the_first() -> None:
+    """v3 contract change: the v2 body returned as soon as the first health
+    claim passed, so a later claim pointing at an unrelated relation was never
+    validated. Every claim must now stand on its own citations."""
+
+    scenario = load_scenario_spec("order_volume_within_sla")
+    run = _health_run(
+        "2018-04-09",
+        watermark_column="order_date",
+        watermark_value="2018-04-09",
+        sla_seconds=86400,
+    )
+    valid = run.diagnosis.claims[0]
+    assert _health_evidence_valid(scenario, run) is True
+
+    unrelated = HealthStateClaim(
+        kind="HEALTH_STATE",
+        relation_name="raw_customers",
+        history_name="order_count_by_day",
+        bucket="2018-04-09",
+        current_value=1,
+        evidence_ids=valid.evidence_ids,
+    )
+
+    for claims in ((valid, unrelated), (unrelated, valid)):
+        padded = _with_claims(run, claims)
+
+        assert _health_evidence_valid(scenario, padded) is False
+        result = DeterministicEvaluator.evaluate(
+            scenario,
+            _health_verification("order_volume_within_sla"),
+            padded,
+            recovery_succeeded=True,
+        )
+        assert result.status is EvaluationStatus.FAILED
+        assert EvaluationCheckCode.CLAIM_EVIDENCE_COMPATIBLE in result.failed_check_codes
+        assert EvaluationCheckCode.POSITIVE_HEALTH_EVIDENCE in result.failed_check_codes
+
+    verdicts = claim_support_verdicts(
+        scenario,
+        _with_claims(run, (valid, unrelated)).diagnosis,
+        run.evidence_records,
+    )
+    assert [verdict.supported for verdict in verdicts] == [True, False]
 
 
 def _scenario_with_logical_time(scenario, logical_observed_at: datetime):
