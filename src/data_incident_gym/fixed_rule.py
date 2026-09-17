@@ -35,10 +35,16 @@ from data_incident_gym.evidence import (
     RelationDataProfileFact,
     RelationHistoryFact,
     RelationSchemaFact,
+    safe_error_code,
 )
 from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.profiles import parse_watermark_value
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
+from data_incident_gym.strategy_adapter import (
+    FinalSubmission,
+    StrategySession,
+    builtin_declaration,
+)
 
 FIXED_RULE_VERSION = "p1.fixed-rule.v1"
 FIXED_RULE_TOOL_NAMES = (
@@ -50,7 +56,6 @@ FIXED_RULE_TOOL_NAMES = (
     "get_relation_history",
 )
 FIXED_RULE_TOOL_LIMIT = 8
-_ERROR_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
 def _canonical_json(value: object) -> str:
@@ -66,12 +71,7 @@ def _fingerprint(run_id: str, tool_name: str, arguments: dict[str, str]) -> str:
 
 
 def _safe_error_code(error: BaseException) -> str:
-    code = getattr(error, "code", None)
-    return (
-        code
-        if isinstance(code, str) and _ERROR_CODE_PATTERN.fullmatch(code)
-        else "EVIDENCE_TOOL_ERROR"
-    )
+    return safe_error_code(error)
 
 
 def _relation_names(context: ObservableRunContext, kind: str) -> tuple[str, ...]:
@@ -179,12 +179,14 @@ class FixedRuleRunner:
         project_root: Path,
         tools: EvidenceTools,
         context: ObservableRunContext,
+        session: StrategySession | None = None,
     ) -> None:
         self._run_id = run_id
         self._settings = settings
         self._project_root = project_root
         self._tools = tools
         self._context = context
+        self._session = session
         self._started_at = monotonic()
         self._records: list[EvidenceRecord] = []
         self._trace: list[ToolTraceEvent | EvidenceGateTraceEvent] = []
@@ -201,13 +203,29 @@ class FixedRuleRunner:
         tools: EvidenceTools | None = None,
     ) -> FixedRuleRunner:
         context = resolve_run_context(run_id, project_root=project_root)
+        backend = tools or EvidenceTools.for_run(run_id, settings, project_root)
+        session = StrategySession(
+            run_id=run_id,
+            tools=backend,
+            context=context,
+            declaration=builtin_declaration(
+                model_provider="none", model_name="fixed-rule", deterministic=True
+            ),
+        )
         return cls(
             run_id=run_id,
             settings=settings,
             project_root=project_root,
-            tools=tools or EvidenceTools.for_run(run_id, settings, project_root),
+            tools=session.tools_facade(),
             context=context,
+            session=session,
         )
+
+    @property
+    def session(self) -> StrategySession | None:
+        """The protocol session this runner runs under, if any."""
+
+        return self._session
 
     @property
     def policy_identity(self) -> PolicyIdentity:
@@ -216,6 +234,10 @@ class FixedRuleRunner:
     @property
     def strategy(self) -> DiagnosticStrategy:
         return DiagnosticStrategy.FIXED_RULE
+
+    @property
+    def _provider_label(self) -> str:
+        return "fixed-rule"
 
     def _build_policy_identity(self) -> PolicyIdentity:
         return fixed_rule_policy_identity()
@@ -919,7 +941,31 @@ class FixedRuleRunner:
             (("TRANSFORMATION_DEFINITION", "alert signal", "NOT_OBSERVABLE"),)
         )
 
+    def _submit_through_session(self, diagnosis: Diagnosis) -> Diagnosis:
+        if self._session is None:
+            return diagnosis
+        receipt = self._session.submit(
+            FinalSubmission(
+                status=diagnosis.status,
+                summary=diagnosis.summary,
+                root_cause_code=diagnosis.root_cause_code,
+                affected_assets=diagnosis.affected_assets,
+                evidence_ids=diagnosis.evidence_ids,
+                claims=diagnosis.claims,
+                unresolved_evidence=diagnosis.unresolved_evidence,
+                recommended_actions=diagnosis.recommended_actions,
+                confidence=diagnosis.confidence,
+            )
+        )
+        if not receipt.accepted or receipt.diagnosis is None:
+            raise RuntimeError(
+                f"protocol rejected the built-in final submission: {receipt.error}"
+            )
+        return receipt.diagnosis
+
     def _build_result(self, diagnosis: Diagnosis) -> DiagnosisRunResult:
+        diagnosis = self._submit_through_session(diagnosis)
+        strategy = self.strategy
         trace = [
             *self._trace,
             EvidenceGateTraceEvent(
@@ -929,19 +975,19 @@ class FixedRuleRunner:
             ),
             DiagnosisTerminalTraceEvent(
                 event_type="DIAGNOSIS_TERMINAL",
-                strategy=DiagnosticStrategy.FIXED_RULE,
+                strategy=strategy,
                 status=diagnosis.status,
                 evidence_inventory=tuple(record.evidence_id for record in self._records),
             ),
         ]
         return DiagnosisRunResult(
-            strategy=DiagnosticStrategy.FIXED_RULE,
+            strategy=strategy,
             policy_identity=self._policy_identity,
             diagnosis=diagnosis,
             evidence_records=tuple(self._records),
             trace=tuple(trace),
             metrics=DiagnosisMetrics(
-                provider="fixed-rule",
+                provider=self._provider_label,
                 model="none",
                 model_requests=0,
                 input_tokens=0,

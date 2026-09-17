@@ -281,6 +281,24 @@ class EvidenceToolError(RuntimeError):
         self.__context__ = None
 
 
+ERROR_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+def safe_error_code(error: BaseException) -> str:
+    """The error's stable code, or a generic fallback for anything else.
+
+    Shared by every layer that must record a refusal without leaking message
+    text: the runner's trace, the strategy-protocol receipts and the kernel.
+    """
+
+    code = getattr(error, "code", None)
+    return (
+        code
+        if isinstance(code, str) and ERROR_CODE_PATTERN.fullmatch(code)
+        else "EVIDENCE_TOOL_ERROR"
+    )
+
+
 class InvalidRunIdError(EvidenceToolError):
     code = "INVALID_RUN_ID"
 

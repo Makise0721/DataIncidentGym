@@ -94,6 +94,11 @@ from data_incident_gym.evidence import (
 )
 from data_incident_gym.evidence_tools import EvidenceTools
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
+from data_incident_gym.strategy_adapter import (
+    FinalSubmission,
+    StrategySession,
+    builtin_declaration,
+)
 
 BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v18"
@@ -2384,6 +2389,7 @@ class DiagnosisRunner:
         strategy: DiagnosticStrategy,
         context: ObservableRunContext,
         owned_model_client: AsyncOpenAI | None = None,
+        session: StrategySession | None = None,
     ) -> None:
         self._run_id = run_id
         self._settings = settings
@@ -2394,6 +2400,7 @@ class DiagnosisRunner:
         self._strategy = strategy
         self._context = context
         self._owned_model_client = owned_model_client
+        self._session = session
         self._budget = DiagnosisBudget()
         surface = policy_surface_for_strategy(strategy, model=model)
         self._tool_schema_payload = surface.tool_schema_payload
@@ -2435,8 +2442,20 @@ class DiagnosisRunner:
             owned_model_client = client
         elif model_identity is None:
             raise ValueError("model_identity is required when injecting a model")
+        session: StrategySession | None = None
         if tools is None:
-            tools = EvidenceTools.for_run(run_id, settings, project_root=project_root)
+            backend = EvidenceTools.for_run(run_id, settings, project_root=project_root)
+            session = StrategySession(
+                run_id=run_id,
+                tools=backend,
+                context=context,
+                declaration=builtin_declaration(
+                    model_provider=model_identity.provider,
+                    model_name=model_identity.model,
+                    deterministic=False,
+                ),
+            )
+            tools = session.tools_facade()
         assert model_identity is not None
         assert tools is not None
         return cls(
@@ -2449,11 +2468,18 @@ class DiagnosisRunner:
             strategy=strategy,
             context=context,
             owned_model_client=owned_model_client,
+            session=session,
         )
 
     @property
     def strategy(self) -> DiagnosticStrategy:
         return self._strategy
+
+    @property
+    def session(self) -> StrategySession | None:
+        """The protocol session this runner's tool calls pass through."""
+
+        return self._session
 
     @property
     def model_identity(self) -> ModelIdentity:
@@ -2667,6 +2693,37 @@ class DiagnosisRunner:
             + _canonical_json(payload)
         )
 
+    def _close_session(self, reason: str) -> None:
+        """Close the protocol session without an answer (failure terminals)."""
+
+        if self._session is None:
+            return
+        if self._session.cancellation is not None or self._session.final_diagnosis is not None:
+            return
+        self._session.cancel(reason)  # type: ignore[arg-type]
+
+    def _submit_through_session(self, diagnosis: Diagnosis) -> Diagnosis:
+        if self._session is None:
+            return diagnosis
+        receipt = self._session.submit(
+            FinalSubmission(
+                status=diagnosis.status,
+                summary=diagnosis.summary,
+                root_cause_code=diagnosis.root_cause_code,
+                affected_assets=diagnosis.affected_assets,
+                evidence_ids=diagnosis.evidence_ids,
+                claims=diagnosis.claims,
+                unresolved_evidence=diagnosis.unresolved_evidence,
+                recommended_actions=diagnosis.recommended_actions,
+                confidence=diagnosis.confidence,
+            )
+        )
+        if not receipt.accepted or receipt.diagnosis is None:
+            raise RuntimeError(
+                f"protocol rejected the model runner's final submission: {receipt.error}"
+            )
+        return receipt.diagnosis
+
     def _result(self, state: _RunState) -> DiagnosisRunResult:
         if _is_kernel_strategy(state.strategy):
             if state.outcome is None or state.kernel is None:
@@ -2685,6 +2742,11 @@ class DiagnosisRunner:
             evidence_records = tuple(state.evidence_records)
             kernel_state = None
             trace = list(state.trace)
+        if diagnosis.status is DiagnosisStatus.MODEL_ERROR:
+            # A failed run has no answer to submit; the session closes without one.
+            self._close_session("RUN_FAILED")
+        else:
+            diagnosis = self._submit_through_session(diagnosis)
         trace.append(
             DiagnosisTerminalTraceEvent(
                 event_type="DIAGNOSIS_TERMINAL",
@@ -2743,6 +2805,7 @@ class DiagnosisRunner:
                     accepted=True,
                 )
             )
+        self._close_session("STRATEGY_TIMEOUT" if reason == "MODEL_TIMEOUT" else "RUN_FAILED")
         return self._result(state)
 
     async def diagnose(self) -> DiagnosisRunResult:
@@ -2802,6 +2865,8 @@ class DiagnosisRunner:
                 evidence_inventory=(),
             ),
         )
+        # Construction or teardown failures also close the session.
+        self._close_session("RUN_FAILED")
         return DiagnosisRunResult(
             strategy=self._strategy,
             policy_identity=self._policy_identity,
