@@ -241,10 +241,16 @@ BASE_PROMPT = _read_prompt("base_safety.md")
 KERNEL_PROMPT = _read_prompt("diagnostic_kernel.md")
 STATIC_PROMPT = _read_prompt("static_skill.md")
 NO_TOOL_PROMPT = _read_prompt("no_tool.md")
+#: T12: the evidence-obligation planner has its own prompt; the kernel and
+#: static prompts are untouched by its introduction.
+PLANNER_PROMPT_VERSION = "p1.planner.v1"
+PLANNER_PROMPT = _read_prompt("evidence_planner.md")
 
 
 def load_strategy_prompt(strategy: DiagnosticStrategy) -> str:
     strategy = DiagnosticStrategy(strategy)
+    if strategy is DiagnosticStrategy.EVIDENCE_PLANNER:
+        return PLANNER_PROMPT
     if strategy in KERNEL_STRATEGIES:
         return KERNEL_PROMPT
     if strategy is DiagnosticStrategy.NO_TOOL:

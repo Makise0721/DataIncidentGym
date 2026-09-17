@@ -38,12 +38,24 @@ honest "qualified abstention on a real refusal receipt" path.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr
 
+from data_incident_gym.diagnosis import DiagnosticStrategy, PolicyIdentity
+from data_incident_gym.diagnostic_agent import (
+    BASE_PROMPT,
+    BASE_PROMPT_VERSION,
+    MODEL_REQUEST_LIMIT,
+    OUTPUT_RETRY_LIMIT,
+    PLANNER_PROMPT,
+    PLANNER_PROMPT_VERSION,
+    TIMEOUT_SECONDS,
+    TOOL_CALL_LIMIT,
+)
 from data_incident_gym.evidence import EvidenceRecord
 from data_incident_gym.strategy_adapter import StrategySession, ToolReceipt, ToolRequest
 
@@ -122,6 +134,64 @@ def obligation_id_for(tool_name: str, arguments: dict[str, Any]) -> str:
     """The obligation identity: tool name plus **every** effective argument."""
 
     return f"{tool_name}:{canonical_arguments(arguments)}"
+
+
+def _digest(payload: Any) -> str:
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def planner_controller_payload() -> dict[str, Any]:
+    """Everything the planner's controller protocol promises, in one payload.
+
+    Any change here changes the policy identity digest, so the plan contract
+    cannot drift silently under an existing identity.
+    """
+
+    return {
+        "protocol_version": PLANNER_PROTOCOL_VERSION,
+        "tools": sorted(TOOL_OBLIGATIONS),
+        "argument_order": {
+            tool: list(spec.arguments) for tool, spec in sorted(TOOL_OBLIGATIONS.items())
+        },
+        "evidence_kinds": {
+            tool: spec.evidence_kind for tool, spec in sorted(TOOL_OBLIGATIONS.items())
+        },
+        "budget": {
+            "model_request_limit": MODEL_REQUEST_LIMIT,
+            "tool_call_limit": TOOL_CALL_LIMIT,
+            "timeout_seconds": TIMEOUT_SECONDS,
+        },
+        "plan_refusal_budget": {
+            "limit": OUTPUT_RETRY_LIMIT,
+            "counter": "plan_refusals",
+            "note": "separate from the T09 submission retry counter",
+        },
+        "outcomes": sorted(VALID_OUTCOMES),
+        "error_codes": sorted(PLAN_ERROR_CODES),
+        "obligation_schema": EvidenceObligation.model_json_schema(),
+        "verdict_schema": PlanVerdict.model_json_schema(),
+    }
+
+
+def evidence_planner_policy_identity() -> PolicyIdentity:
+    """The planner's policy identity: prompt, controller payload and tool schema.
+
+    The planner is a *model* strategy, so its controller surface is bound here
+    rather than through ``_build_policy_surface`` — that registry builds the
+    kernel/static decision schemas, which are not this strategy's surface.
+    """
+
+    return PolicyIdentity(
+        strategy=DiagnosticStrategy.EVIDENCE_PLANNER,
+        base_prompt_version=BASE_PROMPT_VERSION,
+        base_prompt_sha256=hashlib.sha256(BASE_PROMPT.encode("utf-8")).hexdigest(),
+        strategy_prompt_version=PLANNER_PROMPT_VERSION,
+        strategy_prompt_sha256=hashlib.sha256(PLANNER_PROMPT.encode("utf-8")).hexdigest(),
+        controller_protocol_version=PLANNER_PROTOCOL_VERSION,
+        controller_protocol_sha256=_digest(planner_controller_payload()),
+        tool_schema_sha256=_digest(sorted(TOOL_OBLIGATIONS)),
+    )
 
 
 class EvidenceObligation(BaseModel):
@@ -454,11 +524,14 @@ class PlannerController:
 __all__ = [
     "PLANNER_PROTOCOL_VERSION",
     "PLAN_ERROR_CODES",
+    "VALID_OUTCOMES",
     "EvidenceObligation",
     "PlanStepResult",
     "PlanVerdict",
     "PlannerController",
     "TOOL_OBLIGATIONS",
     "canonical_arguments",
+    "evidence_planner_policy_identity",
     "obligation_id_for",
+    "planner_controller_payload",
 ]

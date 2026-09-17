@@ -67,6 +67,11 @@ class DiagnosticStrategy(StrEnum):
     KERNEL_NO_SCHEMA = "KERNEL_NO_SCHEMA"
     FIXED_RULE = "FIXED_RULE"
     REFERENCE_ANALYST = "REFERENCE_ANALYST"
+    #: T12 candidate: a model strategy whose evidence requests are declared as
+    #: obligations and validated before execution (``evidence_planner.py``). It
+    #: is deliberately outside ``MAIN_STRATEGIES``/``MODEL_STRATEGIES`` until its
+    #: runner is wired, so no report, schedule or frozen manifest changes today.
+    EVIDENCE_PLANNER = "EVIDENCE_PLANNER"
 
 
 MAIN_STRATEGIES = (

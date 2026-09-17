@@ -9,19 +9,40 @@ budget/refusal accounting.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
-from data_incident_gym.diagnosis import DiagnosisStatus, UnresolvedEvidence
+from data_incident_gym.diagnosis import (
+    KERNEL_STRATEGIES,
+    MAIN_STRATEGIES,
+    MODEL_STRATEGIES,
+    DiagnosisStatus,
+    DiagnosticStrategy,
+    UnresolvedEvidence,
+)
+from data_incident_gym.diagnostic_agent import (
+    KERNEL_PROMPT,
+    NO_TOOL_PROMPT,
+    PLANNER_PROMPT,
+    PLANNER_PROMPT_VERSION,
+    STATIC_PROMPT,
+    load_strategy_prompt,
+)
 from data_incident_gym.evidence import EvidenceRecord, RelationNotAllowedError
 from data_incident_gym.evidence_planner import (
     PLAN_ERROR_CODES,
+    PLANNER_PROTOCOL_VERSION,
+    TOOL_OBLIGATIONS,
     PlannerController,
     PlanVerdict,
     canonical_arguments,
+    evidence_planner_policy_identity,
     obligation_id_for,
+    planner_controller_payload,
 )
 from data_incident_gym.strategy_adapter import FinalSubmission, StrategySession
 
@@ -517,6 +538,75 @@ def test_the_refusal_budget_is_checked_before_the_specific_rules() -> None:
     assert snapshot["plan_operations_blocked"] == 2
     assert backend.calls == []
     assert session.snapshot()["tool_call_attempts"] == 0
+
+
+# -- identity registration -------------------------------------------------
+
+
+def _digest(payload: object) -> str:
+    """Independent recomputation of the canonical digest the identity uses."""
+
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def test_planner_identity_binds_the_prompt_and_the_plan_contract() -> None:
+    identity = evidence_planner_policy_identity()
+
+    assert identity.strategy is DiagnosticStrategy.EVIDENCE_PLANNER
+    assert identity.strategy_prompt_version == PLANNER_PROMPT_VERSION == "p1.planner.v1"
+    # Prompts are hashed as raw UTF-8 text; structured payloads use _digest.
+    assert identity.strategy_prompt_sha256 == hashlib.sha256(
+        PLANNER_PROMPT.encode("utf-8")
+    ).hexdigest()
+    assert identity.controller_protocol_version == PLANNER_PROTOCOL_VERSION
+    assert identity.controller_protocol_sha256 == _digest(planner_controller_payload())
+    assert identity.tool_schema_sha256 == _digest(sorted(TOOL_OBLIGATIONS))
+    # Deterministic: the same surface always yields the same identity.
+    assert evidence_planner_policy_identity() == identity
+
+
+def test_the_controller_digest_covers_every_contract_element() -> None:
+    """Any change to the promise changes the digest — including the new gate."""
+
+    base = planner_controller_payload()
+    payloads = (
+        {**base, "tools": [*base["tools"], "get_secret"]},
+        {**base, "error_codes": [*base["error_codes"], "PLAN_NEW_CODE"]},
+        {**base, "outcomes": ["SATISFIED"]},
+        {**base, "budget": {**base["budget"], "tool_call_limit": 9}},
+        {
+            **base,
+            "plan_refusal_budget": {**base["plan_refusal_budget"], "limit": 3},
+        },
+    )
+
+    for payload in payloads:
+        assert _digest(payload) != _digest(base)
+
+
+def test_the_planner_has_its_own_prompt() -> None:
+    prompt = load_strategy_prompt(DiagnosticStrategy.EVIDENCE_PLANNER)
+
+    assert prompt is PLANNER_PROMPT
+    assert prompt.strip()
+    for other in (KERNEL_PROMPT, STATIC_PROMPT, NO_TOOL_PROMPT):
+        assert prompt != other
+    # The plan contract is described to the model, not just enforced.
+    for marker in ("plan_step", "close_obligation", "submit_diagnosis", "SATISFIED", "REVOKED"):
+        assert marker in prompt
+
+
+def test_the_planner_stays_out_of_the_existing_report_surfaces_for_now() -> None:
+    """Registration into the schedule/report tuples is deferred to the runner
+    slice: today no report section, benchmark schedule or frozen manifest sees a
+    new member."""
+
+    planner = DiagnosticStrategy.EVIDENCE_PLANNER
+
+    assert planner not in MAIN_STRATEGIES
+    assert planner not in MODEL_STRATEGIES
+    assert planner not in KERNEL_STRATEGIES
 
 
 def test_unknown_obligation_cannot_be_closed() -> None:
