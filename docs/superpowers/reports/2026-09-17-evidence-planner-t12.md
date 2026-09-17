@@ -4,9 +4,10 @@
 - 依据：设计 [2026-09-17-evidence-obligation-planner-design.md](../specs/2026-09-17-evidence-obligation-planner-design.md)；
   需求 M20 与 §10.7。
 - 交付（按切片提交）：`9353a7a` 计划校验层 → `4a0784f` 身份注册与 prompt → `ef779c5`/`27ac998`/`e95ec8b` 三轮审计修复 →
-  `1f50026` 模型可见面与同源 schema → `81a5b4a` 描述入身份 → `efe3a68` runner 与规划器路径回归。
-- 验证：`ruff check .` 通过；`git diff --check` 通过；全量单测 **827 passed / 5 skipped**
-  （规划器相关 48 项：`test_evidence_planner.py` 41、`test_planner_runner.py` 7）。未调用真实模型，未运行数据库。
+  `1f50026` 模型可见面与同源 schema → `81a5b4a` 描述入身份 → `efe3a68` runner 与规划器路径回归 →
+  `b25bfb5` 关闭详情与完整义务状态入归档 → 本轮修复 `closed_by_outcome` 只统计被接受的关闭。
+- 验证：`ruff check .` 通过；`git diff --check` 通过；全量单测 **829 passed / 5 skipped**
+  （规划器相关 50 项：`test_evidence_planner.py` 41、`test_planner_runner.py` 9）。未调用真实模型，未运行数据库。
 
 ## 1. 机制 → 路径 → 断言映射
 
@@ -19,6 +20,7 @@
 | 提交拒绝预算耗尽 | 一直提交伪造引用 | `test_a_run_of_refused_submissions_fails_closed`：`MODEL_ERROR`/`MODEL_PROTOCOL_ERROR`、`output_retries_used=2`、会话 `cancel("RUN_FAILED")`、`model_requests>=2` 且 `output_tokens>0` |
 | 计划事件归档 | 计划拒绝/关闭/开放义务 | `test_plan_events_are_archived_without_counting_as_tool_calls`：`PLAN` 事件逐条保留且不进工具记录 |
 | 归档可复核性 | 同一义务分别 SATISFIED / REVOKED | `test_the_archive_distinguishes_a_satisfied_from_a_revoked_close`：两条路径序列化后不同；经 `TraceEvent` 联合类型重载后，`plan_outcome_summary` 仍能重建满足/撤销/开放计数与「已满足义务是否被最终引用覆盖」，不依赖内存中的 controller |
+| 被拒关闭不计入已关闭 | 关闭请求携带非本次调用返回的证据被拒后重试成功，归档重载 | `test_a_refused_close_does_not_count_as_closed_after_reload`：`closed_by_outcome` 只统计接受的关闭（2），请求次数单列于 `requested_by_outcome`（3），`refused_closes=1`，义务状态与计数一致 |
 | 截止时间 | 脚本化模型超出 deadline | `test_a_deadline_overflow_ends_in_a_timeout_terminal`：终态 `MODEL_ERROR`/`MODEL_TIMEOUT`、会话 `cancel("STRATEGY_TIMEOUT")` |
 | 校验拒绝不是收据 | 计划层全部拒绝路径 | `test_evidence_planner.py`：`PlanVerdict` 只带 `PLAN_*` 码、不携带证据、不消耗工具尝试；后端拒绝保留真实码且不属于 `PLAN_*` |
 | 义务身份 | 全参数规范 JSON | 参数顺序无关、上游/下游分离、分隔符碰撞不可能、已关闭义务固定码 |

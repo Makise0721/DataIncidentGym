@@ -397,3 +397,56 @@ def test_the_archive_distinguishes_a_satisfied_from_a_revoked_close(
     assert summary["REVOKED"]["revoked"] == 1
     assert summary["REVOKED"]["closed_by_outcome"] == {"SATISFIED": 0, "REVOKED": 1}
     assert summary["SATISFIED"]["open"] == summary["REVOKED"]["open"] == 3
+
+
+def test_a_refused_close_does_not_count_as_closed_after_reload(
+    project_root: Path,
+) -> None:
+    """Audit regression: refused closes used to land in ``closed_by_outcome``."""
+
+    ids, obligations = _ids(), _obligation_ids()
+    # Foreign evidence: the lineage receipt did not come from this obligation's
+    # last call, so the close is refused and the obligation stays OPEN.
+    refused = ("close_obligation", {"obligation_id": obligations["node"],
+                                    "outcome": "SATISFIED",
+                                    "evidence_ids": [ids["lineage"]]})
+    retry = ("close_obligation", {"obligation_id": obligations["node"],
+                                  "outcome": "SATISFIED",
+                                  "evidence_ids": [ids["node"]]})
+    profile = ("close_obligation", {"obligation_id": obligations["profile"],
+                                    "outcome": "SATISFIED",
+                                    "evidence_ids": [ids["profile"]]})
+    runner = _runner(
+        [*_steps(), refused, retry, profile, ("submit_diagnosis", _confirmed())],
+        project_root,
+    )
+
+    result = asyncio.run(runner.diagnose())
+
+    assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
+    closes = [event for event in result.trace
+              if event.event_type == "PLAN" and event.kind == "CLOSE"]
+    assert [(event.accepted, event.verdict_code) for event in closes] == [
+        (False, "PLAN_EVIDENCE_NOT_RETURNED_BY_THIS_CALL"),
+        (True, None),
+        (True, None),
+    ]
+
+    # Reload from the serialized archive: no controller, no session.
+    payload = json.loads(json.dumps([event.model_dump(mode="json")
+                                     for event in result.trace]))
+    from pydantic import TypeAdapter
+
+    from data_incident_gym.diagnosis import TraceEvent
+    from data_incident_gym.evidence_planner import plan_outcome_summary
+
+    trace = [TypeAdapter(TraceEvent).validate_python(event) for event in payload]
+    summary = plan_outcome_summary(trace, ids.values())
+
+    assert summary["close_events"] == 3
+    assert summary["requested_by_outcome"] == {"SATISFIED": 3, "REVOKED": 0}
+    assert summary["closed_by_outcome"] == {"SATISFIED": 2, "REVOKED": 0}
+    assert summary["refused_closes"] == 1
+    assert summary["satisfied"] == 2
+    assert summary["revoked"] == 0
+    assert summary["open"] == 2

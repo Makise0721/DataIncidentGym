@@ -787,6 +787,15 @@ class PlannerController:
         )
 
 
+def _by_outcome(closes: Any) -> dict[str, int]:
+    """Count CLOSE events per requested outcome."""
+
+    return {
+        "SATISFIED": sum(1 for event in closes if event.requested_outcome == "SATISFIED"),
+        "REVOKED": sum(1 for event in closes if event.requested_outcome == "REVOKED"),
+    }
+
+
 def plan_outcome_summary(
     trace: Any, cited_evidence_ids: Any
 ) -> dict[str, Any]:
@@ -800,6 +809,7 @@ def plan_outcome_summary(
 
     plan_events = [event for event in trace if isinstance(event, PlanTraceEvent)]
     closes = [event for event in plan_events if event.kind == "CLOSE"]
+    accepted_closes = [event for event in closes if event.accepted]
     states = [event for event in plan_events if event.kind == "STATE"]
     state = states[-1] if states else None
     obligations = () if state is None else state.obligations
@@ -807,11 +817,11 @@ def plan_outcome_summary(
     cited = set(cited_evidence_ids)
     return {
         "close_events": len(closes),
-        "closed_by_outcome": {
-            "SATISFIED": sum(1 for event in closes if event.requested_outcome == "SATISFIED"),
-            "REVOKED": sum(1 for event in closes if event.requested_outcome == "REVOKED"),
-        },
-        "refused_closes": sum(1 for event in closes if not event.accepted),
+        "requested_by_outcome": _by_outcome(closes),
+        # Only closes the controller accepted: a refused request never closed
+        # anything, and counting it here would contradict the obligation state.
+        "closed_by_outcome": _by_outcome(accepted_closes),
+        "refused_closes": len(closes) - len(accepted_closes),
         "satisfied": len(satisfied),
         "revoked": sum(1 for item in obligations if item.status == "REVOKED"),
         "open": sum(1 for item in obligations if item.status == "OPEN"),
