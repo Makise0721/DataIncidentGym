@@ -40,10 +40,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic_ai import Agent, RunContext, ToolOutput
+from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.tools import GenerateToolJsonSchema
 
 from data_incident_gym.diagnosis import DiagnosticStrategy, PolicyIdentity
 from data_incident_gym.diagnostic_agent import (
@@ -57,7 +62,12 @@ from data_incident_gym.diagnostic_agent import (
     TOOL_CALL_LIMIT,
 )
 from data_incident_gym.evidence import EvidenceRecord
-from data_incident_gym.strategy_adapter import StrategySession, ToolReceipt, ToolRequest
+from data_incident_gym.strategy_adapter import (
+    FinalSubmission,
+    StrategySession,
+    ToolReceipt,
+    ToolRequest,
+)
 
 PLANNER_PROTOCOL_VERSION = "p1.planner_controller.v1"
 
@@ -163,6 +173,192 @@ def obligation_tool_schemas() -> list[dict[str, Any]]:
     ]
 
 
+class PlanStepDeclaration(BaseModel):
+    """The model's ``plan_step`` call: an intent plus the request it implies.
+
+    ``arguments`` is deliberately ``Any``-valued and the close ``outcome`` below
+    is a plain string: the plan layer must judge them at runtime (``PLAN_*``
+    verdicts), so the SDK schema describes the call instead of rejecting it
+    before the controller can answer.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool_name: StrictStr = Field(description="One of the six read-only evidence tools.")
+    arguments: dict[StrictStr, Any] = Field(
+        description="Exactly the tool's declared arguments; they are checked before execution."
+    )
+    intent: StrictStr = Field(
+        default="",
+        description="Why this evidence is needed — recorded for review, never used as evidence.",
+    )
+
+
+class ObligationCloseDeclaration(BaseModel):
+    """The model's ``close_obligation`` call for one obligation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    obligation_id: StrictStr = Field(
+        description="The id the previous tool result reported for this obligation."
+    )
+    outcome: StrictStr = Field(
+        description="SATISFIED (the last call returned evidence) or REVOKED (it did not)."
+    )
+    evidence_ids: tuple[StrictStr, ...] = Field(
+        default=(), description="Required for SATISFIED: ids from that call's own result."
+    )
+    reason: str | None = Field(
+        default=None, description="Required for REVOKED: the public reason."
+    )
+
+
+#: The model-visible surface: two action tools that answer with a receipt or a
+#: verdict, plus the terminal submission. Only the last one ends the run — a
+#: ``plan_step`` that ended it would leave the model unable to read what it got.
+PLANNER_ACTION_TOOLS: tuple[tuple[str, str, type[BaseModel]], ...] = (
+    (
+        "plan_step",
+        "Declare one evidence request: the tool, its arguments and the public intent.",
+        PlanStepDeclaration,
+    ),
+    (
+        "close_obligation",
+        "Close one obligation: SATISFIED only when that obligation's last call returned "
+        "evidence you cite; otherwise REVOKED with a public reason.",
+        ObligationCloseDeclaration,
+    ),
+)
+
+PLANNER_OUTPUT_TOOL: tuple[str, str, type[BaseModel]] = (
+    "submit_diagnosis",
+    "Submit the final diagnosis through the unified strategy protocol.",
+    FinalSubmission,
+)
+
+
+@dataclass
+class PlannerDeps:
+    """What the action tools need: the controller and the turns they answered."""
+
+    controller: PlannerController
+    #: One entry per action-tool call, in order — the model's own view, kept for
+    #: trace building. ``StrategySession.snapshot`` stays authoritative.
+    turns: list[dict[str, Any]] = field(default_factory=list)
+
+
+def register_planner_tools(agent: Any) -> None:
+    """Register the two action tools on ``agent`` (the terminal tool is the output).
+
+    The parameters are flat and match ``PLANNER_ACTION_TOOLS`` field for field,
+    so the schema the SDK registers for the model and the schema the identity
+    payload binds come from the same declaration.
+    """
+
+    plan_step_model = PLANNER_ACTION_TOOLS[0][2]
+    close_model = PLANNER_ACTION_TOOLS[1][2]
+
+    @agent.tool(name=PLANNER_ACTION_TOOLS[0][0], description=PLANNER_ACTION_TOOLS[0][1])
+    def plan_step(
+        ctx: RunContext[PlannerDeps],
+        tool_name: str,
+        arguments: dict[str, Any],
+        intent: str = "",
+    ) -> str:
+        declaration = plan_step_model.model_validate(
+            {"tool_name": tool_name, "arguments": arguments, "intent": intent}
+        )
+        result = ctx.deps.controller.plan_step(
+            declaration.tool_name, dict(declaration.arguments), intent=declaration.intent
+        )
+        payload = {
+            "obligation_id": result.verdict.obligation_id,
+            "accepted": result.verdict.accepted,
+            "verdict_code": result.verdict.code,
+            "detail": result.verdict.detail,
+            "tool_calls_used": result.verdict.tool_calls_used,
+            "plan_refusals_used": result.verdict.plan_refusals_used,
+            "plan_refusal_limit": result.verdict.plan_refusal_limit,
+            "evidence_ids": [] if result.receipt is None else list(result.receipt.evidence_ids),
+            "refusal_code": None
+            if result.receipt is None or result.receipt.error is None
+            else result.receipt.error.code,
+            "evidence": [record.model_dump(mode="json") for record in result.evidence],
+        }
+        ctx.deps.turns.append({"tool": "plan_step", **payload})
+        return json.dumps(payload, ensure_ascii=False)
+
+    @agent.tool(name=PLANNER_ACTION_TOOLS[1][0], description=PLANNER_ACTION_TOOLS[1][1])
+    def close_obligation(
+        ctx: RunContext[PlannerDeps],
+        obligation_id: str,
+        outcome: str,
+        evidence_ids: list[str] | None = None,
+        reason: str | None = None,
+    ) -> str:
+        declaration = close_model.model_validate(
+            {
+                "obligation_id": obligation_id,
+                "outcome": outcome,
+                "evidence_ids": tuple(evidence_ids or ()),
+                "reason": reason,
+            }
+        )
+        verdict = ctx.deps.controller.close_obligation(
+            declaration.obligation_id,
+            declaration.outcome,
+            evidence_ids=declaration.evidence_ids,
+            reason=declaration.reason,
+        )
+        payload = {
+            "accepted": verdict.accepted,
+            "verdict_code": verdict.code,
+            "detail": verdict.detail,
+            "tool_calls_used": verdict.tool_calls_used,
+            "plan_refusals_used": verdict.plan_refusals_used,
+            "plan_refusal_limit": verdict.plan_refusal_limit,
+        }
+        ctx.deps.turns.append({"tool": "close_obligation", **payload})
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def planner_output_definition() -> ToolOutput[Any]:
+    """The terminal tool: only a submitted diagnosis ends the run."""
+
+    name, description, model = PLANNER_OUTPUT_TOOL
+    return ToolOutput(model, name=name, description=description)
+
+
+def planner_model_tool_payload() -> dict[str, Any]:
+    """The **registered** schemas of the two action tools and the terminal output.
+
+    Built by assembling the same agent surface the runner uses (with a throwaway
+    model) and reading the definitions back out of the SDK, so the identity
+    binds what the model is actually offered rather than a parallel copy.
+    """
+
+    agent: Any = Agent(
+        FunctionModel(lambda _messages, _info: None),
+        deps_type=PlannerDeps,
+        output_type=planner_output_definition(),
+    )
+    register_planner_tools(agent)
+    # Same reader the audited evidence-tool surface uses (``_tool_schema_payload``).
+    tools = agent._function_toolset.tools  # noqa: SLF001
+    output_name, output_description, output_model = PLANNER_OUTPUT_TOOL
+    return {
+        "action_tools": [
+            {"name": name, "parameters": tools[name].function_schema.json_schema}
+            for name, _description, _model in PLANNER_ACTION_TOOLS
+        ],
+        "output_tool": {
+            "name": output_name,
+            "description": output_description,
+            "parameters": output_model.model_json_schema(schema_generator=GenerateToolJsonSchema),
+        },
+    }
+
+
 def planner_controller_payload() -> dict[str, Any]:
     """Everything the planner's controller protocol promises, in one payload.
 
@@ -171,13 +367,14 @@ def planner_controller_payload() -> dict[str, Any]:
     the whole mapping — tool name, evidence kind, subject argument and argument
     set — so no part of the obligation identity can be edited outside the digest.
 
-    Slice 3 (runner wiring) adds the three model output-tool schemas
-    (``plan_step``, ``close_obligation``, ``submit_diagnosis``) to this payload:
-    they are part of the model-visible surface and must be bound the same way.
+    The model-visible surface joins here too: the two action tools and the
+    terminal output tool are bound through their registered schemas, so the
+    identity covers what the model is actually offered.
     """
 
     return {
         "protocol_version": PLANNER_PROTOCOL_VERSION,
+        "model_tools": planner_model_tool_payload(),
         "tools": {
             tool: {
                 "evidence_kind": spec.evidence_kind,
@@ -297,9 +494,13 @@ class PlannerController:
     adds a gate, not a second policy.
     """
 
-    def __init__(self, session: StrategySession) -> None:
+    def __init__(
+        self, session: StrategySession, *, clock: Callable[[], float] | None = None
+    ) -> None:
         self._session = session
+        self._clock = clock or monotonic
         self._obligations: dict[str, _Obligation] = {}
+        self._steps: list[dict[str, Any]] = []
         self._executed = 0
         self._proposed = 0
         self._refusals = 0
@@ -322,6 +523,7 @@ class PlannerController:
         obligation = self._obligation_for(tool_name, arguments)
         obligation.last_intent = intent or None
         self._executed += 1
+        started_at = self._clock()
         receipt = self._session.call_tool(
             ToolRequest(
                 request_id=f"plan:{self._executed}",
@@ -329,10 +531,23 @@ class PlannerController:
                 arguments=dict(arguments),
             )
         )
+        elapsed_ms = max(0, int((self._clock() - started_at) * 1000))
         obligation.calls += 1
         obligation.last_call_accepted = receipt.accepted
         obligation.last_call_evidence_ids = tuple(receipt.evidence_ids)
         obligation.history.append("EXECUTED")
+        self._steps.append(
+            {
+                "step": self._executed,
+                "obligation_id": obligation.obligation_id,
+                "tool_name": tool_name,
+                "arguments": dict(arguments),
+                "accepted": receipt.accepted,
+                "error_code": None if receipt.error is None else receipt.error.code,
+                "evidence_ids": list(receipt.evidence_ids),
+                "elapsed_ms": elapsed_ms,
+            }
+        )
         return PlanStepResult(
             verdict=PlanVerdict(
                 accepted=True,
@@ -394,6 +609,15 @@ class PlannerController:
 
     # -- introspection -----------------------------------------------------
 
+    def step_records(self) -> tuple[dict[str, Any], ...]:
+        """One record per executed step: what was asked, what came back, how long.
+
+        Purely a ledger for traces and reports — the harness counters in
+        ``StrategySession.snapshot`` stay authoritative.
+        """
+
+        return tuple(dict(step) for step in self._steps)
+
     def obligations(self) -> tuple[EvidenceObligation, ...]:
         return tuple(
             EvidenceObligation(
@@ -425,6 +649,7 @@ class PlannerController:
             "plan_refusal_limit": self._refusal_limit,
             "plan_operations_blocked": self._blocked,
             "refusals_by_code": dict(self._refusal_codes),
+            "plan_steps_recorded": len(self._steps),
             "obligations": len(self._obligations),
             "obligations_open": open_ids,
             "obligations_satisfied": sorted(

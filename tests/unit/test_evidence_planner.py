@@ -690,3 +690,76 @@ def test_unknown_obligation_cannot_be_closed() -> None:
 
     assert verdict.accepted is False
     assert verdict.code == "PLAN_UNKNOWN_OBLIGATION"
+
+
+# -- model-visible surface (slice 3, part A) --------------------------------
+
+
+def test_registered_model_tools_match_the_identity_payload() -> None:
+    """Same source: the payload is read back from the registered agent."""
+
+    from pydantic_ai import Agent
+    from pydantic_ai.models.function import FunctionModel
+
+    from data_incident_gym.evidence_planner import (
+        PLANNER_ACTION_TOOLS,
+        PLANNER_OUTPUT_TOOL,
+        PlannerDeps,
+        planner_model_tool_payload,
+        planner_output_definition,
+        register_planner_tools,
+    )
+
+    payload = planner_model_tool_payload()
+    agent: Agent = Agent(
+        FunctionModel(lambda _messages, _info: None),
+        deps_type=PlannerDeps,
+        output_type=planner_output_definition(),
+    )
+    register_planner_tools(agent)
+    registered = agent._function_toolset.tools
+
+    assert [entry["name"] for entry in payload["action_tools"]] == [
+        name for name, _description, _model in PLANNER_ACTION_TOOLS
+    ]
+    for entry in payload["action_tools"]:
+        assert entry["parameters"] == registered[entry["name"]].function_schema.json_schema
+    assert payload["output_tool"]["name"] == PLANNER_OUTPUT_TOOL[0]
+    assert planner_output_definition().name == PLANNER_OUTPUT_TOOL[0]
+
+    plan_step_params = payload["action_tools"][0]["parameters"]
+    assert list(plan_step_params["properties"]) == ["tool_name", "arguments", "intent"]
+    assert plan_step_params["required"] == ["tool_name", "arguments"]
+    # Permissive on purpose: the plan layer judges these at runtime.
+    assert plan_step_params["properties"]["arguments"]["type"] == "object"
+    close_params = payload["action_tools"][1]["parameters"]
+    assert close_params["properties"]["outcome"]["type"] == "string"
+
+
+def test_the_identity_binds_the_registered_model_tools() -> None:
+    payload = planner_controller_payload()
+
+    assert "model_tools" in payload
+    assert [entry["name"] for entry in payload["model_tools"]["action_tools"]] == [
+        "plan_step",
+        "close_obligation",
+    ]
+    assert payload["model_tools"]["output_tool"]["name"] == "submit_diagnosis"
+    assert evidence_planner_policy_identity().controller_protocol_sha256 == _digest(payload)
+
+
+def test_executed_steps_are_recorded_for_the_trace() -> None:
+    controller, _, _ = _controller()
+
+    controller.plan_step("get_dbt_node_error", {"run_id": RUN_ID, "node_id": NODE})
+    refused = controller.plan_step("run_sql", {"query": "select 1"})
+    assert refused.verdict.accepted is False
+
+    records = controller.step_records()
+    assert len(records) == 1
+    assert records[0]["tool_name"] == "get_dbt_node_error"
+    assert records[0]["accepted"] is True
+    assert records[0]["error_code"] is None
+    assert records[0]["evidence_ids"]
+    assert records[0]["elapsed_ms"] >= 0
+    assert controller.snapshot()["plan_steps_recorded"] == 1

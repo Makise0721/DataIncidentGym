@@ -23,13 +23,15 @@
 
 ## 2. 计划校验层：可执行定义
 
-### 2.1 输出工具（模型可见）
+### 2.1 模型可见面：两个动作工具 + 一个终态输出工具
 
-| 输出工具 | 参数 | 作用 |
+| 模型可见工具 | 参数 | 作用 |
 | --- | --- | --- |
-| `plan_step` | `tool_name`、`arguments`、`intent` | 声明下一步要调用的只读工具、参数与公开理由（`intent` 只入轨迹，不参与判定） |
-| `close_obligation` | `obligation_id`、`outcome`（`SATISFIED`/`REVOKED`）、`evidence_ids`、`note` | 关闭一条义务：满足（必须引用**本次调用真实返回**的证据）或撤销（必须给出公开理由，如"该关系不在可观测白名单"） |
-| `submit_diagnosis` | 与 T09 `FinalSubmission` 同形 | 终态提交，规则不变（`EVIDENCE_NOT_REGISTERED`、输出重试预算等） |
+| `plan_step`（**动作工具**，非终态） | `tool_name`、`arguments`、`intent` | 声明下一步要调用的只读工具、参数与公开理由（`intent` 只入轨迹）；执行后把真实收据作为工具返回值交回模型 |
+| `close_obligation`（**动作工具**，非终态） | `obligation_id`、`outcome`（`SATISFIED`/`REVOKED`）、`evidence_ids`、`reason` | 关闭一条义务：满足（必须引用**本次调用真实返回**的证据）或撤销（必须给出公开理由）；返回 `PlanVerdict` |
+| `submit_diagnosis`（**终态输出工具**） | 与 T09 `FinalSubmission` 同形 | 唯一结束 run 的调用；规则不变（`EVIDENCE_NOT_REGISTERED`、提交重试预算等） |
+
+模型侧只有这三项：两个动作工具把收据/判定**返回给模型**继续推理，只有 `submit_diagnosis` 结束 run——把 `plan_step` 做成终态输出会让模型看不到自己刚拿到的证据。三项的注册 schema 由实际注册后的 agent 读回，并计入政策身份。
 
 **义务的身份是推导出来的，不是模型自由命名的**，而且必须覆盖全部有效参数：
 

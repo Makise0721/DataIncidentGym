@@ -535,6 +535,11 @@ class StrategySession:
     def registered_evidence_ids(self) -> tuple[str, ...]:
         return tuple(self._registered)
 
+    def registered_evidence(self) -> tuple[EvidenceRecord, ...]:
+        """The evidence records registered so far, in registration order."""
+
+        return tuple(self._registered.values())
+
     def snapshot(self) -> dict[str, Any]:
         reported_requests = self._self_reported_usage.get("model_requests")
         usage_violation = (
