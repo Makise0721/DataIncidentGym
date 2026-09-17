@@ -459,12 +459,35 @@ class KernelStateTraceEvent(BaseModel):
     state: Any
 
 
+class PlanTraceEvent(BaseModel):
+    """One planner event: a declared step, a close, or the obligation state.
+
+    This is the planner's own ledger and is deliberately **not** a
+    ``ToolTraceEvent``: a plan verdict is a validation outcome, not an executed
+    tool call, and counting one as the other would inflate the tool record.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    event_type: Literal["PLAN"] = "PLAN"
+    kind: Literal["STEP", "CLOSE", "STATE"]
+    accepted: StrictBool = True
+    verdict_code: StrictStr | None = None
+    obligation_id: StrictStr | None = None
+    tool_name: StrictStr | None = None
+    plan_refusals_used: Annotated[StrictInt, Field(ge=0)] = 0
+    plan_refusal_limit: Annotated[StrictInt, Field(ge=0)] = 0
+    tool_calls_used: Annotated[StrictInt, Field(ge=0)] = 0
+    open_obligations: tuple[StrictStr, ...] = ()
+
+
 TraceEvent = Annotated[
     ToolTraceEvent
     | EvidenceGateTraceEvent
     | ModelProtocolTraceEvent
     | KernelStateTraceEvent
-    | DiagnosisTerminalTraceEvent,
+    | DiagnosisTerminalTraceEvent
+    | PlanTraceEvent,
     Field(discriminator="event_type"),
 ]
 

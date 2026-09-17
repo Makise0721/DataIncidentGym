@@ -152,8 +152,15 @@ def _script(events):
     return play
 
 
+def _always(submission: dict[str, object]):
+    def play(_messages, _info) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart("submit_diagnosis", submission)])
+
+    return play
+
+
 def _runner(
-    events: list[tuple[str, dict[str, object]] | float],
+    events,
     project_root: Path,
     *,
     backend: _PlannerTools | None = None,
@@ -168,7 +175,7 @@ def _runner(
         RUN_ID,
         SimpleNamespace(),
         project_root,
-        model=FunctionModel(_script(events)),
+        model=FunctionModel(events if callable(events) else _script(events)),
         model_identity=ModelIdentity("test", "scripted"),
         session=session,
     )
@@ -252,7 +259,7 @@ def test_the_refusal_budget_blocks_steps_but_the_submission_still_lands(
     assert runner.session.final_diagnosis is not None
 
 
-def test_a_refused_submission_fails_closed(project_root: Path) -> None:
+def _forged() -> dict[str, object]:
     forged = "ev_" + "a" * 64
     submission = _confirmed()
     submission["evidence_ids"] = [forged]
@@ -261,7 +268,26 @@ def test_a_refused_submission_fails_closed(project_root: Path) -> None:
          "evidence_ids": [forged]},
         {"kind": "AFFECTED_ASSET", "asset": DOWNSTREAM, "evidence_ids": [forged]},
     ]
-    runner = _runner([("submit_diagnosis", submission)], project_root)
+    return submission
+
+
+def test_a_refused_submission_can_be_retried(project_root: Path) -> None:
+    """Audit regression: the first refusal used to end the run."""
+
+    runner = _runner(
+        [("submit_diagnosis", _forged()), ("submit_diagnosis", _abstain())], project_root
+    )
+
+    result = asyncio.run(runner.diagnose())
+
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+    assert runner.session.snapshot()["output_retries_used"] == 1
+    assert runner.session.final_diagnosis is not None
+    assert result.metrics.model_requests >= 2
+
+
+def test_a_run_of_refused_submissions_fails_closed(project_root: Path) -> None:
+    runner = _runner(_always(_forged()), project_root)
 
     result = asyncio.run(runner.diagnose())
 
@@ -269,7 +295,10 @@ def test_a_refused_submission_fails_closed(project_root: Path) -> None:
     assert result.diagnosis.summary == "MODEL_PROTOCOL_ERROR"
     assert result.evidence_records == ()
     assert runner.session.cancellation == "RUN_FAILED"
-    assert result.trace[-1].status is DiagnosisStatus.MODEL_ERROR
+    assert runner.session.snapshot()["output_retries_used"] == 2
+    # The failed run still reports what it spent (audit regression: zeros).
+    assert result.metrics.model_requests >= 2
+    assert result.metrics.output_tokens > 0
 
 
 def test_a_deadline_overflow_ends_in_a_timeout_terminal(
@@ -286,3 +315,32 @@ def test_a_deadline_overflow_ends_in_a_timeout_terminal(
     assert result.diagnosis.summary == "MODEL_TIMEOUT"
     assert runner.session.cancellation == "STRATEGY_TIMEOUT"
     assert result.metrics.tool_call_attempts == 0
+
+
+def test_plan_events_are_archived_without_counting_as_tool_calls(
+    project_root: Path,
+) -> None:
+    """Audit regression: plan refusals and closes used to vanish from the trace."""
+
+    invalid = ("plan_step", {"tool_name": "run_sql", "arguments": {"query": "select 1"},
+                             "intent": "outside the tool set"})
+    runner = _runner([*_steps(), invalid, *_close_events(), ("submit_diagnosis", _confirmed())],
+                     project_root)
+
+    result = asyncio.run(runner.diagnose())
+
+    plan_events = [event for event in result.trace if event.event_type == "PLAN"]
+    kinds = [event.kind for event in plan_events]
+    assert kinds == ["STEP"] * 5 + ["CLOSE"] * 2 + ["STATE"]
+    refused = [event for event in plan_events if event.accepted is False]
+    assert [event.verdict_code for event in refused] == ["PLAN_TOOL_NOT_ALLOWLISTED"]
+    assert refused[0].tool_name == "run_sql"
+    assert [event.obligation_id for event in plan_events if event.kind == "CLOSE"] == list(
+        _obligation_ids()[name] for name in ("node", "profile")
+    )
+    state = plan_events[-1]
+    assert len(state.open_obligations) == 2
+    # Plan verdicts stay out of the tool record: four calls, four tool events.
+    assert len([event for event in result.trace if event.event_type == "TOOL_CALL"]) == 4
+    assert result.metrics.tool_call_attempts == 4
+    assert result.trace[-1].event_type == "DIAGNOSIS_TERMINAL"

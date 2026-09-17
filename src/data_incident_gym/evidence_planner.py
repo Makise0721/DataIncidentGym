@@ -272,6 +272,7 @@ def register_planner_tools(agent: Any) -> None:
             declaration.tool_name, dict(declaration.arguments), intent=declaration.intent
         )
         payload = {
+            "tool_name": tool_name,
             "obligation_id": result.verdict.obligation_id,
             "accepted": result.verdict.accepted,
             "verdict_code": result.verdict.code,
@@ -311,6 +312,7 @@ def register_planner_tools(agent: Any) -> None:
             reason=declaration.reason,
         )
         payload = {
+            "obligation_id": declaration.obligation_id,
             "accepted": verdict.accepted,
             "verdict_code": verdict.code,
             "detail": verdict.detail,

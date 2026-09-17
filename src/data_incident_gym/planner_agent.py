@@ -28,8 +28,8 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
-from pydantic_ai import Agent, UsageLimits
-from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.models import Model
 
 from data_incident_gym.config import PROJECT_ROOT
@@ -40,6 +40,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
+    PlanTraceEvent,
     ToolTraceEvent,
 )
 from data_incident_gym.diagnostic_agent import (
@@ -125,7 +126,7 @@ class EvidencePlannerRunner:
         self._model = model
         self._model_identity = model_identity
         self._policy_identity = evidence_planner_policy_identity()
-        self._status: DiagnosisStatus | None = None
+        self._accepted: Diagnosis | None = None
 
     @classmethod
     def for_run(
@@ -178,6 +179,35 @@ class EvidencePlannerRunner:
             retries={"tools": 1, "output": OUTPUT_RETRY_LIMIT},
         )
         register_planner_tools(agent)
+
+        @agent.output_validator
+        def validate_submission(
+            ctx: RunContext[PlannerDeps], submission: FinalSubmission
+        ) -> FinalSubmission:
+            """The session judges the submission here, not after the run.
+
+            A refusal is a retryable answer: the model gets the code back and may
+            cite different evidence or conclude differently, bounded by the
+            session's own submission-refusal budget.
+            """
+
+            del ctx
+            receipt = self._session.submit(submission)
+            if receipt.accepted and receipt.diagnosis is not None:
+                self._accepted = receipt.diagnosis
+                return submission
+            error = receipt.error
+            code = "SUBMISSION_INVALID" if error is None else error.code
+            detail = "" if error is None or error.detail is None else f" ({error.detail})"
+            snapshot = self._session.snapshot()
+            budget = self._session.task_context().budget
+            raise ModelRetry(
+                f"the harness refused this submission [{code}]{detail}. "
+                f"Refused submissions: {snapshot['output_retries_used']}"
+                f"/{budget.output_retry_limit}. "
+                "Cite only evidence the tools returned, then submit again."
+            )
+
         return agent
 
     # -- run ---------------------------------------------------------------
@@ -186,38 +216,37 @@ class EvidencePlannerRunner:
         deps = PlannerDeps(controller=self._controller)
         started_at = datetime.now(UTC)
         started = monotonic()
-        usage: Any = None
+        # One accumulator for every exit path: a failed run still reports what it
+        # spent instead of showing zeros it did not earn.
+        usage = RunUsage()
+        self._accepted = None
         try:
             agent = self._agent(deps)
             with agent.parallel_tool_call_execution_mode("sequential"):
                 async with asyncio.timeout(TIMEOUT_SECONDS):
-                    result = await agent.run(
+                    await agent.run(
                         _user_prompt(self._context),
                         deps=deps,
+                        usage=usage,
                         # Model turns are guarded here; the evidence-call budget is
                         # enforced by the plan layer, which answers with a verdict
                         # instead of killing the run (an SDK-side tool limit would
                         # preempt PLAN_TOOL_BUDGET_EXHAUSTED and hide the refusal).
                         usage_limits=UsageLimits(request_limit=MODEL_REQUEST_LIMIT),
                     )
-            usage = result.usage
         except TimeoutError:
-            return self._terminal("MODEL_TIMEOUT", started_at, started, deps)
+            return self._terminal("MODEL_TIMEOUT", started_at, started, deps, usage)
         except UsageLimitExceeded as error:
-            return self._terminal(_usage_limit_reason(error), started_at, started, deps)
+            return self._terminal(_usage_limit_reason(error), started_at, started, deps, usage)
+        except UnexpectedModelBehavior:
+            return self._terminal("MODEL_PROTOCOL_ERROR", started_at, started, deps, usage)
         except Exception:
-            return self._terminal("MODEL_RUNTIME_ERROR", started_at, started, deps)
+            return self._terminal("MODEL_RUNTIME_ERROR", started_at, started, deps, usage)
 
-        submission = result.output
-        if not isinstance(submission, FinalSubmission):
-            return self._terminal("MODEL_PROTOCOL_ERROR", started_at, started, deps)
-        receipt = self._session.submit(submission)
-        if not receipt.accepted or receipt.diagnosis is None:
-            # The harness refused the answer: fail closed instead of reporting
-            # an unsubmitted diagnosis as a delivered result.
-            return self._terminal("MODEL_PROTOCOL_ERROR", started_at, started, deps)
-        self._status = receipt.diagnosis.status
-        return self._result(receipt.diagnosis, started_at, started, deps, usage)
+        if self._accepted is None:
+            # The run ended without the validator ever accepting a submission.
+            return self._terminal("MODEL_PROTOCOL_ERROR", started_at, started, deps, usage)
+        return self._result(self._accepted, started_at, started, deps, usage)
 
     def _terminal(
         self,
@@ -225,6 +254,7 @@ class EvidencePlannerRunner:
         started_at: datetime,
         started: float,
         deps: PlannerDeps,
+        usage: RunUsage,
     ) -> DiagnosisRunResult:
         if reason not in MODEL_ERROR_REASONS:
             reason = "MODEL_RUNTIME_ERROR"
@@ -236,8 +266,7 @@ class EvidencePlannerRunner:
             summary=reason,
             confidence=0.0,
         )
-        self._status = diagnosis.status
-        return self._result(diagnosis, started_at, started, deps, None)
+        return self._result(diagnosis, started_at, started, deps, usage)
 
     def _result(
         self,
@@ -245,11 +274,11 @@ class EvidencePlannerRunner:
         started_at: datetime,
         started: float,
         deps: PlannerDeps,
-        usage: Any,
+        usage: RunUsage,
     ) -> DiagnosisRunResult:
         del started_at
         records: tuple[EvidenceRecord, ...] = self._session.registered_evidence()
-        trace = [
+        trace: list[Any] = [
             ToolTraceEvent(
                 event_type="TOOL_CALL",
                 tool_name=step["tool_name"],
@@ -261,6 +290,11 @@ class EvidencePlannerRunner:
             )
             for step in self._controller.step_records()
         ]
+        plan_snapshot = self._controller.snapshot()
+        trace.extend(_plan_events(deps))
+        trace.append(
+            PlanTraceEvent(kind="STATE", open_obligations=tuple(plan_snapshot["obligations_open"]))
+        )
         trace.append(
             DiagnosisTerminalTraceEvent(
                 event_type="DIAGNOSIS_TERMINAL",
@@ -269,15 +303,15 @@ class EvidencePlannerRunner:
                 evidence_inventory=tuple(record.evidence_id for record in records),
             )
         )
-        snapshot = self._session.snapshot()
+        session_snapshot = self._session.snapshot()
         metrics = DiagnosisMetrics(
             provider=self._model_identity.provider,
             model=self._model_identity.model,
-            model_requests=0 if usage is None else int(usage.requests),
-            input_tokens=0 if usage is None else int(usage.input_tokens),
-            output_tokens=0 if usage is None else int(usage.output_tokens),
-            tool_call_attempts=snapshot["tool_call_attempts"],
-            successful_tool_calls=snapshot["accepted_tool_calls"],
+            model_requests=int(usage.requests),
+            input_tokens=int(usage.input_tokens),
+            output_tokens=int(usage.output_tokens),
+            tool_call_attempts=session_snapshot["tool_call_attempts"],
+            successful_tool_calls=session_snapshot["accepted_tool_calls"],
             elapsed_ms=max(0, int((monotonic() - started) * 1000)),
         )
         return DiagnosisRunResult(
@@ -297,6 +331,27 @@ class EvidencePlannerRunner:
     @property
     def session(self) -> StrategySession:
         return self._session
+
+
+def _plan_events(deps: PlannerDeps) -> list[PlanTraceEvent]:
+    """One plan event per declared step/close, in the order the model made them."""
+
+    events: list[PlanTraceEvent] = []
+    for turn in deps.turns:
+        is_step = turn["tool"] == "plan_step"
+        events.append(
+            PlanTraceEvent(
+                kind="STEP" if is_step else "CLOSE",
+                accepted=bool(turn["accepted"]),
+                verdict_code=turn.get("verdict_code"),
+                obligation_id=turn.get("obligation_id"),
+                tool_name=turn.get("tool_name") if is_step else None,
+                plan_refusals_used=int(turn.get("plan_refusals_used", 0)),
+                plan_refusal_limit=int(turn.get("plan_refusal_limit", 0)),
+                tool_calls_used=int(turn.get("tool_calls_used", 0)),
+            )
+        )
+    return events
 
 
 def _usage_limit_reason(error: UsageLimitExceeded) -> str:

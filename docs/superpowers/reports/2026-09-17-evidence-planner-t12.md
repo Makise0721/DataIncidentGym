@@ -5,8 +5,8 @@
   需求 M20 与 §10.7。
 - 交付（按切片提交）：`9353a7a` 计划校验层 → `4a0784f` 身份注册与 prompt → `ef779c5`/`27ac998`/`e95ec8b` 三轮审计修复 →
   `1f50026` 模型可见面与同源 schema → `81a5b4a` 描述入身份 → `efe3a68` runner 与规划器路径回归。
-- 验证：`ruff check .` 通过；`git diff --check` 通过；全量单测 **825 passed / 5 skipped**
-  （规划器相关 46 项：`test_evidence_planner.py` 41、`test_planner_runner.py` 5）。未调用真实模型，未运行数据库。
+- 验证：`ruff check .` 通过；`git diff --check` 通过；全量单测 **827 passed / 5 skipped**
+  （规划器相关 48 项：`test_evidence_planner.py` 41、`test_planner_runner.py` 7）。未调用真实模型，未运行数据库。
 
 ## 1. 机制 → 路径 → 断言映射
 
@@ -15,7 +15,9 @@
 | 计划 → 取证 → 提交 | `plan_step`（动作工具）返回真实收据；`submit_diagnosis`（终态输出工具）结束 run | `test_the_planner_loop_submits_a_confirmed_diagnosis`：`CONFIRMED`、4 次工具尝试、每步一条 `TOOL_CALL` 轨迹、终态事件含证据清单、2 条义务 `SATISFIED`、2 条仍 `OPEN` |
 | 工具调用预算 | 第 9 次 `plan_step` 只由计划层判定 | `test_the_tool_budget_stops_the_ninth_step`：`PLAN_TOOL_BUDGET_EXHAUSTED` verdict、尝试数停在 8、拒绝只记一次 |
 | 计划拒绝预算 | 两次非法声明后第三次（含合法声明）一律被挡 | `test_the_refusal_budget_blocks_steps_but_the_submission_still_lands`：`plan_refusals_used=2`、`plan_operations_blocked=1`、0 次工具尝试、提交仍被接受 |
-| 被拒提交 | 伪造引用进入 `session.submit` | `test_a_refused_submission_fails_closed`：终态 `MODEL_ERROR`/`MODEL_PROTOCOL_ERROR`、会话 `cancel("RUN_FAILED")`、无证据记录 |
+| 被拒提交（可重试） | 输出校验阶段交给会话判定 | `test_a_refused_submission_can_be_retried`：伪造引用先被拒（`output_retries_used=1`），随后合法弃答被接受 |
+| 提交拒绝预算耗尽 | 一直提交伪造引用 | `test_a_run_of_refused_submissions_fails_closed`：`MODEL_ERROR`/`MODEL_PROTOCOL_ERROR`、`output_retries_used=2`、会话 `cancel("RUN_FAILED")`、`model_requests>=2` 且 `output_tokens>0` |
+| 计划事件归档 | 计划拒绝/关闭/开放义务 | `test_plan_events_are_archived_without_counting_as_tool_calls`：`PLAN` 事件逐条保留且不进工具记录 |
 | 截止时间 | 脚本化模型超出 deadline | `test_a_deadline_overflow_ends_in_a_timeout_terminal`：终态 `MODEL_ERROR`/`MODEL_TIMEOUT`、会话 `cancel("STRATEGY_TIMEOUT")` |
 | 校验拒绝不是收据 | 计划层全部拒绝路径 | `test_evidence_planner.py`：`PlanVerdict` 只带 `PLAN_*` 码、不携带证据、不消耗工具尝试；后端拒绝保留真实码且不属于 `PLAN_*` |
 | 义务身份 | 全参数规范 JSON | 参数顺序无关、上游/下游分离、分隔符碰撞不可能、已关闭义务固定码 |
@@ -28,8 +30,13 @@
 - **单一权威计数**：工具调用由 `PlannerController`（校验门）与 `StrategySession`（登记、计数、错误码）执行；
   SDK 只守模型回合数（`request_limit=8`）。此前用 SDK 的 `tool_calls_limit` 会让第 9 次调用以
   `UsageLimitExceeded` 结束整个 run，使 `PLAN_TOOL_BUDGET_EXHAUSTED` 不可达——现已由计划层判定，run 继续。
-- **终态**：提交经 `session.submit`；被拒即 fail-closed 转 `MODEL_ERROR` 并取消会话；超时/用量/协议/运行时异常
-  一律转固定码的 `MODEL_ERROR` 并 `cancel`（`STRATEGY_TIMEOUT` / `RUN_FAILED`）。
+- **终态**：提交在 **agent 输出校验阶段**经 `session.submit`，被拒即作为可重试反馈交回模型（预算由会话自己的
+  提交拒绝计数 `output_retry_limit` 约束，与计划拒绝计数互不影响）；重试耗尽后才 fail-closed 转 `MODEL_ERROR`
+  并取消会话。超时/请求上限/协议/运行时异常一律转固定码的 `MODEL_ERROR` 并 `cancel`（`STRATEGY_TIMEOUT` / `RUN_FAILED`）。
+- **用量**：整个 run 使用同一个 `RunUsage` 累加器，成功与失败出口都读它——失败运行报告的是真实发生的请求与
+  token，不再出现"已请求但记 0"。
+- **计划事件**：新增 `PlanTraceEvent`（`kind` = `STEP`/`CLOSE`/`STATE`）独立记录计划拒绝、义务关闭与提交时仍
+  开放的义务，**不计入** `ToolTraceEvent`。
 - **轨迹**：每个已执行步骤一条 `ToolTraceEvent`（指纹、证据 id、错误码、耗时来自计划层账本），末尾一条
   `DIAGNOSIS_TERMINAL`；权威计数仍取会话快照。
 
