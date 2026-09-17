@@ -22,6 +22,7 @@ FORBIDDEN_TEXT = (
     "expected_status",
     "config/scenarios",
     ".dig/lab/private",
+    "scoring-inputs",
 )
 
 
