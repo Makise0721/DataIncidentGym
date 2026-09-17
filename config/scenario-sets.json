@@ -1,0 +1,79 @@
+{
+  "schema_version": "p1.scenario_sets.v1",
+  "partition_rule": "Holdout assignment is decided by fault mechanism and task structure, never by seed alone; a scenario already used for prompt or rule development can never be marked holdout. Public answers of dev scenarios may be used for reproduction but never count as unseen evaluation samples.",
+  "dev_scenarios": [
+    {
+      "case_id": "schema_rename_payment_amount",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "schema_type_change_payment_amount",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "schema_type_change_order_customer_a",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "schema_type_change_order_customer_b",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "order_volume_pattern_a",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "required_null_payment_id",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "required_null_order_customer_a",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "required_null_order_customer_b",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "duplicate_payment_record",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "duplicate_payment_coupon_a",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "duplicate_payment_coupon_b",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "orphan_payment_record",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "orphan_payment_coupon_a",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "orphan_payment_coupon_b",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "silent_payment_drop_record",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "silent_payment_drop_partition_a",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "silent_payment_drop_partition_b",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "order_volume_within_sla",
+      "reason": "used for prompt/rule development through p1-formal-v22"
+    }
+  ],
+  "holdout_scenarios": []
+}
