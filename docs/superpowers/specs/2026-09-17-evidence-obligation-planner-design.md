@@ -137,7 +137,8 @@ PLANNING ──plan_step(校验通过)──▶ EXECUTING ──▶ 真实 ToolR
 
 **规划器专属描述性诊断**（只描述机制，不参与任何门禁，且必须分别统计 `PlanVerdict` 与 `ToolReceipt`）：
 
-- `plan_step` 提出 / 校验拒绝（按 `PLAN_*` 码分类）/ 执行次数；
+- `plan_step` 提出 / 校验拒绝（按 `PLAN_*` 码分类）/ 执行次数；预算耗尽后被挡下的尝试次数
+  （`plan_operations_blocked`，与 `plan_refusals_used` 分开记，被挡下的尝试不抬高拒绝计数）；
 - 义务：登记数、满足数、撤销数、提交时仍 `OPEN` 的义务；
 - 后端拒绝（真实码）后是否重规划、重规划是否换了义务；
 - 最终引用是否覆盖其声明为 `SATISFIED` 的义务。
