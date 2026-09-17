@@ -258,13 +258,10 @@ class PlannerController:
         two outcomes, it does not enforce them.
         """
 
-        code, detail = self._terminal_or_deadline()
+        code, detail = self._entry_gate()
         if code is None and outcome not in VALID_OUTCOMES:
             code = "PLAN_OUTCOME_INVALID"
             detail = f"expected one of {', '.join(sorted(VALID_OUTCOMES))}, got {outcome!r}"
-        if code is None and self._refusals >= self._refusal_limit:
-            code = "PLAN_OUTPUT_RETRY_EXHAUSTED"
-            detail = "plan refusal budget is spent"
         obligation = self._obligations.get(obligation_id)
         if code is None and obligation is None:
             code, detail = "PLAN_UNKNOWN_OBLIGATION", f"never planned: {obligation_id}"
@@ -348,14 +345,9 @@ class PlannerController:
     def _validate_step(
         self, tool_name: str, arguments: dict[str, Any]
     ) -> tuple[str | None, str | None]:
-        code, detail = self._terminal_or_deadline()
+        code, detail = self._entry_gate()
         if code is not None:
             return code, detail
-        if self._refusals >= self._refusal_limit:
-            # The budget is checked *before* the specific validations: once it is
-            # spent every later plan operation is blocked, so a stream of invalid
-            # declarations cannot keep producing distinct refusal codes.
-            return "PLAN_OUTPUT_RETRY_EXHAUSTED", "plan refusal budget is spent"
         context = self._session.task_context()
         if tool_name not in TOOL_OBLIGATIONS:
             return "PLAN_TOOL_NOT_ALLOWLISTED", f"unknown tool: {tool_name}"
@@ -397,6 +389,22 @@ class PlannerController:
                 "PLAN_EVIDENCE_NOT_RETURNED_BY_THIS_CALL",
                 f"not returned by this obligation's last call: {', '.join(foreign)}",
             )
+        return None, None
+
+    def _entry_gate(self) -> tuple[str | None, str | None]:
+        """The checks that precede every operation-specific rule, in order.
+
+        Terminal state, then deadline, then the plan-refusal budget: once the
+        budget is spent both entry points answer ``PLAN_OUTPUT_RETRY_EXHAUSTED``
+        instead of producing another specific code, so the refusal counter can
+        never grow past its limit.
+        """
+
+        code, detail = self._terminal_or_deadline()
+        if code is not None:
+            return code, detail
+        if self._refusals >= self._refusal_limit:
+            return "PLAN_OUTPUT_RETRY_EXHAUSTED", "plan refusal budget is spent"
         return None, None
 
     def _terminal_or_deadline(self) -> tuple[str | None, str | None]:

@@ -452,6 +452,34 @@ def test_a_bogus_close_outcome_never_becomes_a_revoke(bogus: str) -> None:
     assert obligation.close_reason is None
 
 
+def test_a_stream_of_invalid_closes_is_blocked_once_the_budget_is_spent() -> None:
+    """Audit regression: the close entry point validated the outcome before the
+    refusal budget, so invalid closes kept returning specific codes and kept
+    growing the counter past its limit."""
+
+    controller, _, _ = _controller()
+    step = controller.plan_step("get_dbt_run_results", {"run_id": RUN_ID})
+    obligation_id = step.verdict.obligation_id
+
+    codes = [
+        controller.close_obligation(obligation_id, "BOGUS").code for _ in range(4)
+    ]
+
+    assert codes == [
+        "PLAN_OUTCOME_INVALID",
+        "PLAN_OUTCOME_INVALID",
+        "PLAN_OUTPUT_RETRY_EXHAUSTED",
+        "PLAN_OUTPUT_RETRY_EXHAUSTED",
+    ]
+    snapshot = controller.snapshot()
+    assert snapshot["plan_refusals_used"] == 2
+    assert snapshot["refusals_by_code"] == {"PLAN_OUTCOME_INVALID": 2}
+    assert snapshot["plan_operations_blocked"] == 2
+    obligation = controller.obligations()[0]
+    assert obligation.status == "OPEN"
+    assert obligation.close_reason is None
+
+
 def test_a_valid_close_still_works_after_one_bogus_outcome() -> None:
     controller, _, _ = _controller()
     step = controller.plan_step("get_dbt_run_results", {"run_id": RUN_ID})
