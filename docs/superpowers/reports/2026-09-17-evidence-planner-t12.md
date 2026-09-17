@@ -5,9 +5,11 @@
   需求 M20 与 §10.7。
 - 交付（按切片提交）：`9353a7a` 计划校验层 → `4a0784f` 身份注册与 prompt → `ef779c5`/`27ac998`/`e95ec8b` 三轮审计修复 →
   `1f50026` 模型可见面与同源 schema → `81a5b4a` 描述入身份 → `efe3a68` runner 与规划器路径回归 →
-  `b25bfb5` 关闭详情与完整义务状态入归档 → 本轮修复 `closed_by_outcome` 只统计被接受的关闭。
-- 验证：`ruff check .` 通过；`git diff --check` 通过；全量单测 **829 passed / 5 skipped**
-  （规划器相关 50 项：`test_evidence_planner.py` 41、`test_planner_runner.py` 9）。未调用真实模型，未运行数据库。
+  `b25bfb5` 关闭详情与完整义务状态入归档 → `8ba8651` 归档汇总只计被接受的关闭 → 本轮 benchmark 接入
+  （`MODEL_STRATEGIES` 注册、决策面委派、工厂路由、runner 构造与客户端生命周期）。
+- 验证：`ruff check .` 通过；`git diff --check` 通过；全量单测 **834 passed / 5 skipped**
+  （规划器相关 54 项：`test_evidence_planner.py` 42、`test_planner_runner.py` 12；另有
+  `test_diagnostic_agent.py` 与 `test_benchmark_runner.py` 的接线回归）。未调用真实模型，未运行数据库。
 
 ## 1. 机制 → 路径 → 断言映射
 
@@ -24,6 +26,9 @@
 | 截止时间 | 脚本化模型超出 deadline | `test_a_deadline_overflow_ends_in_a_timeout_terminal`：终态 `MODEL_ERROR`/`MODEL_TIMEOUT`、会话 `cancel("STRATEGY_TIMEOUT")` |
 | 校验拒绝不是收据 | 计划层全部拒绝路径 | `test_evidence_planner.py`：`PlanVerdict` 只带 `PLAN_*` 码、不携带证据、不消耗工具尝试；后端拒绝保留真实码且不属于 `PLAN_*` |
 | 义务身份 | 全参数规范 JSON | 参数顺序无关、上游/下游分离、分隔符碰撞不可能、已关闭义务固定码 |
+| 决策面与排程注册 | `policy_surface_for_strategy` 委派 `planner_policy_surface()`；`MODEL_STRATEGIES` 纳入该身份 | `test_the_standard_surface_path_returns_the_planner_surface`：身份与模型可见三工具载荷同源、Diagnosis 摘要与其他面一致；`test_the_planner_is_scheduled_but_not_frozen_into_old_identities`：不在 `MAIN_STRATEGIES`/`KERNEL_STRATEGIES`/`FROZEN_POLICY_STRATEGIES` |
+| benchmark 工厂路由 | `diagnosis_factory` 按策略分派 | `test_benchmark_factory_routes_the_planner_strategy`：规划器 cell 走 `EvidencePlannerRunner.for_run`（run ID、绑定后的 settings 与项目根原样传递）；`test_diagnostic_agent.py`：`DiagnosisRunner.for_run` 对该身份显式拒收 |
+| runner 构造与客户端生命周期 | `for_run` 无注入模型时按 settings 组装 OpenAI 兼容模型并持有客户端 | `test_for_run_without_a_model_builds_the_settings_model`：身份与申报一致、客户端被持有；`test_diagnose_closes_the_owned_settings_client`：run 结束即关闭；`test_injecting_a_model_requires_an_identity`：注入模型必须带身份 |
 
 ## 2. 实现要点
 
@@ -46,9 +51,11 @@
 ## 3. 未验证与边界
 
 - **未做真实测量**：没有真实模型调用，因此没有能力收益、成本或 `pass^k` 数据；本报告只证明软件行为。
-- **未接入既有排程**：规划器**未**进入 `MAIN_STRATEGIES`/`MODEL_STRATEGIES`，因此 `benchmark` 排程、报告分区与
-  冻结 manifest 目前看不到它。接入需要在 `policy_surface_for_strategy` 路径上为该身份提供决策面（由规划器
-  自己的 surface builder 承担），属新身份冻结前的最后一步，尚未实施。
+- **排程可见但未被排程**：规划器已进入 `MODEL_STRATEGIES`，benchmark 工厂按策略路由到
+  `EvidencePlannerRunner`，`policy_surface_for_strategy` 返回规划器自己的决策面。但它不在
+  `MAIN_STRATEGIES`，也**不在 `FROZEN_POLICY_STRATEGIES`**：所有已冻结 manifest 的排程单元、
+  报告分区与策略面校验保持原样，`verify_manifest` 不受影响。规划器真正进入排程需要新的 manifest
+  身份获批冻结（届时才决定它在排程与报告中的位置），尚未实施。
 - **未见变体未物化**：新变体仍是设计里的 dev 扩展回归集方案，需要一次有界的 Docker/PostgreSQL 实跑与单独授权。
 - **T05 回放**：既有 9 条回放未因本轮改动而改变（全量单测含其回归）；规划器路径的机制覆盖见 §1，不代表
   回放库已覆盖规划器。

@@ -1026,6 +1026,49 @@ def test_runner_binds_manifest_model_configuration_to_runtime_settings(tmp_path:
     assert evaluation_runner._diagnostic_settings.model_name == "mimo-v2.5-pro"
 
 
+def test_benchmark_factory_routes_the_planner_strategy(tmp_path: Path) -> None:
+    """The planner's cells must run through its own runner, not the shared
+    kernel/static loop."""
+
+    import data_incident_gym.benchmark_runner as benchmark_runner_module
+
+    manifest = build_manifest("3" * 40)
+    routed: list[tuple[str, Path, DiagnosticSettings]] = []
+
+    class _StubPlannerRunner:
+        @classmethod
+        def for_run(
+            cls,
+            run_id: str,
+            settings: DiagnosticSettings,
+            project_root: Path,
+        ) -> _StubPlannerRunner:
+            routed.append((run_id, project_root, settings))
+            return cls()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        benchmark_runner_module, "EvidencePlannerRunner", _StubPlannerRunner
+    )
+    try:
+        runner = BenchmarkRunner.for_project(
+            manifest,
+            project_root=tmp_path,
+            settings=Settings(_env_file=None),
+            diagnostic_settings=DiagnosticSettings(_env_file=None),
+        )
+        evaluation_runner = runner._evaluation_runner_factory()
+
+        probe = evaluation_runner._diagnosis_factory(
+            "0" * 32, DiagnosticStrategy.EVIDENCE_PLANNER
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert isinstance(probe, _StubPlannerRunner)
+    assert routed == [("0" * 32, tmp_path, evaluation_runner._diagnostic_settings)]
+
+
 def test_setup_error_materialization_writes_the_canonical_six_files(tmp_path: Path) -> None:
     manifest = build_manifest("e" * 40)
 

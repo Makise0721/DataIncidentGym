@@ -154,9 +154,26 @@ def test_auxiliary_model_strategies_use_only_their_frozen_surfaces(tmp_path: Pat
             model_identity=ModelIdentity("synthetic", "synthetic-model"),
         )
         for strategy in MODEL_STRATEGIES
+        # The planner deliberately runs through EvidencePlannerRunner; the
+        # kernel/static loop would execute a different contract.
+        if strategy is not DiagnosticStrategy.EVIDENCE_PLANNER
     }
 
-    assert tuple(runners) == MODEL_STRATEGIES
+    assert tuple(runners) == tuple(
+        strategy
+        for strategy in MODEL_STRATEGIES
+        if strategy is not DiagnosticStrategy.EVIDENCE_PLANNER
+    )
+    with pytest.raises(ValueError, match="EvidencePlannerRunner"):
+        DiagnosisRunner.for_run(
+            RUN_ID,
+            _settings(),
+            DiagnosticStrategy.EVIDENCE_PLANNER,
+            tmp_path,
+            model=model,
+            tools=SimpleNamespace(),
+            model_identity=ModelIdentity("synthetic", "synthetic-model"),
+        )
     assert (
         tuple(item["name"] for item in runners[DiagnosticStrategy.NO_TOOL]._tool_schema_payload)
         == ()

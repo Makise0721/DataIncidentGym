@@ -47,6 +47,7 @@ from data_incident_gym.evidence_planner import (
     obligation_tool_schemas,
     planner_controller_payload,
     planner_model_tool_payload,
+    planner_policy_surface,
 )
 from data_incident_gym.strategy_adapter import FinalSubmission, StrategySession
 
@@ -672,16 +673,42 @@ def test_the_prompt_keeps_the_two_refusal_budgets_apart() -> None:
     assert "2 次输出重试" not in prompt
 
 
-def test_the_planner_stays_out_of_the_existing_report_surfaces_for_now() -> None:
-    """Registration into the schedule/report tuples is deferred to the runner
-    slice: today no report section, benchmark schedule or frozen manifest sees a
-    new member."""
+def test_the_planner_is_scheduled_but_not_frozen_into_old_identities() -> None:
+    """Benchmark wiring: the planner is a model-backed strategy reachable
+    through the standard identity path, while no report partition, frozen
+    policy list or manifest identity gains a member retroactively."""
 
     planner = DiagnosticStrategy.EVIDENCE_PLANNER
 
+    assert planner in MODEL_STRATEGIES
     assert planner not in MAIN_STRATEGIES
-    assert planner not in MODEL_STRATEGIES
     assert planner not in KERNEL_STRATEGIES
+    from data_incident_gym.benchmark_manifest import FROZEN_POLICY_STRATEGIES
+
+    assert planner not in FROZEN_POLICY_STRATEGIES
+
+
+def test_the_standard_surface_path_returns_the_planner_surface() -> None:
+    """``policy_surface_for_strategy`` must not build the kernel/static surface
+    for the planner: identity readers (manifest policies, setup-failure
+    materialization) see the planner's own tools and verdict contract."""
+
+    from data_incident_gym.diagnostic_agent import policy_surface_for_strategy
+
+    surface = policy_surface_for_strategy(DiagnosticStrategy.EVIDENCE_PLANNER)
+
+    assert surface.policy_identity == evidence_planner_policy_identity()
+    assert [item["name"] for item in surface.tool_schema_payload] == [
+        "plan_step", "close_obligation", "submit_diagnosis",
+    ]
+    assert surface.strategy_prompt_version == PLANNER_PROMPT_VERSION
+    # The delivered artifact is the same Diagnosis schema every other surface
+    # carries, canonicalized the same way.
+    assert surface.final_diagnosis_schema_sha256 == policy_surface_for_strategy(
+        DiagnosticStrategy.STATIC_SKILL
+    ).final_diagnosis_schema_sha256
+    # Deterministic: the same surface is rebuilt identically.
+    assert planner_policy_surface() == surface
 
 
 def test_unknown_obligation_cannot_be_closed() -> None:

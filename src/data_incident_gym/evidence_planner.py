@@ -50,7 +50,7 @@ from pydantic_ai import Agent, RunContext, ToolOutput
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.tools import GenerateToolJsonSchema
 
-from data_incident_gym.diagnosis import DiagnosticStrategy, PolicyIdentity
+from data_incident_gym.diagnosis import Diagnosis, DiagnosticStrategy, PolicyIdentity
 from data_incident_gym.diagnostic_agent import (
     BASE_PROMPT,
     BASE_PROMPT_VERSION,
@@ -60,6 +60,8 @@ from data_incident_gym.diagnostic_agent import (
     PLANNER_PROMPT_VERSION,
     TIMEOUT_SECONDS,
     TOOL_CALL_LIMIT,
+    PolicySurface,
+    _sha256_json,
 )
 from data_incident_gym.evidence import EvidenceRecord
 from data_incident_gym.strategy_adapter import (
@@ -429,6 +431,31 @@ def evidence_planner_policy_identity() -> PolicyIdentity:
         controller_protocol_version=PLANNER_PROTOCOL_VERSION,
         controller_protocol_sha256=_digest(planner_controller_payload()),
         tool_schema_sha256=_digest(obligation_tool_schemas()),
+    )
+
+
+def planner_policy_surface() -> PolicySurface:
+    """The planner's decision surface for the standard identity path.
+
+    ``policy_surface_for_strategy`` delegates here, so manifests, setup-failure
+    materialization and any other identity reader see the planner's own tools
+    and verdict contract instead of the kernel/static evidence-tool surface.
+    The delivered artifact is still a ``Diagnosis``, so its schema digest uses
+    the same canonicalization every other surface carries.
+    """
+
+    identity = evidence_planner_policy_identity()
+    payload = planner_model_tool_payload()
+    return PolicySurface(
+        # One flat entry per model-visible tool (two action tools plus the
+        # terminal output), so ``tool_names`` readers see the planner's three
+        # tools exactly as the identity payload defines them.
+        tool_schema_payload=[*payload["action_tools"], payload["output_tool"]],
+        strategy_prompt_version=identity.strategy_prompt_version,
+        strategy_prompt_sha256=identity.strategy_prompt_sha256,
+        controller_protocol_sha256=identity.controller_protocol_sha256,
+        final_diagnosis_schema_sha256=_sha256_json(Diagnosis.model_json_schema()),
+        policy_identity=identity,
     )
 
 
@@ -848,4 +875,5 @@ __all__ = [
     "obligation_tool_schemas",
     "plan_outcome_summary",
     "planner_controller_payload",
+    "planner_policy_surface",
 ]

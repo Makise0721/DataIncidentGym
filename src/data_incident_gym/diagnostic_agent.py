@@ -2129,6 +2129,14 @@ def _build_policy_surface(
     model: Model | None = None,
 ) -> PolicySurface:
     strategy = DiagnosticStrategy(strategy)
+    if strategy is DiagnosticStrategy.EVIDENCE_PLANNER:
+        # The planner's decision surface is its own contract (plan tools and
+        # verdicts); the kernel/static surface below would publish the wrong
+        # identity for it. Deferred import: evidence_planner depends on this
+        # module at import time.
+        from data_incident_gym.evidence_planner import planner_policy_surface
+
+        return planner_policy_surface()
     if strategy not in MODEL_STRATEGIES:
         raise ValueError("strategy is not model-backed")
     kernel_mode = _is_kernel_strategy(strategy)
@@ -2432,6 +2440,8 @@ class DiagnosisRunner:
             project_root = strategy
             strategy = DiagnosticStrategy.DIAGNOSTIC_KERNEL
         strategy = DiagnosticStrategy(strategy)
+        if strategy is DiagnosticStrategy.EVIDENCE_PLANNER:
+            raise ValueError("EVIDENCE_PLANNER runs through EvidencePlannerRunner")
         if strategy not in MODEL_STRATEGIES:
             raise ValueError("strategy is not model-backed")
         context = resolve_run_context(run_id, project_root=project_root)

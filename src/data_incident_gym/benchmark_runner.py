@@ -78,6 +78,7 @@ from data_incident_gym.evaluation_runner import (
 )
 from data_incident_gym.fixed_rule import FixedRuleRunner, fixed_rule_policy_identity
 from data_incident_gym.lab import IncidentLab
+from data_incident_gym.planner_agent import EvidencePlannerRunner
 from data_incident_gym.scenarios import load_scenario_spec
 
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
@@ -488,9 +489,15 @@ class BenchmarkRunner:
             def diagnosis_factory(
                 run_id: str,
                 strategy: DiagnosticStrategy,
-            ) -> DiagnosisRunner | FixedRuleRunner:
+            ) -> DiagnosisRunner | FixedRuleRunner | EvidencePlannerRunner:
                 if strategy is DiagnosticStrategy.FIXED_RULE:
                     return FixedRuleRunner.for_run(
+                        run_id,
+                        diagnostic_settings,
+                        project_root,
+                    )
+                if strategy is DiagnosticStrategy.EVIDENCE_PLANNER:
+                    return EvidencePlannerRunner.for_run(
                         run_id,
                         diagnostic_settings,
                         project_root,

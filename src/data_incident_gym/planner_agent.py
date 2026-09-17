@@ -23,14 +23,18 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
 
+from openai import AsyncOpenAI
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, UsageLimits
 from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.models import Model
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 from data_incident_gym.config import PROJECT_ROOT
 from data_incident_gym.diagnosis import (
@@ -119,6 +123,7 @@ class EvidencePlannerRunner:
         session: StrategySession,
         model: Model | None,
         model_identity: ModelIdentity,
+        owned_model_client: AsyncOpenAI | None = None,
     ) -> None:
         self._run_id = run_id
         self._context = context
@@ -126,6 +131,7 @@ class EvidencePlannerRunner:
         self._controller = PlannerController(session)
         self._model = model
         self._model_identity = model_identity
+        self._owned_model_client = owned_model_client
         self._policy_identity = evidence_planner_policy_identity()
         self._accepted: Diagnosis | None = None
 
@@ -141,32 +147,49 @@ class EvidencePlannerRunner:
         backend: Any | None = None,
         session: StrategySession | None = None,
     ) -> EvidencePlannerRunner:
-        """Build a planner run; ``backend``/``session`` are for deterministic tests."""
+        """Build a planner run; ``backend``/``session`` are for deterministic tests.
+
+        Without an injected model the run uses the settings' OpenAI-compatible
+        endpoint and owns (and closes) the client itself, mirroring
+        ``DiagnosisRunner.for_run``.
+        """
 
         context = resolve_run_context(run_id, project_root=project_root)
+        owned_model_client: AsyncOpenAI | None = None
+        if model is None:
+            client = AsyncOpenAI(
+                base_url=str(settings.model_base_url),
+                api_key=settings.model_api_key.get_secret_value(),
+                max_retries=0,
+            )
+            model = OpenAIChatModel(
+                settings.model_name, provider=OpenAIProvider(openai_client=client)
+            )
+            model_identity = ModelIdentity("openai-compatible", settings.model_name)
+            owned_model_client = client
+        elif model_identity is None:
+            raise ValueError("model_identity is required when injecting a model")
         if session is None:
             tools = backend if backend is not None else EvidenceTools.for_run(
                 run_id, settings, project_root=project_root
             )
-            identity = model_identity or ModelIdentity("none", "deterministic")
             session = StrategySession(
                 run_id=run_id,
                 tools=tools,
                 context=context,
                 declaration=builtin_declaration(
-                    model_provider=identity.provider,
-                    model_name=identity.model,
-                    deterministic=model is None,
+                    model_provider=model_identity.provider,
+                    model_name=model_identity.model,
+                    deterministic=False,
                 ),
             )
-        if model is None and model_identity is None:
-            raise ValueError("model_identity is required when injecting a model")
         return cls(
             run_id=run_id,
             context=context,
             session=session,
             model=model,
-            model_identity=model_identity or ModelIdentity("none", "deterministic"),
+            model_identity=model_identity,
+            owned_model_client=owned_model_client,
         )
 
     # -- agent -------------------------------------------------------------
@@ -214,6 +237,14 @@ class EvidencePlannerRunner:
     # -- run ---------------------------------------------------------------
 
     async def diagnose(self) -> DiagnosisRunResult:
+        try:
+            return await self._diagnose_guarded()
+        finally:
+            if self._owned_model_client is not None:
+                with suppress(Exception):
+                    await self._owned_model_client.close()
+
+    async def _diagnose_guarded(self) -> DiagnosisRunResult:
         deps = PlannerDeps(controller=self._controller)
         started_at = datetime.now(UTC)
         started = monotonic()
@@ -346,6 +377,10 @@ class EvidencePlannerRunner:
     @property
     def session(self) -> StrategySession:
         return self._session
+
+    @property
+    def model_identity(self) -> ModelIdentity:
+        return self._model_identity
 
 
 def _plan_events(deps: PlannerDeps) -> list[PlanTraceEvent]:

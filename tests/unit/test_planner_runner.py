@@ -31,6 +31,7 @@ from pydantic_ai.models.function import FunctionModel
 
 from data_incident_gym.diagnosis import DiagnosisStatus, DiagnosticStrategy
 from data_incident_gym.diagnostic_agent import ModelIdentity
+from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evidence_planner import evidence_planner_policy_identity
 from data_incident_gym.planner_agent import EvidencePlannerRunner
 from data_incident_gym.strategy_adapter import StrategySession
@@ -186,6 +187,54 @@ def _runner(
 def project_root(tmp_path: Path) -> Path:
     _write_run_context(tmp_path, RUN_ID)
     return tmp_path
+
+
+# -- benchmark wiring (for_run construction) --------------------------------
+
+
+def test_injecting_a_model_requires_an_identity(project_root: Path) -> None:
+    with pytest.raises(ValueError, match="model_identity is required"):
+        EvidencePlannerRunner.for_run(
+            RUN_ID,
+            DiagnosticSettings(_env_file=None),
+            project_root,
+            model=FunctionModel(lambda _messages, _info: None),
+            backend=_PlannerTools(),
+        )
+
+
+def test_for_run_without_a_model_builds_the_settings_model(
+    project_root: Path,
+) -> None:
+    """Benchmark wiring: the factory calls ``for_run`` with no injected model,
+    so the settings' OpenAI-compatible endpoint must be assembled here."""
+
+    settings = DiagnosticSettings(_env_file=None)
+    runner = EvidencePlannerRunner.for_run(
+        RUN_ID, settings, project_root, backend=_PlannerTools()
+    )
+
+    assert runner.model_identity == ModelIdentity("openai-compatible", settings.model_name)
+    declaration = runner.session.declaration
+    assert declaration.model_provider == "openai-compatible"
+    assert declaration.model_name == settings.model_name
+    # The settings-built client is owned — and closed — by the runner itself.
+    assert runner._owned_model_client is not None
+
+
+def test_diagnose_closes_the_owned_settings_client(project_root: Path) -> None:
+    runner = EvidencePlannerRunner.for_run(
+        RUN_ID, DiagnosticSettings(_env_file=None), project_root, backend=_PlannerTools()
+    )
+    client = runner._owned_model_client
+    assert client is not None and not client.is_closed()
+    # A scripted model keeps the run offline; the owned client still closes.
+    runner._model = FunctionModel(_script([("submit_diagnosis", _abstain())]))
+
+    result = asyncio.run(runner.diagnose())
+
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+    assert client.is_closed()
 
 
 def test_the_planner_loop_submits_a_confirmed_diagnosis(project_root: Path) -> None:
