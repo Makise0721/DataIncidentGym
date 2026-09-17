@@ -17,9 +17,17 @@ Two surfaces are deliberately kept apart:
   validation refusal consumes no tool-call attempt.
 
 An obligation's identity covers **all effective arguments**
-(``<tool>:<canonical(arguments)>``), so ``get_dbt_lineage`` upstream and
-downstream are two obligations and closing one never closes the other. Its
-``evidence_kind`` and ``subject`` are display fields only.
+(``<tool>:<canonical(arguments)>``, the arguments as canonical JSON), so
+``get_dbt_lineage`` upstream and downstream are two obligations and closing one
+never closes the other; JSON escaping also means two different argument sets can
+never collide onto one id. Its ``evidence_kind`` and ``subject`` are display
+fields only.
+
+The validation order is fixed: terminal state, deadline, plan-refusal budget,
+then the specific rules (tool name, arguments, outcome, run scope, obligation
+state, tool budget). The budget is checked early on purpose — once it is spent
+every later operation is refused with ``PLAN_OUTPUT_RETRY_EXHAUSTED`` instead of
+yielding yet another specific code.
 
 ``SATISFIED`` needs all four of: the obligation has a last executed call, that
 call was accepted, it returned non-empty evidence, and the closing declaration
@@ -30,6 +38,7 @@ honest "qualified abstention on a real refusal receipt" path.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -47,6 +56,7 @@ PLAN_ERROR_CODES = frozenset(
         "PLAN_SESSION_CLOSED",
         "PLAN_TOOL_NOT_ALLOWLISTED",
         "PLAN_ARGUMENTS_INVALID",
+        "PLAN_OUTCOME_INVALID",
         "PLAN_RUN_SCOPE_MISMATCH",
         "PLAN_UNKNOWN_OBLIGATION",
         "PLAN_OBLIGATION_CLOSED",
@@ -60,6 +70,11 @@ PLAN_ERROR_CODES = frozenset(
 )
 
 ObligationOutcome = Literal["SATISFIED", "REVOKED"]
+
+#: The outcomes a close declaration may actually carry. Checked at runtime: a
+#: static ``Literal`` annotation is documentation, not enforcement, and treating
+#: every unexpected value as "REVOKED" would silently accept a bogus close.
+VALID_OUTCOMES = frozenset({"SATISFIED", "REVOKED"})
 
 
 @dataclass(frozen=True)
@@ -91,9 +106,16 @@ TOOL_OBLIGATIONS: dict[str, ToolObligationSpec] = {
 
 
 def canonical_arguments(arguments: dict[str, Any]) -> str:
-    """``name=value`` pairs sorted by name, so equal calls share one identity."""
+    """Canonical JSON of the arguments: sorted keys, no whitespace.
 
-    return ",".join(f"{name}={arguments[name]}" for name in sorted(arguments))
+    Plain ``name=value`` concatenation is not injective — a value containing the
+    separator and the next key produces the same text as a different argument
+    set (``{"direction": "upstream,node_id=x", "node_id": "y"}`` versus
+    ``{"direction": "upstream", "node_id": "x,node_id=y"}``). JSON escapes every
+    value, so the encoding is injective and equal calls still share one id.
+    """
+
+    return json.dumps(dict(sorted(arguments.items())), ensure_ascii=False, separators=(",", ":"))
 
 
 def obligation_id_for(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -225,14 +247,24 @@ class PlannerController:
     def close_obligation(
         self,
         obligation_id: str,
-        outcome: ObligationOutcome,
+        outcome: str,
         *,
         evidence_ids: tuple[str, ...] = (),
         reason: str | None = None,
     ) -> PlanVerdict:
-        """Close one obligation; ``SATISFIED`` must be earned, never assumed."""
+        """Close one obligation; ``SATISFIED`` must be earned, never assumed.
+
+        ``outcome`` is validated here at runtime — the annotation documents the
+        two outcomes, it does not enforce them.
+        """
 
         code, detail = self._terminal_or_deadline()
+        if code is None and outcome not in VALID_OUTCOMES:
+            code = "PLAN_OUTCOME_INVALID"
+            detail = f"expected one of {', '.join(sorted(VALID_OUTCOMES))}, got {outcome!r}"
+        if code is None and self._refusals >= self._refusal_limit:
+            code = "PLAN_OUTPUT_RETRY_EXHAUSTED"
+            detail = "plan refusal budget is spent"
         obligation = self._obligations.get(obligation_id)
         if code is None and obligation is None:
             code, detail = "PLAN_UNKNOWN_OBLIGATION", f"never planned: {obligation_id}"
@@ -243,9 +275,6 @@ class PlannerController:
             detail = "a revoked obligation needs a public reason"
         if code is None and outcome == "SATISFIED":
             code, detail = self._validate_satisfaction(obligation, evidence_ids)
-        if code is None and self._refusals >= self._refusal_limit:
-            code = "PLAN_OUTPUT_RETRY_EXHAUSTED"
-            detail = "plan refusal budget is spent"
         if code is not None:
             return self._refuse(code, detail)
 
@@ -322,6 +351,11 @@ class PlannerController:
         code, detail = self._terminal_or_deadline()
         if code is not None:
             return code, detail
+        if self._refusals >= self._refusal_limit:
+            # The budget is checked *before* the specific validations: once it is
+            # spent every later plan operation is blocked, so a stream of invalid
+            # declarations cannot keep producing distinct refusal codes.
+            return "PLAN_OUTPUT_RETRY_EXHAUSTED", "plan refusal budget is spent"
         context = self._session.task_context()
         if tool_name not in TOOL_OBLIGATIONS:
             return "PLAN_TOOL_NOT_ALLOWLISTED", f"unknown tool: {tool_name}"
@@ -341,8 +375,6 @@ class PlannerController:
             return "PLAN_OBLIGATION_CLOSED", f"obligation is {known.status}"
         if self._session.snapshot()["tool_call_attempts"] >= context.budget.tool_call_limit:
             return "PLAN_TOOL_BUDGET_EXHAUSTED", "tool-call budget is spent"
-        if self._refusals >= self._refusal_limit:
-            return "PLAN_OUTPUT_RETRY_EXHAUSTED", "plan refusal budget is spent"
         return None, None
 
     def _validate_satisfaction(

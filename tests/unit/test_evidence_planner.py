@@ -128,7 +128,27 @@ def test_obligation_identity_covers_every_argument() -> None:
     assert upstream == obligation_id_for(
         "get_dbt_lineage", {"direction": "upstream", "node_id": NODE}
     )
-    assert canonical_arguments({"b": "2", "a": "1"}) == "a=1,b=2"
+    assert canonical_arguments({"b": "2", "a": "1"}) == '{"a":"1","b":"2"}'
+
+
+def test_argument_encoding_cannot_collide_on_a_separator() -> None:
+    """Audit regression: ``name=value`` concatenation merged these two calls."""
+
+    first = {"direction": "upstream,node_id=x", "node_id": "y"}
+    second = {"direction": "upstream", "node_id": "x,node_id=y"}
+
+    assert canonical_arguments(first) != canonical_arguments(second)
+    assert obligation_id_for("get_dbt_lineage", first) != obligation_id_for(
+        "get_dbt_lineage", second
+    )
+
+    controller, session, _ = _controller()
+    one = controller.plan_step("get_dbt_lineage", first)
+    two = controller.plan_step("get_dbt_lineage", second)
+
+    assert one.verdict.obligation_id != two.verdict.obligation_id
+    assert len(controller.obligations()) == 2
+    assert session.snapshot()["tool_call_attempts"] == 2
 
 
 def test_closing_one_direction_does_not_close_the_other() -> None:
@@ -414,6 +434,61 @@ def test_deadline_and_terminal_state_close_the_planner() -> None:
     assert session.submit(_submission()).accepted is True
     closed = controller.plan_step("get_relation_history", {"relation_name": "raw_orders"})
     assert closed.verdict.code == "PLAN_SESSION_CLOSED"
+
+
+@pytest.mark.parametrize("bogus", ("BOGUS", "revoked", "satisfied", "", "SATISFIED "))
+def test_a_bogus_close_outcome_never_becomes_a_revoke(bogus: str) -> None:
+    """Audit regression: every non-``SATISFIED`` value used to become REVOKED."""
+
+    controller, _, _ = _controller()
+    step = controller.plan_step("get_dbt_run_results", {"run_id": RUN_ID})
+
+    verdict = controller.close_obligation(step.verdict.obligation_id, bogus)
+
+    assert verdict.accepted is False
+    assert verdict.code == "PLAN_OUTCOME_INVALID"
+    obligation = controller.obligations()[0]
+    assert obligation.status == "OPEN"
+    assert obligation.close_reason is None
+
+
+def test_a_valid_close_still_works_after_one_bogus_outcome() -> None:
+    controller, _, _ = _controller()
+    step = controller.plan_step("get_dbt_run_results", {"run_id": RUN_ID})
+    obligation_id = step.verdict.obligation_id
+
+    assert controller.close_obligation(obligation_id, "BOGUS").code == "PLAN_OUTCOME_INVALID"
+    good = controller.close_obligation(
+        obligation_id, "SATISFIED", evidence_ids=tuple(step.receipt.evidence_ids)
+    )
+
+    assert good.accepted is True
+    assert controller.obligations()[0].status == "SATISFIED"
+    assert controller.snapshot()["refusals_by_code"] == {"PLAN_OUTCOME_INVALID": 1}
+
+
+def test_the_refusal_budget_is_checked_before_the_specific_rules() -> None:
+    """Audit regression: a stream of invalid calls kept returning fresh codes and
+    kept incrementing the counter past its limit."""
+
+    controller, session, backend = _controller()
+
+    codes = [
+        controller.plan_step("run_sql", {"query": "select 1"}).verdict.code for _ in range(4)
+    ]
+
+    assert codes == [
+        "PLAN_TOOL_NOT_ALLOWLISTED",
+        "PLAN_TOOL_NOT_ALLOWLISTED",
+        "PLAN_OUTPUT_RETRY_EXHAUSTED",
+        "PLAN_OUTPUT_RETRY_EXHAUSTED",
+    ]
+    snapshot = controller.snapshot()
+    assert snapshot["plan_refusals_used"] == 2
+    assert snapshot["refusals_by_code"] == {"PLAN_TOOL_NOT_ALLOWLISTED": 2}
+    assert snapshot["plan_operations_blocked"] == 2
+    assert backend.calls == []
+    assert session.snapshot()["tool_call_attempts"] == 0
 
 
 def test_unknown_obligation_cannot_be_closed() -> None:

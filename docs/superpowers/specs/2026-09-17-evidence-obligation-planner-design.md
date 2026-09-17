@@ -34,12 +34,14 @@
 **义务的身份是推导出来的，不是模型自由命名的**，而且必须覆盖全部有效参数：
 
 ```text
-obligation_id = "<tool_name>:<canonical(arguments)>"      # 参数名排序后以 name=value 连接
+obligation_id = "<tool_name>:<canonical(arguments)>"      # 规范 JSON：键排序、无空白、转义值
 ```
 
-因此同一次调用的不同参数是不同的义务：`get_dbt_lineage:direction=upstream,node_id=model.x` 与
-`get_dbt_lineage:direction=downstream,node_id=model.x` 是两条独立义务——关闭上游不会把下游判成已关闭。
-`evidence_kind` 与 `subject` 是**展示字段**（报告与诊断用），不参与身份。六工具映射：
+因此同一次调用的不同参数是不同的义务：`get_dbt_lineage:{"direction":"upstream","node_id":"model.x"}` 与
+`...{"direction":"downstream",...}` 是两条独立义务——关闭上游不会把下游判成已关闭。编码用**规范 JSON**
+而不是 `name=value` 拼接：后者不是单射，`{"direction":"upstream,node_id=x","node_id":"y"}` 与
+`{"direction":"upstream","node_id":"x,node_id=y"}` 会拼出同一串；JSON 会转义每个值，不同参数集合不可能
+碰撞到同一 id。`evidence_kind` 与 `subject` 是**展示字段**（报告与诊断用），不参与身份。六工具映射：
 
 | 工具 | 展示 kind | 展示 subject | 参与身份的规范化参数 |
 | --- | --- | --- | --- |
@@ -61,6 +63,9 @@ obligation_id = "<tool_name>:<canonical(arguments)>"      # 参数名排序后�
   `PLAN_EVIDENCE_NOT_RETURNED_BY_THIS_CALL`。
 - **撤销**：`close_obligation(REVOKED)` 需要非空公开理由（否则 `PLAN_REVOKE_REASON_REQUIRED`）；后端拒绝
   或空结果之后可以撤销（这正是"用真实拒绝收据支撑的合格弃答"路径），但撤销不等于满足。
+- **outcome 运行时校验**：`close_obligation` 的 `outcome` 只接受 `SATISFIED`/`REVOKED`，其余任何值
+  （含大小写变体与空串）一律 `PLAN_OUTCOME_INVALID`，不得落到"默认当撤销"的分支——静态类型注解是文档，
+  不是校验。
 - **已关闭义务固定行为**：对 `SATISFIED`/`REVOKED` 义务再次 `plan_step`（同 id）或再次 `close_obligation`
   一律拒绝，码固定为 `PLAN_OBLIGATION_CLOSED`，不改变任何状态、不消耗工具尝试；不支持重新打开——若模型
   想再验证同一 `(tool, arguments)`，那是设计上不允许的重复，模型应转而推进其它义务。
@@ -101,12 +106,15 @@ PLANNING ──plan_step(校验通过)──▶ EXECUTING ──▶ 真实 ToolR
 ### 2.4 校验拒绝 ≠ 真实拒绝收据
 
 - **码表分离**：校验层只使用 `PLAN_*` 码（`PLAN_SESSION_CLOSED`、`PLAN_TOOL_NOT_ALLOWLISTED`、
-  `PLAN_ARGUMENTS_INVALID`、`PLAN_RUN_SCOPE_MISMATCH`、`PLAN_UNKNOWN_OBLIGATION`、`PLAN_OBLIGATION_CLOSED`、
+  `PLAN_ARGUMENTS_INVALID`、`PLAN_OUTCOME_INVALID`、`PLAN_RUN_SCOPE_MISMATCH`、`PLAN_UNKNOWN_OBLIGATION`、`PLAN_OBLIGATION_CLOSED`、
   `PLAN_NO_EVIDENCE_FROM_LAST_CALL`、`PLAN_EVIDENCE_NOT_RETURNED_BY_THIS_CALL`、`PLAN_REVOKE_REASON_REQUIRED`、
   `PLAN_OUTPUT_RETRY_EXHAUSTED`、`PLAN_TOOL_BUDGET_EXHAUSTED`、`PLAN_DEADLINE_EXCEEDED`）；
   后端拒绝保留真实错误码（如 `RELATION_NOT_ALLOWED`），两类码不共用命名空间。
-- **校验顺序固定**（同一请求同时命中多条时按此顺序给出第一个码）：会话已终态 → 截止时间 → 工具名 →
-  参数键集合与类型 → run 作用域 → 义务是否已关闭 → 工具预算 → 计划拒绝计数已耗尽。
+- **校验顺序固定**（同一请求同时命中多条时按此顺序给出第一个码）：会话已终态 → 截止时间 →
+  **计划拒绝预算是否已耗尽** → 工具名/outcome → 参数键集合与类型 → run 作用域 → 义务是否已关闭 →
+  工具预算。预算检查刻意排在具体规则之前：一旦耗尽，后续每次操作都返回
+  `PLAN_OUTPUT_RETRY_EXHAUSTED`，而不会继续产出新的具体拒绝码、也不会继续抬高拒绝计数（只增加
+  `plan_operations_blocked`）。
 - **对象分离**：校验拒绝产生 `PlanVerdict`，**绝不**产生 `ToolReceipt`；`ToolReceipt` 的
   `evidence`/`evidence_ids`/`error` 只在真实调用之后出现。没有后端调用就没有任何形式的"拒绝收据"。
 - **轨迹分离**：轨迹事件类型区分 `PLAN_*` 与 `TOOL_*`，报告与评估读取时不可能把校验拒绝当成后端拒绝，
@@ -123,8 +131,11 @@ PLANNING ──plan_step(校验通过)──▶ EXECUTING ──▶ 真实 ToolR
 | 策略见证 | `FIXED_RULE`、`REFERENCE_ANALYST` | 确定性策略，给出"同一公开证据下可达结论"的上下界，不参与模型能力比较 |
 
 - 同条件判据用 `StrategyDeclaration.comparison_identity`（框架、模型、工具、预算、可见上下文一致）：规划器与
-  kernel 在这些字段上完全一致，差异只在**政策身份**（prompt 与 controller 摘要）与代码路径；报告必须写成
-  "政策身份不同"，不得表述为"同策略的两个版本"。
+  kernel 在这些字段上完全一致。但**这不足以宣称完整预算条件相同**——规划器多了一道 kernel/static 没有的
+  策略门：计划拒绝预算（上限 2，与 T09 的 `output_retry_limit` 数值相同但是**独立计数器**）。因此报告必须
+  同时写明两点：政策身份不同（prompt 与 controller 摘要），且规划器附加了这项策略规则与计数；不得表述为
+  "同策略的两个版本"，也不得表述为"预算条件逐项相同"。两个计数器（计划拒绝 / 提交被拒）在任何表格中分别
+  列出，不合并、不相加。
 - 稳定性按 T08 分组：组 = 场景 × 策略 × 冻结身份；跨策略不混合；不完整组不出 `pass^k`。
 - 历史 `p1-formal-v22` 及其之前的测量结果保持不变，规划器不复用其身份，也不回填。
 
