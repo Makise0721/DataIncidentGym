@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,14 +16,19 @@ from data_incident_gym.artifacts import (
     RunMetadata,
     TraceEnvelope,
 )
-from data_incident_gym.benchmark_manifest import build_manifest
-from data_incident_gym.benchmark_report import BenchmarkReporter, BenchmarkReportError
+from data_incident_gym.benchmark_manifest import BenchmarkManifest, build_manifest
+from data_incident_gym.benchmark_report import (
+    BenchmarkReporter,
+    BenchmarkReportError,
+    analyze_partial_suite,
+)
 from data_incident_gym.benchmark_runner import (
     BenchmarkCellSelector,
     BenchmarkDoctorReceipt,
     BenchmarkLedgerEntry,
 )
 from data_incident_gym.diagnosis import (
+    AffectedAssetClaim,
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
@@ -29,6 +36,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
     EvidenceGateTraceEvent,
+    RootCauseClaim,
 )
 from data_incident_gym.diagnostic_agent import P1_ROOT_CAUSE_CODES, policy_identity_for_strategy
 from data_incident_gym.diagnostic_kernel import DiagnosticKernel
@@ -40,13 +48,17 @@ from data_incident_gym.doctor import (
     DoctorStatus,
 )
 from data_incident_gym.evaluation import (
+    ControllerCheck,
+    ControllerCheckCode,
     EvaluationApplicability,
     EvaluationCheck,
     EvaluationCheckCode,
     EvaluationResult,
     EvaluationStatus,
+    claim_support_verdicts,
 )
 from data_incident_gym.fixed_rule import fixed_rule_policy_identity
+from data_incident_gym.scenarios import load_scenario_spec
 
 
 def _evaluation(case_id: str, run_id: str) -> EvaluationResult:
@@ -91,10 +103,12 @@ def _doctor() -> DoctorResult:
 def _write_fixture(
     tmp_path: Path,
     *,
+    manifest: BenchmarkManifest | None = None,
     manifest_mismatch: bool = False,
-    safety_failure: bool = False,
+    failing_gate: EvaluationCheckCode | None = None,
+    failing_controller_gate: ControllerCheckCode | None = None,
 ) -> tuple[Path, Path]:
-    manifest = build_manifest("a" * 40)
+    manifest = manifest or build_manifest("a" * 40)
     suite_root = tmp_path / "artifacts" / "benchmarks" / manifest.manifest_id
     suite_root.mkdir(parents=True)
     receipt = BenchmarkDoctorReceipt(
@@ -176,8 +190,8 @@ def _write_fixture(
             kernel_state=kernel_state,
         )
         evaluation = _evaluation(cell.incident_case_id, cell.run_id)
-        if safety_failure and cell.sequence == 1:
-            failed_code = EvaluationCheckCode.TRACE_READ_ONLY_SAFE
+        if failing_gate is not None and cell.sequence == 1:
+            failed_code = failing_gate
             checks = tuple(
                 check.model_copy(
                     update={
@@ -197,6 +211,20 @@ def _write_fixture(
                     "status": EvaluationStatus.FAILED,
                     "checks": checks,
                     "failed_check_codes": (failed_code,),
+                }
+            )
+        if failing_controller_gate is not None and cell.sequence == 1:
+            evaluation = evaluation.model_copy(
+                update={
+                    "controller_checks": (
+                        ControllerCheck(
+                            code=failing_controller_gate,
+                            passed=False,
+                            expected=("KERNEL_CONTRACT",),
+                            actual=("VIOLATED",),
+                            reason_code=f"{failing_controller_gate.value}_FAILED",
+                        ),
+                    )
                 }
             )
         policy = diagnosis_run.policy_identity
@@ -368,7 +396,9 @@ def test_reporter_fails_closed_for_invalid_suite(tmp_path: Path, fixture: str) -
 
 
 def test_reporter_retains_legal_safety_gate_failure_as_invalid_conclusion(tmp_path: Path) -> None:
-    suite_root, _ = _write_fixture(tmp_path, safety_failure=True)
+    suite_root, _ = _write_fixture(
+        tmp_path, failing_gate=EvaluationCheckCode.TRACE_READ_ONLY_SAFE
+    )
     manifest = build_manifest("a" * 40)
 
     BenchmarkReporter(manifest, suite_root).write()
@@ -456,11 +486,23 @@ def test_summary_metrics_use_paired_and_run_level_contracts() -> None:
         )
 
     checks = tuple(check(code) for code in EvaluationCheckCode)
+    confirmed_scenario = load_scenario_spec("duplicate_payment_coupon_a")
     confirmed = SimpleNamespace(
         status=DiagnosisStatus.CONFIRMED,
-        claims=(SimpleNamespace(evidence_ids=("ev_" + "1" * 64,)),),
-        evidence_ids=("ev_" + "1" * 64,),
-        affected_assets=("model.orders",),
+        claims=(
+            RootCauseClaim(
+                kind="ROOT_CAUSE",
+                root_cause_code="SOURCE_EXACT_PAYMENT_DUPLICATE",
+                evidence_ids=("ev_" + "1" * 64,),
+            ),
+            AffectedAssetClaim(
+                kind="AFFECTED_ASSET",
+                asset=confirmed_scenario.affected_assets[0],
+                evidence_ids=("ev_" + "2" * 64,),
+            ),
+        ),
+        evidence_ids=("ev_" + "1" * 64, "ev_" + "2" * 64),
+        affected_assets=(confirmed_scenario.affected_assets[0],),
     )
     insufficient = SimpleNamespace(
         status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
@@ -479,6 +521,7 @@ def test_summary_metrics_use_paired_and_run_level_contracts() -> None:
             status=EvaluationStatus.PASSED,
             checks=checks,
         )
+        scenario = load_scenario_spec(case_id)
         return {
             "cell": SimpleNamespace(
                 strategy=strategy,
@@ -500,7 +543,11 @@ def test_summary_metrics_use_paired_and_run_level_contracts() -> None:
             "diagnosis": diagnosis,
             "evaluation": evaluation,
             "trace": (),
+            "scenario": scenario,
+            "records": (),
+            "claim_verdicts": claim_support_verdicts(scenario, diagnosis, ()),
             "ledger": SimpleNamespace(state="COMPLETED"),
+            "environment_gates": (),
             "invalid_gates": (),
         }
 
@@ -529,3 +576,396 @@ def test_summary_metrics_use_paired_and_run_level_contracts() -> None:
     assert summary["main_metrics"]["STATIC_SKILL"]["affected_assets_macro_f1"]["value"] == 1.0
     assert summary["strategies"]["STATIC_SKILL"]["efficiency"]["successful_tools_median"] == 2
     assert summary["strategies"]["STATIC_SKILL"]["efficiency"]["exact_duplicate_calls"] == 0
+    # The claim and citation blocks run on the same records; the synthetic
+    # citations are unknown ids, so nothing is supported or known here.
+    assert summary["main_metrics"]["STATIC_SKILL"]["claim_support"]["support_coverage"][
+        "rate"
+    ] == 0.0
+    assert summary["main_metrics"]["STATIC_SKILL"]["citation_quality"]["existence"][
+        "numerator"
+    ] == 0
+    assert summary["main_metrics"]["STATIC_SKILL"]["abstention"][
+        "confirmable_over_abstention"
+    ]["rate"] == 0.0
+
+
+def test_reliability_block_follows_the_frozen_repeat_schedule(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    suite_root, _ = _write_fixture(tmp_path, manifest=manifest)
+    summary_path, report_path = BenchmarkReporter(manifest, suite_root).write()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    main = summary["strategies"]["STATIC_SKILL"]["reliability"]
+    assert main["protocol_version"] == "p1.reliability.v1"
+    assert main["groups_total"] == 12
+    assert main["groups_complete"] == 12
+    assert main["groups_incomplete"] == 0
+    assert {group["planned_repetitions"] for group in main["groups"]} == {3}
+    # Every synthetic fixture evaluation passes, so all repetitions succeed.
+    assert main["macro_pass_hat"]["1"] == {
+        "value": 1.0,
+        "groups": 12,
+        "trials": 36,
+        "zero_denominator_reason": None,
+    }
+    assert main["macro_pass_hat"]["3"]["value"] == 1.0
+
+    fixed = summary["strategies"]["FIXED_RULE"]["reliability"]
+    assert {group["planned_repetitions"] for group in fixed["groups"]} == {1}
+    assert fixed["macro_pass_hat"]["1"]["value"] == 1.0
+    # n = 1 never yields pass^2/pass^3; nothing may be borrowed from other groups.
+    assert fixed["macro_pass_hat"]["2"]["value"] is None
+    assert fixed["macro_pass_hat"]["2"]["zero_denominator_reason"] == (
+        "no complete group with n >= 2"
+    )
+
+    assert "## Repeat reliability (p1.reliability.v1)" in report_path.read_text(encoding="utf-8")
+
+
+def test_reliability_marks_an_invalid_environment_sample_incomplete(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    suite_root, _ = _write_fixture(
+        tmp_path, manifest=manifest, failing_gate=EvaluationCheckCode.RECOVERY_HEALTHY
+    )
+    summary_path, _ = BenchmarkReporter(manifest, suite_root).write()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    main = summary["strategies"]["STATIC_SKILL"]["reliability"]
+    assert main["groups_complete"] == 11
+    assert main["groups_incomplete"] == 1
+    invalid = next(group for group in main["groups"] if not group["complete"])
+
+    assert invalid["invalid_repeat_indices"] == [1]
+    assert invalid["invalid_gate_codes"] == ["RECOVERY_HEALTHY"]
+    assert set(invalid["pass_hat"].values()) == {None}
+    assert invalid["complete_subset"]["coverage"] == pytest.approx(2 / 3)
+    # The macro covers the 11 complete groups only.
+    assert main["macro_pass_hat"]["3"]["groups"] == 11
+
+
+def test_agent_rule_violation_stays_a_failed_trial(tmp_path: Path) -> None:
+    """An agent-side rule violation — a write attempt here — is never an invalid
+    environment sample: the group stays complete and the trial counts as failed,
+    so breaking the rules can never improve a reliability number."""
+
+    manifest = build_manifest("a" * 40)
+    suite_root, _ = _write_fixture(
+        tmp_path, manifest=manifest, failing_gate=EvaluationCheckCode.TRACE_READ_ONLY_SAFE
+    )
+    summary_path, _ = BenchmarkReporter(manifest, suite_root).write()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    main = summary["strategies"]["STATIC_SKILL"]["reliability"]
+    assert main["groups_complete"] == 12
+    assert main["groups_incomplete"] == 0
+    affected = next(
+        group
+        for group in main["groups"]
+        if group["incident_case_id"] == manifest.cells[0].incident_case_id
+    )
+    assert affected["invalid_repeat_indices"] == []
+    assert affected["successes"] == 2
+    assert affected["pass_hat"] == {
+        "1": pytest.approx(2 / 3),
+        "2": pytest.approx(1 / 3),
+        "3": 0.0,
+    }
+    # The same violation is still reported as a gate failure for the conclusion.
+    assert summary["conclusion"]["status"] == "INVALID"
+    assert summary["invalid_gates"][0]["gate"] == "TRACE_READ_ONLY_SAFE"
+
+
+def test_environment_gate_isolation_shows_in_the_abstention_sets(tmp_path: Path) -> None:
+    """The T07 metric sets use the same environment-only validity rule."""
+
+    manifest = build_manifest("a" * 40)
+    suite_root, _ = _write_fixture(
+        tmp_path, manifest=manifest, failing_gate=EvaluationCheckCode.RECOVERY_HEALTHY
+    )
+    summary_path, _ = BenchmarkReporter(manifest, suite_root).write()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    assert summary["main_metrics"]["STATIC_SKILL"]["abstention"]["cells"]["invalid_excluded"] == 1
+
+
+def test_reliability_rejects_a_foreign_strategy_cell() -> None:
+    """A caller that mixes strategies must not leak a foreign group into this
+    strategy's reliability block."""
+
+    manifest = build_manifest("a" * 40)
+    reporter = BenchmarkReporter(manifest, Path("."))
+    foreign = manifest.cells[0]
+    other = next(cell for cell in manifest.cells if cell.strategy is not foreign.strategy)
+
+    with pytest.raises(BenchmarkReportError, match="foreign-strategy cell"):
+        reporter._reliability(  # noqa: SLF001
+            other.strategy,
+            [
+                {
+                    "cell": foreign,
+                    "diagnosis": SimpleNamespace(status=DiagnosisStatus.MODEL_ERROR),
+                    "evaluation": SimpleNamespace(
+                        status=EvaluationStatus.FAILED, expected_status="CONFIRMED"
+                    ),
+                    "environment_gates": (),
+                }
+            ],
+        )
+
+
+def test_kernel_gate_failure_is_a_failed_trial_not_a_success(tmp_path: Path) -> None:
+    """Audit regression: EvaluationResult.status only covers the evidence checks,
+    so a run that violated the kernel contract can still read PASSED. The
+    reliability success judgement must consult the controller gates too."""
+
+    manifest = build_manifest("a" * 40)
+    suite_root, _ = _write_fixture(
+        tmp_path,
+        manifest=manifest,
+        failing_controller_gate=ControllerCheckCode.KERNEL_HYPOTHESIS_GATE,
+    )
+    summary_path, _ = BenchmarkReporter(manifest, suite_root).write()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+
+    # The gate failure is listed for the conclusion...
+    assert summary["conclusion"]["status"] == "INVALID"
+    assert summary["invalid_gates"][0]["gate"] == "KERNEL_HYPOTHESIS_GATE"
+
+    # ...and it is a failed trial in every success-based metric.
+    main = summary["strategies"]["STATIC_SKILL"]["reliability"]
+    affected = next(
+        group
+        for group in main["groups"]
+        if group["incident_case_id"] == manifest.cells[0].incident_case_id
+    )
+    assert affected["complete"] is True
+    assert affected["invalid_repeat_indices"] == []
+    assert affected["successes"] == 2
+    assert affected["pass_hat"]["1"] == pytest.approx(2 / 3)
+    assert affected["pass_hat"]["3"] == 0.0
+    assert summary["strategies"]["STATIC_SKILL"]["completed"] == 36
+    assert summary["strategies"]["STATIC_SKILL"]["efficiency"]["passed_cells"] == 35
+
+
+def test_partial_analysis_reports_a_missing_repeat(tmp_path: Path) -> None:
+    """The protocol's incomplete-group rules must be reachable for a suite that
+    is still running or was interrupted, without relaxing the formal report."""
+
+    manifest = build_manifest("a" * 40)
+    suite_root, artifact_root = _write_fixture(tmp_path, manifest=manifest)
+    ledger_lines = (suite_root / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    # Drop the last repetition of the first cell: its ledger entries and bundle.
+    target = manifest.cells[2]
+    assert target.incident_case_id != manifest.cells[0].incident_case_id or True
+    kept = [
+        line
+        for line in ledger_lines
+        if json.loads(line)["run_id"] != target.run_id
+    ]
+    (suite_root / "ledger.jsonl").write_text("\n".join(kept) + "\n", encoding="utf-8")
+    shutil.rmtree(artifact_root / target.run_id)
+
+    # The formal report still refuses the incomplete suite...
+    with pytest.raises(BenchmarkReportError, match="exactly two entries per cell"):
+        BenchmarkReporter(manifest, suite_root).write()
+
+    # ...while the partial entry point reports the incomplete group honestly.
+    analysis = analyze_partial_suite(manifest, suite_root)
+    reliability = analysis["reliability"]
+    group = next(
+        item for item in reliability["groups"] if item["group_id"] == (
+            f"{target.incident_case_id}/{target.strategy.value}"
+        )
+    )
+
+    assert group["complete"] is False
+    assert group["missing_repeat_indices"] == (target.repeat_index,)
+    assert set(group["pass_hat"].values()) == {None}
+    assert group["complete_subset"]["coverage"] == pytest.approx(2 / 3)
+    assert reliability["groups_incomplete"] == 1
+    missing = [cell for cell in analysis["cells"] if cell["state"] == "MISSING"]
+    assert [cell["reason_code"] for cell in missing] == ["NO_TERMINAL_LEDGER_ENTRY"]
+    assert analysis["ledger_terminal_conflicts"] == []
+
+
+def test_partial_analysis_flags_unreadable_and_unbound_cells(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    suite_root, artifact_root = _write_fixture(tmp_path, manifest=manifest)
+    target = manifest.cells[0]
+    shutil.rmtree(artifact_root / target.run_id)
+
+    analysis = analyze_partial_suite(manifest, suite_root)
+    unreadable = next(cell for cell in analysis["cells"] if cell["run_id"] == target.run_id)
+    assert unreadable["state"] == "MISSING"
+    assert unreadable["reason_code"] == "ARTIFACTS_UNREADABLE"
+
+    # A different manifest identity may never borrow these samples.
+    other = build_manifest("b" * 40, manifest_id=manifest.manifest_id)
+    drifted = analyze_partial_suite(other, suite_root)
+    reasons = Counter(cell["reason_code"] for cell in drifted["cells"])
+    assert reasons["MANIFEST_IDENTITY_MISMATCH"] == len(manifest.cells) - 1
+    assert reasons["ARTIFACTS_UNREADABLE"] == 1  # the bundle deleted above
+    assert drifted["reliability"]["groups_complete"] == 0
+    assert drifted["reliability"]["macro_pass_hat"]["1"]["value"] is None
+
+
+def test_partial_analysis_flags_a_conflicting_ledger_terminal(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    suite_root, _ = _write_fixture(tmp_path, manifest=manifest)
+    ledger = suite_root / "ledger.jsonl"
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    conflicting = json.loads(lines[1])
+    conflicting["state"] = "FAILED"
+    conflicting["reason_code"] = "EVALUATION_FAILED"
+    ledger.write_text(
+        "\n".join((*lines, json.dumps(conflicting))) + "\n", encoding="utf-8"
+    )
+
+    analysis = analyze_partial_suite(manifest, suite_root)
+
+    assert analysis["ledger_terminal_conflicts"] == [manifest.cells[0].run_id]
+    conflicted = next(
+        cell for cell in analysis["cells"] if cell["run_id"] == manifest.cells[0].run_id
+    )
+    assert conflicted["reason_code"] == "LEDGER_TERMINAL_CONFLICT"
+
+
+def test_partial_analysis_rejects_a_substituted_bundle(tmp_path: Path) -> None:
+    """Audit regression: a file that belongs to another cell must never be
+    scored as this repeat — only the manifest digest was checked before, so
+    swapping in another scenario's evaluation produced a SCORED trial."""
+
+    manifest = build_manifest("a" * 40)
+    suite_root, artifact_root = _write_fixture(tmp_path, manifest=manifest)
+    target = manifest.cells[3]
+    other_case = next(
+        cell for cell in manifest.cells if cell.incident_case_id != target.incident_case_id
+    )
+    sibling = next(
+        cell
+        for cell in manifest.cells
+        if cell.incident_case_id == target.incident_case_id
+        and cell.strategy is target.strategy
+        and cell.repeat_index != target.repeat_index
+    )
+    target_dir = artifact_root / target.run_id
+    foreign_evaluation = (artifact_root / other_case.run_id / "evaluation.json").read_text(
+        encoding="utf-8"
+    )
+    foreign_diagnosis = (artifact_root / other_case.run_id / "diagnosis.json").read_text(
+        encoding="utf-8"
+    )
+    sibling_evaluation = (artifact_root / sibling.run_id / "evaluation.json").read_text(
+        encoding="utf-8"
+    )
+
+    substitutions = (
+        ("evaluation.json", foreign_evaluation),
+        ("evaluation.json", sibling_evaluation),
+        ("diagnosis.json", foreign_diagnosis),
+    )
+    for name, payload in substitutions:
+        path = target_dir / name
+        original = path.read_text(encoding="utf-8")
+        path.write_text(payload, encoding="utf-8")
+
+        analysis = analyze_partial_suite(manifest, suite_root)
+
+        record = next(cell for cell in analysis["cells"] if cell["run_id"] == target.run_id)
+        assert record["state"] == "MISSING", name
+        assert record["reason_code"] == "IDENTITY_MISMATCH", name
+        assert record.get("passed") is None
+        group = next(
+            item
+            for item in analysis["reliability"]["groups"]
+            if item["group_id"] == f"{target.incident_case_id}/{target.strategy.value}"
+        )
+        assert group["complete"] is False
+        assert target.repeat_index in group["missing_repeat_indices"]
+        path.write_text(original, encoding="utf-8")
+
+
+def test_partial_analysis_rejects_a_ledger_identity_mismatch(tmp_path: Path) -> None:
+    manifest = build_manifest("a" * 40)
+    suite_root, _ = _write_fixture(tmp_path, manifest=manifest)
+    target = manifest.cells[0]
+    other_case = next(
+        cell for cell in manifest.cells if cell.incident_case_id != target.incident_case_id
+    )
+    ledger = suite_root / "ledger.jsonl"
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    rewritten = []
+    for line in lines:
+        entry = json.loads(line)
+        if entry["run_id"] == target.run_id and entry["state"] in {"COMPLETED", "FAILED"}:
+            entry["incident_case_id"] = other_case.incident_case_id
+        rewritten.append(json.dumps(entry))
+    ledger.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+    analysis = analyze_partial_suite(manifest, suite_root)
+
+    record = next(cell for cell in analysis["cells"] if cell["run_id"] == target.run_id)
+    assert record["state"] == "MISSING"
+    assert record["reason_code"] == "IDENTITY_MISMATCH"
+
+
+def test_partial_analysis_survives_a_structurally_broken_file(tmp_path: Path) -> None:
+    """Audit regression: a cell whose file parses to the wrong JSON shape must
+    leave that one cell unscored instead of aborting the whole analysis."""
+
+    manifest = build_manifest("a" * 40)
+    suite_root, artifact_root = _write_fixture(tmp_path, manifest=manifest)
+    target = manifest.cells[0]
+    (artifact_root / target.run_id / "metadata.json").write_text("[]\n", encoding="utf-8")
+
+    analysis = analyze_partial_suite(manifest, suite_root)
+
+    record = next(cell for cell in analysis["cells"] if cell["run_id"] == target.run_id)
+    assert record["state"] == "MISSING"
+    assert record["reason_code"] == "ARTIFACTS_INVALID"
+    # The rest of the suite is still analysed: only this repeat is affected.
+    # The partial entry point covers every strategy, so all 58 scheduled groups
+    # are reported and exactly one of them lost a trial.
+    assert analysis["reliability"]["groups_total"] == 58
+    assert analysis["reliability"]["groups_complete"] == 57
+    assert analysis["reliability"]["groups_incomplete"] == 1
+
+
+def test_reporter_fails_closed_when_result_inputs_drift(tmp_path: Path) -> None:
+    """Claim metrics re-derive evaluator verdicts, so a report built with an
+    evaluator (or schema, or profile spec) other than the frozen one must fail
+    closed instead of mixing identities."""
+
+    manifest = build_manifest("a" * 40)
+    suite_root, _ = _write_fixture(tmp_path, manifest=manifest)
+    drifted = manifest.model_copy(
+        update={
+            "result_inputs": manifest.result_inputs.model_copy(
+                update={"evaluator_sha256": "d" * 64}
+            )
+        }
+    )
+
+    assert drifted.result_inputs != manifest.result_inputs
+    with pytest.raises(BenchmarkReportError, match="result inputs"):
+        BenchmarkReporter(drifted, suite_root).write()
+
+
+def test_reporter_fails_closed_when_a_scenario_contract_drifted(tmp_path: Path) -> None:
+    """A cell whose contract no longer matches the frozen catalog digest cannot
+    be scored, because the claim verdicts would be computed against a different
+    contract than the run answered."""
+
+    manifest = build_manifest("a" * 40)
+    target = manifest.cells[0].incident_case_id
+    catalog = tuple(
+        entry.model_copy(update={"scenario_spec_sha256": "e" * 64})
+        if entry.incident_case_id == target
+        else entry
+        for entry in manifest.scenario_catalog
+    )
+    drifted = manifest.model_copy(update={"scenario_catalog": catalog})
+    suite_root, _ = _write_fixture(tmp_path, manifest=drifted)
+
+    with pytest.raises(BenchmarkReportError, match="scenario contract drifted"):
+        BenchmarkReporter(drifted, suite_root).write()
