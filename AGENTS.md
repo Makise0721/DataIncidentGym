@@ -18,7 +18,9 @@ uv run data-incident-gym pipeline build       # build the healthy dbt baseline
 uv build                                      # build the Python package
 ```
 
-Run the normal verification set with Docker Desktop/PostgreSQL available:
+## Verification commands (choose by impact)
+
+根据改动影响选择验证命令；只有跨层改动或明确的合并/发布验收才需要运行完整集合。以下命令假定 Docker Desktop/PostgreSQL 可用：
 
 ```powershell
 uv run ruff check .

@@ -22,6 +22,12 @@
 > M13.10 修订（2026-09-11 依据提交完整性自检设计批准）：账本新增只读投影 `uncollected_relations`，按关系工具对应的证据类型做差集（`get_relation_schema→RELATION_SCHEMA`、`get_relation_data_profile→RELATION_DATA_PROFILE`、`get_relation_history→RELATION_HISTORY`），以记录的 `content.relation_name` 为准而非 schema 限定 subject，不跨类型相减；语义为"权限允许、该类型尚无已接受证据"，是事实清单而非待办，不保证预算耗尽或已有失败指纹时仍可调用。kernel prompt `p1.kernel.v15` / controller `p1.controller.v16` 新增三项完整性自检：资产完整性限定于 CONFIRMED 且以与根因相关的已接受证据为基线，三分支口径为——失败的 model 连同其已接受 downstream lineage 中命名的全部 model（失败 model 自身不出现在自己的 lineage 邻接中，须独立保留）、失败的 test 只取距离 1 上游 model（失败 test 节点与上游 seed 关系不算资产，upstream 记录的更远或 downstream 节点不扩展集合）、无失败节点时由已确认根因命名的 source/seed 节点的已接受 downstream lineage，明确为本项目影响范围口径而非普适因果事实；采集完整性自检扩展到 CONFIRMED 与 INSUFFICIENT_EVIDENCE 两个终态；history 收据与 watermark 声明分离，后者仅当已结算边界为区分摄取丢失与正常波动所必需且本 run 公开证据无法确定时，对相应公开 subject 独立声明 `INGESTION_WATERMARK / NOT_OBSERVABLE`，已有可用 watermark 或仅凭 history 请求被拒均不得推导。预算、kernel 门禁、领域校验器、evaluator、scenario 与既有冻结 manifest 均未修改；本修订只改变模型可见的提示与账本投影，不改变任何判定结果。
 > M13.11 修订（2026-09-11 依据 p1-formal-v14 结果与离线定位需求批准）：为模型级校验拒绝增加固定、脱敏的原因码。（1）动机：模型级校验器（`loc=()`）拒绝整份 payload 时，`error_loc` 为空且 `error_kind` 仅为 `value_error`，无法区分重复项、空白文本、状态与字段组合等多条规则；v14 seq19 的失败因此可记录但不可解释。（2）实现：`diagnostic_contracts.MODEL_RULE_REASONS` 把每条模型级校验规则的原文消息映射为稳定码（13 条规则 13 个互不相同的码），`_model_rule_reasons` 只输出码，未映射的消息统一记为 `UNCLASSIFIED_MODEL_RULE`；`ModelProtocolTraceEvent` 新增 `error_reason` 字段（默认空元组，向后兼容既有 trace），仅承载码，校验器原文与任何 payload 取值均不落盘。（3）覆盖由源码抽取式守卫强制：新增模型级校验规则而未补原因码时测试失败；另有端到端测试证明原因码经 runner 写入 trace。（4）预算 8/8/2/300、kernel 门禁、领域校验器、evaluator、scenario、提示文本、工具 schema 与已冻结 manifest 均未修改；本修订只增加失败分类能力，不改变任何判定结果或重试行为，因此不改变模型可见协议与身份。
 > M13.12 修订（2026-09-12 依据证据规划与拒绝后重判设计批准）：kernel prompt 升至 `p1.kernel.v16`（controller 保持 `p1.controller.v16`，控制流程、schema 与预算未变），以三处替换合并原先分散的规划与收据规则，不新增账本字段、不自动调用工具、不改写决策、不改变重试逻辑。（1）调用前规划替换原先无条件批量指令：按公开问题（定位失败、区分已登记原因、建立必要证据边界）选择调用，明确不扫关系白名单、把每次采集与必要边界探针都计入工具预算（被拒探针同样计一次）、为最终决策保留一次模型请求、优先决定性检查而非可选佐证、不因还有余额就继续花、复用已接受证据与既有收据（补引用不需新调用）。（2）弃答与提交自检合并末尾三段重复规则：分开检查「有收据的缺口」与「独立不可观测事实」，每个决定性 schema/profile/history 缺口复用同工具同 subject 的既有收据，否则在白名单内正常采集、或按既有边界规则在预算内发一次探针；不得伪造收据；finalize 从已记录 blocked gap 派生关系声明，一个关系的收据不能建立另一关系的缺口。支付量段落的领域绑定改为按公开 `SETTLED_PAYMENT_WINDOW_END` 观察的 subject 声明 `INGESTION_WATERMARK / NOT_OBSERVABLE`，并写明该观察只标识待证边界、不是 watermark 证据本身，不得仅凭 brief 主体列表推断该 subject，已接受证据已证明边界时不声明。（3）新增拒绝后重判：先从反馈与已接受证据定位失败前提；仅绑定或引用错误时直接修引用且不新增调用；前提仍可观测且预算允许时补采后重判；本 run 无法建立时重评 claim、假设判定与终态，且「多加证据 ID」不等于建立缺失事实。同一声明仅当修正针对被拒前提时才重试；健康声明被拒不证明事故，事故声明被拒不证明健康；只有替代结论具备自身所需证据时才确认，否则保留兼容假设并合格弃答；拒绝不禁止后续合法探针，但不得超预算或重复被阻断的业务调用。三个 payment-volume 场景的公开 brief 均含该观察，subject 由观察给出而非硬编码。预算 8/8/2/300、kernel 门禁、领域验证器、evaluator、scenario 与已冻结 manifest 均未修改；本修订只改变模型可见提示。
+> M14 修订（2026-09-15 依据 research-driven improvement plan T01–T03 审计整改）：新增「评分输入归档与离线重评」合同（§13.1）与两条只读命令（§9）。（1）完整评测在写出六文件后，把评测器实际消费的全部输入固化为私有附件 `.dig/scoring-inputs/<run_id>/`：私有 ScenarioSpec 快照、冻结 ScenarioVerification、完整 DiagnosisRunResult、带来源的恢复证明（`lab.restore` 的 case/state/fingerprint）、预算、原 evaluator 身份与六产物摘要表；附件属管理平面，不得进入任何策略可见上下文。（2）加载严格拒绝重复 JSON 键、未知 schema 版本、文件或语义摘要不符、目录/索引/附件三方 run_id 不一致、场景/验证/诊断/恢复内容与其摘要不符、路径或符号链接逃逸、未知 evaluator 版本；kernel 终态必须从归档的类型化终态事件恢复并重新校验，不得仅凭 `diagnosis.json` 重造。（3）`eval score` 在禁用模型、数据库、dbt 与网络的条件下复用确定性 evaluator 重新评分，派生结果写入 `artifacts/rescores/<run_id>/<score_id>/`；`score_id` 由输入摘要、scorer 源码/依赖摘要与评分配置派生，scorer 身份必须对应实际执行代码。（4）派生目录自带完整性证据：provenance 记录 evaluation/diff/report 三个文件的原始字节摘要与跨文件一致性，命中既有 score_id 时先校验，不一致即拒绝；同一输入重复评分返回既有结果，不重写、不原地改分、不自动重跑。（5）逐项差异区分判定变化（适用性/通过状态）与依据变化（expected/actual 记 `details_changed` 并保留前后值）；无法与归档评分对照时必须输出"无法比较（原因）"，不得表述为逐项一致。（6）历史产物按完整可复评／仅可部分分析／不可复评分类并附固定原因；缺附件不得产出完整评分，也不得从当前 `config/scenarios` 或旧布尔值补造私有验证事实。（7）本修订不修改诊断平面、工具权限、预算 8/8/2/300、evaluator 判定规则、scenario 定义与既有冻结 manifest；模型可见协议与身份不变。
+> M15 修订（2026-09-16 依据 research-driven improvement plan T07 批准）：新增「诊断质量指标」合同（§13.2），基准报告 `summary.json`/`report.md` 增加弃答、状态混淆、claim 支撑与引用指标。（1）每项新指标带 numerator、denominator、适用集合与零分母原因；既有指标（`paired_success`、`root_cause_accuracy`、`unsupported_confirmation_rate`、`status_accuracy`、`claim_evidence_validity`、`no_incident_accuracy`、资产 macro-F1、效率与预算指标）保持原口径与原结果。（2）有效格为未命中适用**环境门**失败的格；环境门限定为 `ENVIRONMENT_VERIFIED`、`EVIDENCE_RUN_SCOPE`、`RECOVERY_HEALTHY`（场景未验证、证据越出本 run、环境未能恢复）——只有这三类表示 harness 不可信；代理侧违规（`EVIDENCE_IDS_EXIST` 伪造引用、`TOOL_ALLOWLIST_EXACT` 越权工具、`TRACE_READ_ONLY_SAFE` 写尝试、kernel 状态门）一律计为失败试验并留在分母，代理不得靠违规逃出失败率。无效环境样本从所有新指标的分母隔离并单列计数；`MODEL_ERROR` 不是弃答，计入所在集合分母但不进入任何弃答分子，并单列错误率。（3）零分母输出 null 并附固定原因，不写 0 或 100%。（4）逐 claim 支撑判定复用 evaluator 自身的判定规则（与 `CLAIM_EVIDENCE_COMPATIBLE`、`POSITIVE_HEALTH_EVIDENCE` 同一实现，不另造第二套），适用性跟随 evaluator 的适用门控（CONFIRMED：根因与资产；NO_INCIDENT：健康；`INSUFFICIENT_EVIDENCE`：不适用）；无规则或不适用的 claim 类型单列，不记作"未支撑"。（5）引用指标只针对确定性可判定的结构化 claim，不宣称自然语言蕴含准确率，不得冠名 ALCE；引用有效性分别报告存在性与单条引用支撑，冗余敏感度报告"移除一条引用是否改变支撑判定"，移除不影响判定记为冗余而非错误；补足无意义引用不得提高任何硬门通过率。（6）报告在派生上述指标前必须校验运行结果输入（evaluator 源码摘要、profile spec、scenario/diagnosis schema）与冻结 manifest 的 `result_inputs` 一致，并逐格校验场景摘要与冻结目录条目一致，不一致即拒绝出报告。（7）**合同变更**：为复用逐 claim 规则，`evaluator` 升为 `p1.evaluator.v3`。v2 的 `_health_evidence_valid` 在第一条健康 claim 通过后即返回，多 claim 诊断中后续 claim 从未被校验；v3 要求每条健康 claim 独立成立。这是缺陷修复而非等价重构，已用旧实现复现（有效 claim + 指向无关关系的第二条 claim：v2 `True`、v3 `False`），并补多 claim 回归。旧证据保持不变：`KNOWN_EVALUATOR_VERSIONS` 保留 `p1.evaluator.v2`，既有附件、原始六文件、归档评分与冻结 manifest 文件均不改写；派生评分按新的 scorer 身份生成新 `score_id`，不覆盖旧派生目录。诊断平面、工具权限、预算 8/8/2/300 与 scenario 定义未修改；模型可见协议与身份不变。
+> M16 修订（2026-09-16 依据 research-driven improvement plan T08 批准）：新增「重复可靠性协议」合同（§13.3），基准报告 `summary.json`/`report.md` 增加 `reliability` 稳定性块（协议 `p1.reliability.v1`）。（1）比较单位为组：单一场景 × 单一策略 × 单一冻结身份（`manifest_id`/摘要/实现修订/evaluator 身份/协议版本）；trial 永不跨组移动，组内 `repeat_index` 必须唯一且连续。（2）预定重复次数 n 来自冻结排程的 `repeat_index`，不由观测决定；当前 P1 排程中主策略每场景 3 次、消融与基线每场景 1 次；执行顺序为冻结 `sequence` 升序（重复按轮转分散）。（3）失败归类：评测 `PASSED` 且无失败的适用 controller（kernel）门为成功（`EvaluationResult.status` 不含 controller 门，必须单独判定），评测 `FAILED` 与 `MODEL_ERROR`（含超时、预算耗尽）为失败 trial；适用**环境门**失败（`ENVIRONMENT_VERIFIED`、`EVIDENCE_RUN_SCOPE`、`RECOVERY_HEALTHY`）为**无效样本**，既不计成功也不计失败，只使所在组不完整；代理侧违规（伪造引用、越权工具、写尝试、kernel 状态门）计为失败 trial，不隔离。环境门与代理违规同时出现时以环境门为准（样本不可解释，不产数字）。（4）`pass^k = C(s, k)/C(n, k)`，`s < k` 为 0，`n < k` 为 null；它是"k 次全部成功"的无偏估计，不是 `pass@k`。（5）组内缺失或无效时主组 `pass^k` 为 null 并列出下标，不得缩小 n、补跑或换格；完整子集分析单列且必须携带覆盖量，不得作为主组数字。（6）跨场景汇总只做完整组的宏平均，同时写出纳入组数与 trial 数；零分母为 null 并附原因；置信区间或重采样必须按场景聚类，不得把重复 trial 当作独立场景。（7）正式报告继续拒绝不完整 suite；协议的不完整组规则由只读入口 `benchmark partial`（`analyze_partial_suite`）提供。（8）坚持更大 n、外部策略或新场景使用新的协议版本与新的冻结 manifest，旧身份与其历史结果不变。（9）本修订不修改诊断平面、工具权限、预算 8/8/2/300、evaluator 判定规则、scenario 定义与既有冻结 manifest；模型可见协议与身份不变。真实测量需另行冻结并批准，在完成之前不得表述为"真实可靠性已验证"。
+> M17 修订（2026-09-16 依据 research-driven improvement plan T09 批准）：新增「统一策略接入协议」合同（§10.5，协议 `p1.strategy_adapter.v1`，实现 `strategy_adapter.py`）。（1）harness 独占保管 run ID、工具白名单、预算 8/8/2/300、时限与证据登记；策略只能经 `task_context` / `call_tool` / `submit` / `cancel` / `report_usage` 五个操作行动，自报计数仅为辅助，权威计数来自 harness。（2）公开任务上下文只含 incident brief、关系白名单、工具白名单、预算与申报回显，不含私有场景合同、期望答案或 case ID。（3）工具调用规则：未知/越权工具在预算外拒绝；参数或 run 作用域不符拒绝；超预算拒绝且所有到达后端的调用计入 harness 计数；后端拒绝保留真实错误码作为收据；成功记录由 harness 登记，重复调用返回同一 evidence ID；策略不得跳过登记或更换 evidence ID。**收据必须携带本次返回的公开证据记录（事实内容）**，策略依据事实作答。（3.1）**预算 8/8/2/300 全部由 harness 执行**：模型请求经 `acquire_model_request` 配额门（内部模型策略的请求数由既有 controller 观测）；被拒提交消耗输出重试预算、耗尽后返回 `OUTPUT_RETRY_EXHAUSTED`；所有公开操作检查截止时间（`DEADLINE_EXCEEDED`）；外部进程中的模型调用不可观测，v1 只强制领取门，自报请求数超过已领取槽位记为 `usage_violation` 而非已受控。（3.2）**生产接线**：`FixedRuleRunner.for_run`（含参考解）与 `DiagnosisRunner.for_run` 构造时自行建立会话并把工具替换为门面；两类 runner 的终态都必须经会话——正常终态经 `session.submit` 落账（拒绝即 fail-closed 转 MODEL_ERROR 兜底），异常终态经 `session.cancel` 关闭（超时 `STRATEGY_TIMEOUT`，协议/运行时错误与兜底 `RUN_FAILED`）；终态之后任何工具调用必须返回 `SESSION_CLOSED`；回归必须通过 `for_run` 正常入口并覆盖 static 与 kernel 路径。（4）最终提交只接受已登记引用（`EVIDENCE_NOT_REGISTERED`），终态结构不满足 `Diagnosis` 合同即 `SUBMISSION_INVALID` 且不泄露私有期望；一会话最多一次提交或一次取消。（5）内置策略经 `ProtocolTools` 薄门面接入，等价由回归钉住：经门面与直连产生相同诊断、证据、计数、轨迹形状与 evaluator 检查结果。（6）开工前必须申报框架、模型、额外工具与可见上下文；申报不等于授权；申报、白名单、预算或可见上下文不同的策略不得标记为严格同条件对照。（7）本修订不修改诊断平面、工具实现、预算、evaluator 判定规则与既有冻结 manifest；跨进程传输（T10）与隔离验收（T11）另行交付。
+> M18 修订（2026-09-16 依据 research-driven improvement plan T10 批准）：新增「六工具 MCP 入口」合同（§10.6，实现 `mcp_server.py`，SDK `mcp==1.20.0` 锁定）。（1）`tools/list` 只暴露六个只读证据工具，参数名与证据工具一致；无提交工具，最终提交仍走 `p1.strategy_adapter.v1`。（2）每次 `tools/call` 经同一 `StrategySession`：白名单、run 作用域、预算 8/8/2/300、截止时间、证据登记、错误码与证据载荷与进程内门面逐项一致；被拒调用保留后端真实错误码。**入参必须原样投递**（服务端关闭 SDK 的 schema 校验层），缺参、多参、类型错误与外来 run 一律产生与进程内相同的 `TOOL_ARGUMENT_INVALID` 收据并同样计一次尝试；只有未知工具名按门外免费拒绝处理（MCP 工具错误、不计尝试、无收据）。（3）按工具子集启用只是收窄，未知工具拒绝启动；场景关系白名单仍由后端证据工具强制，MCP 不放宽。（4）单进程服务单 run 单会话，调用串行化以保证顺序与计数确定；不得以吞吐为由引入跨 run 状态或缓存。（5）不提供 dbt CLI、SQL、管理命令或通用文件系统能力；断连不影响 harness 侧会话状态。（6）本修订不修改诊断平面、工具实现、预算、evaluator 判定规则与既有冻结 manifest；隔离执行与防泄漏验收由 T11 另行交付。
+> M19 修订（2026-09-16 依据 research-driven improvement plan T11 批准）：新增「外部接入隔离与可复现验收」合同（§14.1，实现 `public_package.py`、`examples/isolation_probe.py`、`examples/isolation_acceptance.py`、`docker/isolation.Dockerfile`）。（1）公共任务包只含公开任务上下文与接入说明：不含私有场景合同、评分附件、case ID、期望答案或任何私有文件副本；导出后必须通过泄漏校验（禁用标记、私有文件字节副本、意外文件、符号链接）并以固定码 fail-closed。（2）隔离执行配置：策略进程只挂载沙箱（读写）与包源码（只读），无网络，环境变量按白名单过滤；MCP 协议本身不构成沙箱。（3）能读取私有配置/评分/artifact 平面的同用户进程属**可信开发模式**，仅用于演示与开发，不得用于无泄漏比较；验收报告必须如实标注其未隔离。（4）确定性探针必须尝试读取私有平面、其他 run、管理凭据并尝试写数据库；容器配置下四类尝试必须全部失败，凭据必须不存在。（5）确定性探针只证明边界行为，不得表述为真实模型抗注入能力已验证。（6）Docker 不可用或基础镜像/依赖无法拉取时，如实记录环境验收未完成或回退所用基础镜像，不得以本地未隔离进程冒充容器结论。（7）本修订不修改诊断平面、工具实现、预算、evaluator 判定规则、scenario 定义与既有冻结 manifest。（8）**闭环验收（`strategy_bridge.py` + `examples/isolated_client.py`）**：harness 独占唯一会话，策略进程（容器或本地解释器）的 stdio 承载 MCP，桥接把每次调用实时送入该会话并写出权威日志（`ToolGateway` 的 `recorder` 钩子逐条落盘）——证据登记与计数只由 harness 产生；策略进程自己的日志仅作辅助，丢失、裁剪或写入假数字都不改变 harness 的计数，被拒调用（含预算耗尽）同样留在日志里；权威日志写在沙箱之外，客户端不可达、不可改、不可删。答案只作为文件传递：harness 严格解析 `submission.json`（字段必须落在 `FinalSubmission` 合同内，多一个 `expected_status`/`incident_case_id` 即整文件拒收且不触达会话）后交给同一会话 `submit`；MCP 面上没有 submit/cancel 工具。验收必须同时覆盖成功与拒绝：合规客户端取证后提交被接受；攻击客户端伪造引用（`EVIDENCE_NOT_REGISTERED`）、删除自己的日志、超预算（第 9 次 `TOOL_BUDGET_EXHAUSTED`）、重复提交（`SUBMISSION_ALREADY_FINAL`）、终态后调用（`SESSION_CLOSED`）全部被拒。`isolation_verified` 只有在公共包校验、容器探针与闭环三者都通过时为真；本地进程配置下私有平面可达，闭环仍如实记录该事实，但不得据此宣称隔离。
 > 当前约束：本文件定义 P0 基本原型及后续阶段边界；实施计划批准前不开始实现。
 
 ## 1. 产品摘要
@@ -320,6 +326,9 @@ uv run data-incident-gym lab build schema_rename_payment_amount
 uv run data-incident-gym pipeline build
 uv run data-incident-gym diagnose schema_rename_payment_amount
 uv run data-incident-gym eval run schema_rename_payment_amount
+uv run data-incident-gym eval score <run_id>
+uv run data-incident-gym eval compare-scores <run_id> <score_id_a> <score_id_b>
+uv run data-incident-gym benchmark partial --manifest config/benchmark/<id>.json --confirm-sha256 <sha256>
 ```
 
 要求：
@@ -328,6 +337,9 @@ uv run data-incident-gym eval run schema_rename_payment_amount
 - JSON 字段、文件名、错误码和代码标识使用英文。
 - 命令失败必须使用非零退出码。
 - `eval run` 是完整闭环的一键入口。
+- `eval score` 只读重评已归档的评分输入（§13.1）：不调用模型、数据库或 dbt，不修改原始六文件、manifest、ledger 或旧报告，也不改变原批次结论；输入不完整时输出历史产物分类与固定原因，不产出完整评分。
+- `eval compare-scores` 只读比较同一运行的两个派生评分并输出逐项差异；无法对照时明确输出"无法比较（原因）"。
+- `benchmark partial` 只读分析未完成（中断或仍在运行）suite 的重复稳定性（§13.3）：缺失格与无效样本按协议标记，不缩小 n、不补跑；它不产出正式报告，也不放宽 `benchmark report` 的完整性要求（ledger 每格两条、六产物齐全）。
 - P0 不接受自由文本问题。
 - `pipeline build` 保持健康基线语义，始终执行 `seed --full-refresh` 后再执行健康 `dbt build`。
 - `lab build` 只在已注入状态执行不含 seed 的故障构建。底层 dbt 非零且独立验证符合 Ground Truth 时，实验命令成功并返回 `EXPECTED_FAILURE`；非预期结果返回非零退出码。
@@ -360,6 +372,20 @@ uv run data-incident-gym eval run schema_rename_payment_amount
 
 当前批准的 M5.2 Diagnosis 合同（`m5.diagnosis.v7`）：模型只输出语义 decision；controller 仅根据当前 run 内的类型化证据确定性生成最终 `affected_assets` 与 `evidence_ids`，不读取或使用 Ground Truth；evaluator 保持独立，不参与答案生成。
 
+### 10.5 统一策略接入协议
+
+策略接入必须遵循 `p1.strategy_adapter.v1`（完整规范见
+`docs/superpowers/specs/2026-09-16-strategy-access-protocol.md`）：
+
+- harness 独占 run ID、白名单、预算、时限与证据登记；策略只有 `task_context`、`call_tool`、
+  `submit`、`cancel`、`report_usage` 五个操作；自报计数仅为辅助。
+- 公开任务上下文不含私有场景合同、期望答案或 case ID；工具收据必须携带公开证据记录的内容。
+- 预算 8/8/2/300 由 harness 执行：工具调用计数、模型请求领取门、提交重试预算与截止时间。
+- 生产入口（`for_run`）必须自行建立会话；不得只在测试里手动接入。
+- 后端拒绝保留真实错误码；引用必须来自本 run 已登记的证据；一会话最多一次提交或取消。
+- 内置策略经薄门面接入且与直连等价（诊断、计数、检查结果）。
+- 申报（框架、模型、额外工具、可见上下文）不同的策略不得标记为严格同条件对照。
+
 ### 10.4 单次诊断预算
 
 ```text
@@ -370,6 +396,16 @@ uv run data-incident-gym eval run schema_rename_payment_amount
 ```
 
 超过限制返回 `MODEL_ERROR` 并保存轨迹。P0 记录 token、耗时和工具调用次数，但不设置固定延迟完成门槛。
+### 10.6 六工具 MCP 入口
+
+`mcp_server.py` 通过本机 stdio 暴露六个只读证据工具（`mcp==1.20.0`，版本锁定）：
+
+- 只暴露六工具、无提交工具；最终提交走 §10.5 协议。
+- 工具子集只收窄不放宽；未知工具拒绝启动；关系白名单仍由后端工具强制。
+- 每次调用经同一会话，预算门、截止时间、登记与错误码与进程内一致；拒绝保留真实错误码。
+- 单进程单 run 单会话、调用串行化；不提供 dbt CLI、SQL、管理命令或文件系统能力。
+- 断连不影响 harness 侧会话状态；隔离与防泄漏验收见 T11。
+
 
 ## 11. 数据契约
 
@@ -471,6 +507,91 @@ artifacts/<run_id>/
 
 `artifacts/` 默认不提交 Git。固定 Ground Truth、预期证据 ID 规则及脱敏示例报告可以提交。提示词受版本控制，运行元数据记录其版本或内容 hash。
 
+### 13.1 评分输入附件与离线重评
+
+完整评测在写出六文件之后，必须把评测器实际消费的全部输入固化为私有附件
+`.dig/scoring-inputs/<run_id>/`（`evaluation_inputs.json` 与 `index.json`）：私有 `ScenarioSpec`
+快照、冻结 `ScenarioVerification`、完整 `DiagnosisRunResult`、带来源的恢复证明（`lab.restore`
+返回的 case、state 与 fingerprint）、预算、原 evaluator 身份与六个产物的摘要表。附件属于管理
+平面，不得进入任何策略可见上下文，也不随公开任务包发布。
+
+- 加载必须严格：重复 JSON 键、未知 schema 版本、文件或语义摘要不符、目录/索引/附件三方
+  `run_id` 不一致、场景/验证/诊断/恢复内容与其摘要不符、路径或符号链接逃逸、未知 evaluator
+  版本，均以固定代码拒绝；kernel 终态必须从归档的类型化终态事件恢复并重新校验，不得仅凭
+  `diagnosis.json` 重造。
+- `eval score` 在禁用模型、数据库、dbt 与网络的条件下复用确定性 evaluator 重新评分；派生结果
+  写入 `artifacts/rescores/<run_id>/<score_id>/`（provenance、evaluation、逐项 diff、报告）。
+  `score_id` 由输入摘要、scorer 源码/依赖摘要与评分配置派生，scorer 身份必须对应实际执行代码，
+  不得只替换标签。
+- 派生目录自带完整性证据：provenance 记录 evaluation/diff/report 三个文件的原始字节摘要与
+  跨文件一致性；命中既有 `score_id` 时先校验，不一致即拒绝，不返回被修改的缓存。同一输入重复
+  评分返回既有结果：不重写、不原地改分、不自动重跑，原始六文件、manifest、ledger 与报告不变。
+- 逐项差异必须区分判定变化（适用性/通过状态）与依据变化（expected/actual，记
+  `details_changed` 并保留前后值）；无法与归档评分对照时，报告与 CLI 必须输出"无法比较（原因）"，
+  不得表述为"与原评分逐项一致"。
+- 历史产物按 `RE_SCORABLE` / `PARTIAL_ANALYSIS` / `NOT_RE_SCORABLE` 分类并附固定原因；缺附件的
+  运行不得产出完整评分，也不得从当前 `config/scenarios` 或旧 `PASSED` 布尔值补造私有验证事实。
+- 本小节不修改诊断平面、工具权限、单次诊断预算、evaluator 判定规则、scenario 定义与既有冻结
+  manifest；模型可见协议与身份不变。
+
+### 13.2 诊断质量指标（弃答与引用）
+
+基准报告在既有运行级指标之外，必须输出下列指标。每项都带 numerator、denominator、适用集合
+与零分母原因，并使用固定口径：
+
+| 指标 | 分子 / 分母 |
+| --- | --- |
+| 可确认场景过度弃答率 | 期望 CONFIRMED 的有效格中实际弃答数 / 该集合格数 |
+| 健康场景过度弃答率 | 期望 NO_INCIDENT 的有效格中实际弃答数 / 该集合格数 |
+| 合格弃答率 | 期望 `INSUFFICIENT_EVIDENCE` 的有效格中弃答且整格 `PASSED` 的数 / 该集合格数 |
+| 弃答 precision / recall | 阳性为"应弃答"、预测阳性为弃答终态；precision 分母为实际弃答的有效格，recall 分母为期望弃答的有效格 |
+| 逐 claim 支撑覆盖 | 有合格事实支撑的适用结构化 claim 数 / 适用 claim 数 |
+| 引用存在性 | 存在于本次运行证据清单中的引用数 / 全部引用数（按格去重） |
+| 单条引用支撑 | 单独引用即可支撑其所属 claim 的引用数 / 根因与资产 claim 的引用数 |
+| 冗余敏感度 | 移除后改变支撑判定的引用数 / 可移除引用数 |
+| 状态混淆表 | 期望三态 × 实际四态（含 `MODEL_ERROR`）的完整计数 |
+
+- 有效格：未命中适用**环境门**（`ENVIRONMENT_VERIFIED`、`EVIDENCE_RUN_SCOPE`、`RECOVERY_HEALTHY`）失败的格。无效环境样本从所有新指标的分母中隔离并单独计数；代理侧违规（伪造引用、越权工具、写尝试、kernel 状态门）不是环境失效，计为失败试验并留在分母——逃逸失败率不因违规而改善。
+- `MODEL_ERROR` 不是弃答：计入所在集合的分母，不进入任何弃答分子，并单列错误率。
+- "整格 `PASSED`"指 evaluator 证据检查全部通过**且**适用 controller（kernel）门全部通过：`EvaluationResult.status` 只覆盖证据检查，kernel 门失败必须被显式排除，否则违规 run 会被计为合格弃答。
+- 零分母输出 null 并附固定原因，不写 0，也不写 100%。
+- 支撑判定的唯一来源是确定性 evaluator 的逐 claim 规则；适用性跟随 evaluator 的适用门控，
+  无规则或不适用的 claim 类型单列，不计为"未支撑"。
+- 引用存在性同时在套件校验中作为硬前提（`referenced ⊆ known`，见 §13 六文件一致性）：能通过校验的
+  套件其存在性恒为 1.0，该指标保留为显式不变式与单条引用支撑的分母语境，不作为区分度信号。
+- 引用指标只针对确定性可判定的结构化 claim，不宣称自然语言蕴含准确率，不得冠名 ALCE；
+  冗余是"移除一条引用不改变支撑判定"，属于报告事实而非扣分项；补足无意义引用不得提高任何
+  硬门通过率。
+- 报告在派生上述指标前必须校验运行结果输入与冻结 manifest 的 `result_inputs` 一致，并逐格
+  校验场景摘要与冻结目录条目一致；不一致即拒绝出报告。
+- 本小节不修改诊断平面、工具权限、单次诊断预算 8/8/2/300 与 scenario 定义；模型可见协议与身份
+  不变。本合同变更包含一项 evaluator 缺陷修复：健康声明校验必须逐条成立（v2 只校验第一条，
+  见 M15（7）），evaluator 身份随之升为 `p1.evaluator.v3`；新正式测量必须先冻结新的 manifest
+  身份。
+
+### 13.3 重复可靠性协议（`p1.reliability.v1`）
+
+基准报告的 `strategies[*].reliability` 必须按下列固定规则输出重复稳定性；完整规范见
+`docs/superpowers/specs/2026-09-16-repeat-reliability-protocol.md`。
+
+| 规则 | 固定口径 |
+| --- | --- |
+| 分组身份 | 单一场景 × 单一策略 × 单一冻结身份；trial 不跨组、不跨版本移动 |
+| 预定重复 n | 来自冻结排程的 `repeat_index`（主策略每场景 3 次；消融/基线 1 次），不由观测决定 |
+| 成功 | 评测 `PASSED` **且**无失败的适用 controller（kernel）门 |
+| 失败 trial | 评测 `FAILED`，以及 `MODEL_ERROR`（含超时、请求/工具预算耗尽） |
+| 无效样本 | 适用环境门失败（`ENVIRONMENT_VERIFIED`、`EVIDENCE_RUN_SCOPE`、`RECOVERY_HEALTHY`）；代理侧违规计为失败 trial |
+| 优先级 | 环境门与失败同时出现时以环境门为准，样本不产数字 |
+| `pass^k` | `C(s, k)/C(n, k)`；`s < k` → 0；`n < k` → null；报告 k=1/2/3（受 n 限制） |
+| 缺失/无效 | 主组 `pass^k` 全为 null 并列出下标；完整子集分析单列且必须带覆盖量 |
+| 跨场景汇总 | 仅完整组的宏平均，写出纳入组数与 trial 数；零分母 null + 原因 |
+| 区间 | 跨场景区间必须按场景聚类；不得把重复 trial 当作独立场景 |
+
+- 不得为得到更好结果缩小 n、补跑、换格或静默丢弃失败 trial。
+- 历史单次（n=1）运行只输出 `pass^1`；不得用跨场景或跨版本 trial 拼出更大的 n。
+- 更大 n、外部策略（T09/T11）或新场景使用新的协议版本与新的冻结 manifest。
+- 部分运行入口：正式报告（`benchmark report`）继续拒绝不完整 suite；协议承诺的"不完整组 + null + 覆盖量"由只读的 `benchmark partial`（`analyze_partial_suite`）提供，缺失格不进入分母，也绝不被补齐。该入口必须逐格校验身份：ledger 条目、`metadata`、`evaluation`、`diagnosis` 的 run_id/场景/策略/序号/时间线必须与目标格一致，`metadata` 必须携带本 manifest 摘要；身份不符、结构非法（合法 JSON 但形状错误）或状态不一致的样本标记为缺失并给出固定原因，绝不作为其它试次的分数；单格损坏只影响该格，不中断整批分析。
+
 ## 14. 安全与权限
 
 1. Fault Injector 和 reset 使用仅属于管理平面的数据库连接。
@@ -480,6 +601,24 @@ artifacts/<run_id>/
 5. 路径读取限制在当前 run 的已知 dbt artifacts 和日志目录。
 6. P0 建议动作仅为文本，不触发执行。
 7. 所有数据均为虚构数据。
+
+### 14.1 外部接入隔离（T11）
+
+- 公共任务包（`public_package.py`）：只导出公开任务上下文与说明；导出后由
+  `verify_public_package` 逐文件校验禁用标记、私有文件字节副本与意外文件，发现即拒绝。
+- 受限运行配置：容器内只挂载沙箱与包源码（只读）、`--network none`、环境变量白名单；本地同用户
+  进程配置如实记录为"未隔离的开发模式"。
+- 验收证据（`artifacts/isolation/acceptance.json`）：探针尝试读取私有合同、评分附件、其他 run、
+  管理凭据并尝试写数据库（写尝试必须回滚，不留痕迹）；容器配置要求四类全部 DENIED。
+- 闭环验收（`strategy_bridge.py`、`examples/isolated_client.py`）：harness 独占唯一会话，隔离客户端
+  经桥接做 MCP 取证；答案只以 `submission.json` 文件提交，由 harness 严格解析后交给同一会话
+  `submit`；harness 权威日志逐条记录每次调用（含拒绝），写在沙箱之外（客户端不可达），
+  客户端自己的日志仅作辅助比对，删除或伪造它不影响结论。
+- 闭环必须同时跑通合规路径（取证 → 提交被接受 → 终态为 `CONFIRMED`）与攻击路径（伪造引用、
+  超预算、重复提交、终态后调用、跨出场景白名单的关系、未声明的工具全部被拒）；只有公共包校验、
+  容器探针与闭环三者都通过时 `isolation_verified` 为真。`artifacts/isolation/closed_loop_*_harness_audit.jsonl`
+  保留两条路径的权威日志。
+- 确定性探针只证明边界行为，不证明真实模型抗注入能力；镜像或网络不可用时如实记录未完成。
 
 ## 15. 非功能要求
 
