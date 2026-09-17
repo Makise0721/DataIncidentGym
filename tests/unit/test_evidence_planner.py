@@ -35,6 +35,7 @@ from data_incident_gym.diagnostic_agent import (
 from data_incident_gym.evidence import EvidenceRecord, RelationNotAllowedError
 from data_incident_gym.evidence_planner import (
     PLAN_ERROR_CODES,
+    PLANNER_ACTION_TOOLS,
     PLANNER_PROTOCOL_VERSION,
     TOOL_OBLIGATIONS,
     PlannerController,
@@ -45,6 +46,7 @@ from data_incident_gym.evidence_planner import (
     obligation_id_for,
     obligation_tool_schemas,
     planner_controller_payload,
+    planner_model_tool_payload,
 )
 from data_incident_gym.strategy_adapter import FinalSubmission, StrategySession
 
@@ -702,10 +704,8 @@ def test_registered_model_tools_match_the_identity_payload() -> None:
     from pydantic_ai.models.function import FunctionModel
 
     from data_incident_gym.evidence_planner import (
-        PLANNER_ACTION_TOOLS,
         PLANNER_OUTPUT_TOOL,
         PlannerDeps,
-        planner_model_tool_payload,
         planner_output_definition,
         register_planner_tools,
     )
@@ -724,6 +724,8 @@ def test_registered_model_tools_match_the_identity_payload() -> None:
     ]
     for entry in payload["action_tools"]:
         assert entry["parameters"] == registered[entry["name"]].function_schema.json_schema
+        assert entry["description"] == registered[entry["name"]].description
+        assert entry["description"]
     assert payload["output_tool"]["name"] == PLANNER_OUTPUT_TOOL[0]
     assert planner_output_definition().name == PLANNER_OUTPUT_TOOL[0]
 
@@ -763,3 +765,41 @@ def test_executed_steps_are_recorded_for_the_trace() -> None:
     assert records[0]["evidence_ids"]
     assert records[0]["elapsed_ms"] >= 0
     assert controller.snapshot()["plan_steps_recorded"] == 1
+
+
+def test_action_tool_descriptions_are_bound_into_the_identity(monkeypatch) -> None:
+    """Audit regression: the action tools' descriptions were outside the identity.
+
+    A description steers the model, so editing it must change the policy
+    identity the same way editing the schema does.
+    """
+
+    module = sys.modules["data_incident_gym.evidence_planner"]
+    before = evidence_planner_policy_identity()
+    name, description, model = PLANNER_ACTION_TOOLS[0]
+
+    monkeypatch.setattr(
+        module,
+        "PLANNER_ACTION_TOOLS",
+        ((name, description + " (edited)", model), *PLANNER_ACTION_TOOLS[1:]),
+    )
+
+    after = evidence_planner_policy_identity()
+    payload = planner_model_tool_payload()
+
+    assert payload["action_tools"][0]["description"] == description + " (edited)"
+    assert after.controller_protocol_sha256 != before.controller_protocol_sha256
+    assert after != before
+
+
+def test_both_action_tool_descriptions_reach_the_model() -> None:
+    payload = planner_model_tool_payload()
+
+    assert [entry["name"] for entry in payload["action_tools"]] == [
+        item[0] for item in PLANNER_ACTION_TOOLS
+    ]
+    for entry, (name, description, _model) in zip(
+        payload["action_tools"], PLANNER_ACTION_TOOLS, strict=True
+    ):
+        assert entry["name"] == name
+        assert entry["description"] == description

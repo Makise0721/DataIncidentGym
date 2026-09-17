@@ -348,7 +348,13 @@ def planner_model_tool_payload() -> dict[str, Any]:
     output_name, output_description, output_model = PLANNER_OUTPUT_TOOL
     return {
         "action_tools": [
-            {"name": name, "parameters": tools[name].function_schema.json_schema}
+            {
+                "name": name,
+                # The description is part of what the model reads, so it is read
+                # back from the registered tool and bound into the identity too.
+                "description": tools[name].description,
+                "parameters": tools[name].function_schema.json_schema,
+            }
             for name, _description, _model in PLANNER_ACTION_TOOLS
         ],
         "output_tool": {
