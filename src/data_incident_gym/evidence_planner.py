@@ -141,22 +141,52 @@ def _digest(payload: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def obligation_tool_schemas() -> list[dict[str, Any]]:
+    """The six tools as the planner declares them to the model.
+
+    The schema binds argument **names**, their types, the required set and the
+    closed-object rule — a name list alone would leave a changed argument set
+    (or a changed type) invisible to both the identity and the model.
+    """
+
+    return [
+        {
+            "name": tool,
+            "input_schema": {
+                "type": "object",
+                "properties": {name: {"type": "string"} for name in spec.arguments},
+                "required": list(spec.arguments),
+                "additionalProperties": False,
+            },
+        }
+        for tool, spec in sorted(TOOL_OBLIGATIONS.items())
+    ]
+
+
 def planner_controller_payload() -> dict[str, Any]:
     """Everything the planner's controller protocol promises, in one payload.
 
     Any change here changes the policy identity digest, so the plan contract
-    cannot drift silently under an existing identity.
+    cannot drift silently under an existing identity. The per-tool entries carry
+    the whole mapping — tool name, evidence kind, subject argument and argument
+    set — so no part of the obligation identity can be edited outside the digest.
+
+    Slice 3 (runner wiring) adds the three model output-tool schemas
+    (``plan_step``, ``close_obligation``, ``submit_diagnosis``) to this payload:
+    they are part of the model-visible surface and must be bound the same way.
     """
 
     return {
         "protocol_version": PLANNER_PROTOCOL_VERSION,
-        "tools": sorted(TOOL_OBLIGATIONS),
-        "argument_order": {
-            tool: list(spec.arguments) for tool, spec in sorted(TOOL_OBLIGATIONS.items())
+        "tools": {
+            tool: {
+                "evidence_kind": spec.evidence_kind,
+                "subject_argument": spec.subject_argument,
+                "arguments": list(spec.arguments),
+            }
+            for tool, spec in sorted(TOOL_OBLIGATIONS.items())
         },
-        "evidence_kinds": {
-            tool: spec.evidence_kind for tool, spec in sorted(TOOL_OBLIGATIONS.items())
-        },
+        "tool_schema_sha256": _digest(obligation_tool_schemas()),
         "budget": {
             "model_request_limit": MODEL_REQUEST_LIMIT,
             "tool_call_limit": TOOL_CALL_LIMIT,
@@ -190,7 +220,7 @@ def evidence_planner_policy_identity() -> PolicyIdentity:
         strategy_prompt_sha256=hashlib.sha256(PLANNER_PROMPT.encode("utf-8")).hexdigest(),
         controller_protocol_version=PLANNER_PROTOCOL_VERSION,
         controller_protocol_sha256=_digest(planner_controller_payload()),
-        tool_schema_sha256=_digest(sorted(TOOL_OBLIGATIONS)),
+        tool_schema_sha256=_digest(obligation_tool_schemas()),
     )
 
 
@@ -533,5 +563,6 @@ __all__ = [
     "canonical_arguments",
     "evidence_planner_policy_identity",
     "obligation_id_for",
+    "obligation_tool_schemas",
     "planner_controller_payload",
 ]

@@ -39,9 +39,11 @@ from data_incident_gym.evidence_planner import (
     TOOL_OBLIGATIONS,
     PlannerController,
     PlanVerdict,
+    ToolObligationSpec,
     canonical_arguments,
     evidence_planner_policy_identity,
     obligation_id_for,
+    obligation_tool_schemas,
     planner_controller_payload,
 )
 from data_incident_gym.strategy_adapter import FinalSubmission, StrategySession
@@ -561,17 +563,18 @@ def test_planner_identity_binds_the_prompt_and_the_plan_contract() -> None:
     ).hexdigest()
     assert identity.controller_protocol_version == PLANNER_PROTOCOL_VERSION
     assert identity.controller_protocol_sha256 == _digest(planner_controller_payload())
-    assert identity.tool_schema_sha256 == _digest(sorted(TOOL_OBLIGATIONS))
+    assert identity.tool_schema_sha256 == _digest(obligation_tool_schemas())
     # Deterministic: the same surface always yields the same identity.
     assert evidence_planner_policy_identity() == identity
 
 
 def test_the_controller_digest_covers_every_contract_element() -> None:
-    """Any change to the promise changes the digest — including the new gate."""
+    """Any change to the promise changes the digest — tools, budget and gate."""
 
     base = planner_controller_payload()
+    tool = "get_dbt_lineage"
     payloads = (
-        {**base, "tools": [*base["tools"], "get_secret"]},
+        {**base, "tools": {**base["tools"], "get_secret": base["tools"][tool]}},
         {**base, "error_codes": [*base["error_codes"], "PLAN_NEW_CODE"]},
         {**base, "outcomes": ["SATISFIED"]},
         {**base, "budget": {**base["budget"], "tool_call_limit": 9}},
@@ -579,10 +582,67 @@ def test_the_controller_digest_covers_every_contract_element() -> None:
             **base,
             "plan_refusal_budget": {**base["plan_refusal_budget"], "limit": 3},
         },
+        # Audit reproduction: the subject mapping used to be invisible.
+        {
+            **base,
+            "tools": {
+                **base["tools"],
+                tool: {**base["tools"][tool], "subject_argument": "direction"},
+            },
+        },
+        {
+            **base,
+            "tools": {
+                **base["tools"],
+                tool: {**base["tools"][tool], "arguments": ["node_id"]},
+            },
+        },
+        {**base, "tool_schema_sha256": "0" * 64},
     )
 
     for payload in payloads:
         assert _digest(payload) != _digest(base)
+
+
+def test_editing_a_tool_spec_changes_both_identity_digests(monkeypatch) -> None:
+    """Audit regression: subject mapping and argument set were outside the
+    identity — the first changed nothing, the second left ``tool_schema_sha256``
+    untouched."""
+
+    before = evidence_planner_policy_identity()
+    tool = "get_dbt_lineage"
+    original = TOOL_OBLIGATIONS[tool]
+
+    monkeypatch.setitem(
+        TOOL_OBLIGATIONS,
+        tool,
+        ToolObligationSpec(original.evidence_kind, "direction", original.arguments),
+    )
+    after_subject = evidence_planner_policy_identity()
+    assert after_subject.controller_protocol_sha256 != before.controller_protocol_sha256
+    assert after_subject != before
+
+    monkeypatch.setitem(
+        TOOL_OBLIGATIONS,
+        tool,
+        ToolObligationSpec(original.evidence_kind, original.subject_argument, ("node_id",)),
+    )
+    after_arguments = evidence_planner_policy_identity()
+    assert after_arguments.tool_schema_sha256 != before.tool_schema_sha256
+    assert after_arguments.controller_protocol_sha256 != before.controller_protocol_sha256
+    assert after_arguments != before
+
+
+def test_tool_schema_digest_binds_arguments_types_and_required() -> None:
+    schemas = {entry["name"]: entry["input_schema"] for entry in obligation_tool_schemas()}
+
+    assert sorted(schemas) == sorted(TOOL_OBLIGATIONS)
+    for tool, spec in TOOL_OBLIGATIONS.items():
+        schema = schemas[tool]
+        assert list(schema["properties"]) == list(spec.arguments)
+        assert schema["required"] == list(spec.arguments)
+        assert schema["additionalProperties"] is False
+        assert all(entry == {"type": "string"} for entry in schema["properties"].values())
 
 
 def test_the_planner_has_its_own_prompt() -> None:
@@ -595,6 +655,19 @@ def test_the_planner_has_its_own_prompt() -> None:
     # The plan contract is described to the model, not just enforced.
     for marker in ("plan_step", "close_obligation", "submit_diagnosis", "SATISFIED", "REVOKED"):
         assert marker in prompt
+
+
+def test_the_prompt_keeps_the_two_refusal_budgets_apart() -> None:
+    """Audit regression: the prompt used to describe plan refusals as consuming
+    the submission retry budget."""
+
+    prompt = PLANNER_PROMPT
+
+    assert "计划拒绝预算（2 次）" in prompt
+    assert "提交被拒预算（2 次）" in prompt
+    assert "计划被拒不会消耗它" in prompt
+    assert "计划被拒绝不会消耗工具预算，但会消耗输出重试预算" not in prompt
+    assert "2 次输出重试" not in prompt
 
 
 def test_the_planner_stays_out_of_the_existing_report_surfaces_for_now() -> None:
