@@ -478,7 +478,28 @@ class PlanTraceEvent(BaseModel):
     plan_refusals_used: Annotated[StrictInt, Field(ge=0)] = 0
     plan_refusal_limit: Annotated[StrictInt, Field(ge=0)] = 0
     tool_calls_used: Annotated[StrictInt, Field(ge=0)] = 0
+    #: CLOSE only: what was requested and what it was judged against, so an
+    #: archived run distinguishes "satisfied" from "revoked" without the
+    #: controller that produced it.
+    requested_outcome: StrictStr | None = None
+    evidence_ids: tuple[StrictStr, ...] = ()
+    reason: StrictStr | None = None
+    #: STATE only: every obligation with its final status and citations.
+    obligations: tuple[PlanObligationRecord, ...] = ()
     open_obligations: tuple[StrictStr, ...] = ()
+
+
+class PlanObligationRecord(BaseModel):
+    """One obligation's archived state: status plus, when satisfied, its citations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    obligation_id: StrictStr
+    status: Literal["OPEN", "SATISFIED", "REVOKED"]
+    evidence_kind: StrictStr
+    subject: StrictStr
+    satisfied_with: tuple[StrictStr, ...] = ()
+    close_reason: StrictStr | None = None
 
 
 TraceEvent = Annotated[

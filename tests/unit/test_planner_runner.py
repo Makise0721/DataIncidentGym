@@ -19,6 +19,7 @@ Mechanism -> path -> assertion (the mapping the audit asked for):
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -344,3 +345,55 @@ def test_plan_events_are_archived_without_counting_as_tool_calls(
     assert len([event for event in result.trace if event.event_type == "TOOL_CALL"]) == 4
     assert result.metrics.tool_call_attempts == 4
     assert result.trace[-1].event_type == "DIAGNOSIS_TERMINAL"
+
+
+def test_the_archive_distinguishes_a_satisfied_from_a_revoked_close(
+    project_root: Path,
+) -> None:
+    """Audit regression: both close paths used to archive identically."""
+
+    ids, obligations = _ids(), _obligation_ids()
+
+    def close_events(outcome: str) -> list[tuple[str, dict[str, object]]]:
+        if outcome == "SATISFIED":
+            return [("close_obligation", {"obligation_id": obligations["node"],
+                                          "outcome": "SATISFIED",
+                                          "evidence_ids": [ids["node"]]})]
+        return [("close_obligation", {"obligation_id": obligations["node"],
+                                      "outcome": "REVOKED",
+                                      "reason": "the node error is not observable"})]
+
+    runs = {}
+    for outcome in ("SATISFIED", "REVOKED"):
+        runner = _runner(
+            [*_steps(), *close_events(outcome), ("submit_diagnosis", _confirmed())],
+            project_root,
+        )
+        result = asyncio.run(runner.diagnose())
+        # Reload from the serialized archive: no controller, no session.
+        runs[outcome] = json.loads(json.dumps([event.model_dump(mode="json")
+                                              for event in result.trace]))
+
+    assert runs["SATISFIED"] != runs["REVOKED"]
+
+    from pydantic import TypeAdapter
+
+    from data_incident_gym.diagnosis import TraceEvent
+    from data_incident_gym.evidence_planner import plan_outcome_summary
+
+    reload_trace = TypeAdapter(TraceEvent)
+    summary = {}
+    for outcome, payload in runs.items():
+        # The whole trace reloads through the discriminated union, exactly as an
+        # archived run would be read back.
+        trace = [reload_trace.validate_python(event) for event in payload]
+        summary[outcome] = plan_outcome_summary(trace, _ids().values())
+
+    assert summary["SATISFIED"]["satisfied"] == 1
+    assert summary["SATISFIED"]["revoked"] == 0
+    assert summary["SATISFIED"]["closed_by_outcome"] == {"SATISFIED": 1, "REVOKED": 0}
+    assert summary["SATISFIED"]["satisfied_uncovered"] == []
+    assert summary["REVOKED"]["satisfied"] == 0
+    assert summary["REVOKED"]["revoked"] == 1
+    assert summary["REVOKED"]["closed_by_outcome"] == {"SATISFIED": 0, "REVOKED": 1}
+    assert summary["SATISFIED"]["open"] == summary["REVOKED"]["open"] == 3

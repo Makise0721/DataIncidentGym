@@ -18,6 +18,7 @@
 | 被拒提交（可重试） | 输出校验阶段交给会话判定 | `test_a_refused_submission_can_be_retried`：伪造引用先被拒（`output_retries_used=1`），随后合法弃答被接受 |
 | 提交拒绝预算耗尽 | 一直提交伪造引用 | `test_a_run_of_refused_submissions_fails_closed`：`MODEL_ERROR`/`MODEL_PROTOCOL_ERROR`、`output_retries_used=2`、会话 `cancel("RUN_FAILED")`、`model_requests>=2` 且 `output_tokens>0` |
 | 计划事件归档 | 计划拒绝/关闭/开放义务 | `test_plan_events_are_archived_without_counting_as_tool_calls`：`PLAN` 事件逐条保留且不进工具记录 |
+| 归档可复核性 | 同一义务分别 SATISFIED / REVOKED | `test_the_archive_distinguishes_a_satisfied_from_a_revoked_close`：两条路径序列化后不同；经 `TraceEvent` 联合类型重载后，`plan_outcome_summary` 仍能重建满足/撤销/开放计数与「已满足义务是否被最终引用覆盖」，不依赖内存中的 controller |
 | 截止时间 | 脚本化模型超出 deadline | `test_a_deadline_overflow_ends_in_a_timeout_terminal`：终态 `MODEL_ERROR`/`MODEL_TIMEOUT`、会话 `cancel("STRATEGY_TIMEOUT")` |
 | 校验拒绝不是收据 | 计划层全部拒绝路径 | `test_evidence_planner.py`：`PlanVerdict` 只带 `PLAN_*` 码、不携带证据、不消耗工具尝试；后端拒绝保留真实码且不属于 `PLAN_*` |
 | 义务身份 | 全参数规范 JSON | 参数顺序无关、上游/下游分离、分隔符碰撞不可能、已关闭义务固定码 |

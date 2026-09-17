@@ -313,6 +313,9 @@ def register_planner_tools(agent: Any) -> None:
         )
         payload = {
             "obligation_id": declaration.obligation_id,
+            "requested_outcome": declaration.outcome,
+            "evidence_ids": list(declaration.evidence_ids),
+            "reason": declaration.reason,
             "accepted": verdict.accepted,
             "verdict_code": verdict.code,
             "detail": verdict.detail,
@@ -784,6 +787,42 @@ class PlannerController:
         )
 
 
+def plan_outcome_summary(
+    trace: Any, cited_evidence_ids: Any
+) -> dict[str, Any]:
+    """Rebuild the planner diagnostics from an archived trace alone.
+
+    Works on events reloaded from JSON: it needs no controller, no session and no
+    in-memory state, so an archived run can be re-checked years later.
+    """
+
+    from data_incident_gym.diagnosis import PlanTraceEvent
+
+    plan_events = [event for event in trace if isinstance(event, PlanTraceEvent)]
+    closes = [event for event in plan_events if event.kind == "CLOSE"]
+    states = [event for event in plan_events if event.kind == "STATE"]
+    state = states[-1] if states else None
+    obligations = () if state is None else state.obligations
+    satisfied = [item for item in obligations if item.status == "SATISFIED"]
+    cited = set(cited_evidence_ids)
+    return {
+        "close_events": len(closes),
+        "closed_by_outcome": {
+            "SATISFIED": sum(1 for event in closes if event.requested_outcome == "SATISFIED"),
+            "REVOKED": sum(1 for event in closes if event.requested_outcome == "REVOKED"),
+        },
+        "refused_closes": sum(1 for event in closes if not event.accepted),
+        "satisfied": len(satisfied),
+        "revoked": sum(1 for item in obligations if item.status == "REVOKED"),
+        "open": sum(1 for item in obligations if item.status == "OPEN"),
+        "satisfied_uncovered": sorted(
+            item.obligation_id
+            for item in satisfied
+            if not set(item.satisfied_with).issubset(cited)
+        ),
+    }
+
+
 __all__ = [
     "PLANNER_PROTOCOL_VERSION",
     "PLAN_ERROR_CODES",
@@ -797,5 +836,6 @@ __all__ = [
     "evidence_planner_policy_identity",
     "obligation_id_for",
     "obligation_tool_schemas",
+    "plan_outcome_summary",
     "planner_controller_payload",
 ]

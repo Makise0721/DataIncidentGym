@@ -40,6 +40,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
+    PlanObligationRecord,
     PlanTraceEvent,
     ToolTraceEvent,
 )
@@ -293,7 +294,21 @@ class EvidencePlannerRunner:
         plan_snapshot = self._controller.snapshot()
         trace.extend(_plan_events(deps))
         trace.append(
-            PlanTraceEvent(kind="STATE", open_obligations=tuple(plan_snapshot["obligations_open"]))
+            PlanTraceEvent(
+                kind="STATE",
+                obligations=tuple(
+                    PlanObligationRecord(
+                        obligation_id=item.obligation_id,
+                        status=item.status,
+                        evidence_kind=item.evidence_kind,
+                        subject=item.subject,
+                        satisfied_with=item.satisfied_with,
+                        close_reason=item.close_reason,
+                    )
+                    for item in self._controller.obligations()
+                ),
+                open_obligations=tuple(plan_snapshot["obligations_open"]),
+            )
         )
         trace.append(
             DiagnosisTerminalTraceEvent(
@@ -349,6 +364,9 @@ def _plan_events(deps: PlannerDeps) -> list[PlanTraceEvent]:
                 plan_refusals_used=int(turn.get("plan_refusals_used", 0)),
                 plan_refusal_limit=int(turn.get("plan_refusal_limit", 0)),
                 tool_calls_used=int(turn.get("tool_calls_used", 0)),
+                requested_outcome=None if is_step else turn.get("requested_outcome"),
+                evidence_ids=() if is_step else tuple(turn.get("evidence_ids") or ()),
+                reason=None if is_step else turn.get("reason"),
             )
         )
     return events
