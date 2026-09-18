@@ -107,9 +107,10 @@ def test_readonly_path_restates_the_reference_tool_path() -> None:
     )
 
 
-def test_ab_pair_covers_exactly_the_five_paired_cards() -> None:
-    assert len(AB_SCENARIO_PAIRS) == 5
-    assert len(AB_PARTNER_IDS) == 10
+def test_ab_pair_covers_exactly_the_paired_cards() -> None:
+    # Five historical pairs plus the two T12 dev-extension pairs.
+    assert len(AB_SCENARIO_PAIRS) == 7
+    assert len(AB_PARTNER_IDS) == 14
     for left, right in AB_SCENARIO_PAIRS:
         assert ab_partner(left) == right
         assert ab_partner(right) == left

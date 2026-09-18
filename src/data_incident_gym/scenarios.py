@@ -65,9 +65,20 @@ P1_SCENARIO_IDS = (
     + P1_M10_SCENARIO_IDS
     + P1_M11_SCENARIO_IDS
 )
+# T12 dev-extension regression variants (design §6): recombined frozen
+# mutations on the payments side. Deliberately NOT part of P1_SCENARIO_IDS —
+# the manifest scenario catalog is frozen with the original 18 entries, so no
+# sealed manifest's catalog comparison changes when these are added here.
+P1_T12_DEV_EXTENSION_IDS = (
+    "required_null_payment_id_distractor_a",
+    "required_null_payment_id_distractor_b",
+    "type_change_payment_amount_drift_a",
+    "type_change_payment_amount_drift_b",
+)
 SUPPORTED_SCENARIO_IDS = (
     REGRESSION_SCENARIO_IDS
     + P1_SCENARIO_IDS
+    + P1_T12_DEV_EXTENSION_IDS
 )
 
 

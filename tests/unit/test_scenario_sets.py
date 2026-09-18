@@ -14,7 +14,11 @@ from data_incident_gym.scenario_sets import (
     ScenarioSetsError,
     load_scenario_sets,
 )
-from data_incident_gym.scenarios import SUPPORTED_SCENARIO_IDS
+from data_incident_gym.scenarios import (
+    P1_SCENARIO_IDS,
+    REGRESSION_SCENARIO_IDS,
+    SUPPORTED_SCENARIO_IDS,
+)
 
 DEV_REASON = "used for prompt/rule development through p1-formal-v22"
 
@@ -46,8 +50,15 @@ def test_checked_in_registry_marks_the_whole_catalog_dev() -> None:
     for case_id in SUPPORTED_SCENARIO_IDS:
         assert sets.set_for(case_id) == "dev"
     assert sets.set_for("not_a_catalog_case") == "unknown"
+    historical = set(REGRESSION_SCENARIO_IDS) | set(P1_SCENARIO_IDS)
     for entry in sets.dev_scenarios:
-        assert entry.reason == DEV_REASON
+        # The pre-T12 catalog shares one frozen reason; the T12 dev-extension
+        # variants carry their own creation record instead.
+        if entry.case_id in historical:
+            assert entry.reason == DEV_REASON
+        else:
+            assert entry.reason and entry.reason != DEV_REASON
+            assert "T12 dev-extension" in entry.reason
 
 
 def test_partition_rule_names_mechanism_and_seed_policy() -> None:

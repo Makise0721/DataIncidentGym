@@ -67,6 +67,9 @@ AB_SCENARIO_PAIRS: tuple[tuple[str, str], ...] = (
     ("duplicate_payment_coupon_a", "duplicate_payment_coupon_b"),
     ("orphan_payment_coupon_a", "orphan_payment_coupon_b"),
     ("silent_payment_drop_partition_a", "silent_payment_drop_partition_b"),
+    # T12 dev-extension pairs (payments side, recombined frozen mutations).
+    ("required_null_payment_id_distractor_a", "required_null_payment_id_distractor_b"),
+    ("type_change_payment_amount_drift_a", "type_change_payment_amount_drift_b"),
 )
 
 # Scenarios that are themselves healthy controls (no injection, NO_INCIDENT).

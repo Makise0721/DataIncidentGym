@@ -73,6 +73,22 @@
     {
       "case_id": "order_volume_within_sla",
       "reason": "used for prompt/rule development through p1-formal-v22"
+    },
+    {
+      "case_id": "required_null_payment_id_distractor_a",
+      "reason": "T12 dev-extension regression variant (2026-09-18): created after all planner prompt/rule development; dev-only by construction, never exposed to holdout"
+    },
+    {
+      "case_id": "required_null_payment_id_distractor_b",
+      "reason": "T12 dev-extension regression variant (2026-09-18): created after all planner prompt/rule development; dev-only by construction, never exposed to holdout"
+    },
+    {
+      "case_id": "type_change_payment_amount_drift_a",
+      "reason": "T12 dev-extension regression variant (2026-09-18): created after all planner prompt/rule development; dev-only by construction, never exposed to holdout"
+    },
+    {
+      "case_id": "type_change_payment_amount_drift_b",
+      "reason": "T12 dev-extension regression variant (2026-09-18): created after all planner prompt/rule development; dev-only by construction, never exposed to holdout"
     }
   ],
   "holdout_scenarios": []
