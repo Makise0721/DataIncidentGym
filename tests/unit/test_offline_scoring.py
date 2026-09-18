@@ -222,6 +222,28 @@ def _recovery_proof(scenario: ScenarioSpec, *, state: str = "HEALTHY") -> Recove
     )
 
 
+def _prepared_bundle(project_root: Path) -> EvaluationInputBundle:
+    """Everything up to (but excluding) the scoring-inputs write."""
+
+    scenario = load_scenario_spec(CASE_ID)
+    verification = _verification(scenario)
+    run = _static_insufficient_run()
+    artifact_dir = project_root / "artifacts" / RUN_ID
+    evaluation = DeterministicEvaluator.evaluate(
+        scenario, verification, run, recovery_succeeded=True
+    )
+    _write_artifact_files(artifact_dir, evaluation)
+    return build_evaluation_input_bundle(
+        scenario=scenario,
+        verification=verification,
+        diagnosis_run=run,
+        recovery=_recovery_proof(scenario),
+        artifact_dir=artifact_dir,
+        budget=_budget(),
+        evaluator=default_evaluator_identity(),
+    )
+
+
 def _prepare_project(
     project_root: Path,
     run: DiagnosisRunResult | None = None,
@@ -845,3 +867,56 @@ def test_runner_service_chain_writes_attachment_then_rescores(tmp_path: Path) ->
     assert result.created is True
     assert result.diff.available is True
     assert result.changed_check_codes == ()
+
+
+def test_the_bundle_write_retries_a_transient_windows_rename_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit round: a 1-in-100 Windows rename lock used to fail a completed run.
+
+    A probe on this repository measured ~1% of scoring-input renames failing
+    once with WinError 5 and succeeding afterwards, so the writer retries that
+    specific transient error a bounded number of times.
+    """
+
+    bundle = _prepared_bundle(tmp_path)
+    original_rename = Path.rename
+    locks = {"count": 0}
+
+    def flaky_rename(self: Path, target: Path) -> Path:
+        if self.name.startswith(".") and locks["count"] == 0:
+            locks["count"] += 1
+            raise PermissionError(5, "access denied", str(self))
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+
+    written = write_evaluation_input_bundle(tmp_path, bundle, created_at=CREATED_AT)
+
+    assert locks["count"] == 1
+    assert written == _bundle_dir(tmp_path)
+    assert (written / "evaluation_inputs.json").is_file()
+
+
+def test_the_bundle_write_still_fails_closed_under_a_persistent_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from data_incident_gym import evaluation_inputs
+
+    bundle = _prepared_bundle(tmp_path)
+    attempts = {"count": 0}
+
+    def locked_rename(self: Path, target: Path) -> Path:
+        if self.name.startswith("."):
+            attempts["count"] += 1
+            raise PermissionError(5, "access denied", str(self))
+        raise AssertionError("only the bundle rename may be exercised")
+
+    monkeypatch.setattr(Path, "rename", locked_rename)
+
+    with pytest.raises(EvaluationInputsError) as error:
+        write_evaluation_input_bundle(tmp_path, bundle, created_at=CREATED_AT)
+
+    assert error.value.code == "SCORING_INPUTS_WRITE_FAILED"
+    assert attempts["count"] == evaluation_inputs._RENAME_ATTEMPTS
+    assert not (tmp_path / ".dig" / "scoring-inputs" / f".{RUN_ID}.tmp").exists()

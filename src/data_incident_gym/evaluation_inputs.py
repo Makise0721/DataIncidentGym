@@ -21,6 +21,7 @@ import inspect
 import json
 import platform
 import re
+import time
 from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
@@ -66,6 +67,10 @@ KNOWN_EVALUATOR_VERSIONS = frozenset({"p1.evaluator.v2", EVALUATOR_VERSION})
 
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 Digest = Annotated[StrictStr, Field(pattern=_DIGEST_PATTERN)]
+
+#: Bounded retry for the bundle-directory rename (see ``_rename_with_retry``).
+_RENAME_ATTEMPTS = 5
+_RENAME_BACKOFF_SECONDS = 0.05
 
 EVALUATOR_SOURCE_MODULES = (
     "evaluation.py",
@@ -488,6 +493,26 @@ def build_evaluation_input_bundle(
     )
 
 
+def _rename_with_retry(temporary: Path, final: Path) -> None:
+    """Rename a freshly written bundle directory, tolerating Windows handles.
+
+    On Windows a just-written directory can transiently fail to rename with
+    ``PermissionError`` (defender/indexer holding a handle); a probe on this
+    repository measured ~1% of such renames failing once and succeeding later.
+    Only that transient error is retried, a bounded number of times — any other
+    OSError keeps its immediate, honest failure.
+    """
+
+    for attempt in range(_RENAME_ATTEMPTS):
+        try:
+            temporary.rename(final)
+            return
+        except PermissionError:
+            if attempt == _RENAME_ATTEMPTS - 1:
+                raise
+            time.sleep(_RENAME_BACKOFF_SECONDS)
+
+
 def write_evaluation_input_bundle(
     project_root: Path,
     bundle: EvaluationInputBundle,
@@ -525,7 +550,7 @@ def write_evaluation_input_bundle(
             (temporary / name).write_text(payload, encoding="utf-8", newline="")
         if final.is_symlink() or final.exists():
             _error("SCORING_INPUTS_EXISTS", bundle.run_id)
-        temporary.rename(final)
+        _rename_with_retry(temporary, final)
     except EvaluationInputsError:
         raise
     except OSError:
