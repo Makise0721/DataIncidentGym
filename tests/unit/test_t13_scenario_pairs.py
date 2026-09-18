@@ -39,16 +39,21 @@ DEFINITION_NODES = (
     "model.jaffle_shop.stg_customers",
     "model.jaffle_shop.stg_orders",
 )
+#: Exact pairing, so a crossed or missing partner cannot pass unnoticed.
+PARTNERS = {
+    PAIR_ONE[0]: PAIR_ONE[1],
+    PAIR_ONE[1]: PAIR_ONE[0],
+    PAIR_TWO[0]: PAIR_TWO[1],
+    PAIR_TWO[1]: PAIR_TWO[0],
+}
 
 
 def test_the_two_pairs_are_registered_and_paired() -> None:
     assert len(P1_T13_PUBLIC_EVIDENCE_IDS) == 4
     assert PAIR_ONE in AB_SCENARIO_PAIRS
     assert PAIR_TWO in AB_SCENARIO_PAIRS
-    for case_id in P1_T13_PUBLIC_EVIDENCE_IDS:
-        partner = MUTATIONS[case_id]
-        other = [item for item in MUTATIONS if item != case_id and MUTATIONS[item] == partner]
-        assert ab_partner(case_id) in other or ab_partner(case_id) is not None
+    for case_id, partner in PARTNERS.items():
+        assert ab_partner(case_id) == partner
 
 
 @pytest.mark.parametrize("case_id", P1_T13_PUBLIC_EVIDENCE_IDS)
