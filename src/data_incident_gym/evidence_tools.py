@@ -45,6 +45,7 @@ from data_incident_gym.evidence import (
     RunStateDriftError,
     raise_without_context,
 )
+from data_incident_gym.evidence_batch import BatchEvidenceTools
 from data_incident_gym.profiles import (
     AggregateSnapshotReader,
     ProfileError,
@@ -135,6 +136,11 @@ class _RunArtifacts:
         if not isinstance(payload, dict):
             _invalid_artifact()
         return payload
+
+    def read_json(self, path: Path) -> dict[str, Any]:
+        """Read one JSON artifact confined to this run's root."""
+
+        return self._read_json(path)
 
     def _read_profile_snapshot(self) -> ProfileSnapshot:
         try:
@@ -731,6 +737,23 @@ class EvidenceTools:
             for series in snapshot.histories
         ):
             raise_without_context(ProfileOutputLimitError("Profile history output exceeds limit"))
+
+    # -- T13 v2 batch tools ------------------------------------------------
+    #
+    # Both delegate to ``evidence_batch`` and keep the frozen batch protocol
+    # (atomic refusal, comma-joined request, per-target refusal codes).
+
+    def get_relation_schema_expectation(
+        self, relation_names: str
+    ) -> tuple[EvidenceRecord, ...]:
+        return BatchEvidenceTools(
+            self._run_id, self._artifacts
+        ).get_relation_schema_expectation(relation_names)
+
+    def get_dbt_node_definition(self, node_ids: str) -> tuple[EvidenceRecord, ...]:
+        return BatchEvidenceTools(self._run_id, self._artifacts).get_dbt_node_definition(
+            node_ids
+        )
 
     @staticmethod
     def _normalize_message(message: str) -> str:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -36,8 +38,11 @@ from data_incident_gym.profiles import (
     write_profile_snapshot,
 )
 from data_incident_gym.run_context import (
+    EVIDENCE_BASELINE_FILENAME,
+    RUNTIME_V2_SCHEMA_VERSION,
     RunContextError,
     clear_active_run,
+    compiled_tree_digest,
     publish_active_run,
 )
 from data_incident_gym.scenarios import (
@@ -47,6 +52,7 @@ from data_incident_gym.scenarios import (
     DeletePaymentRowsMutation,
     DuplicatePaymentRowsMutation,
     NoMutation,
+    ObservableEvidenceContractV2,
     OrphanPaymentRowsMutation,
     PaymentRow,
     ScenarioError,
@@ -930,6 +936,224 @@ class IncidentLab:
             + "\n",
         )
 
+    # -- T13 v2 run binding -------------------------------------------------
+
+    def _trusted_baseline(self) -> BaselineSummary:
+        """Read the trusted healthy baseline, verifying its own fingerprint."""
+
+        path = self.project_root / ".dig" / "baseline-summary.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise self._clean(IncidentExecutionError("无法读取健康基线摘要")) from None
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema",
+            "relations",
+            "fingerprint",
+        }:
+            raise self._clean(IncidentExecutionError("健康基线摘要形状无效"))
+        relations: list[RelationSummary] = []
+        raw_relations = payload["relations"]
+        if not isinstance(payload["schema"], str) or not isinstance(raw_relations, list):
+            raise self._clean(IncidentExecutionError("健康基线摘要形状无效"))
+        for relation in raw_relations:
+            if not isinstance(relation, dict) or set(relation) != {
+                "name",
+                "row_count",
+                "columns",
+            }:
+                raise self._clean(IncidentExecutionError("健康基线关系无效"))
+            columns: list[ColumnSummary] = []
+            for column in relation["columns"]:
+                if not isinstance(column, dict) or set(column) != {
+                    "name",
+                    "data_type",
+                    "nullable",
+                    "ordinal_position",
+                }:
+                    raise self._clean(IncidentExecutionError("健康基线列无效"))
+                columns.append(
+                    ColumnSummary(
+                        name=column["name"],
+                        data_type=column["data_type"],
+                        nullable=column["nullable"],
+                        ordinal_position=column["ordinal_position"],
+                    )
+                )
+            relations.append(
+                RelationSummary(
+                    name=relation["name"],
+                    row_count=relation["row_count"],
+                    columns=tuple(columns),
+                )
+            )
+        summary = make_baseline_summary(payload["schema"], tuple(relations))
+        if summary.fingerprint != payload["fingerprint"]:
+            raise self._clean(IncidentExecutionError("健康基线指纹不一致"))
+        return summary
+
+    def _write_evidence_baseline(self, run_root: Path, spec: ScenarioSpec) -> None:
+        """Bind the expectations the v2 contract grants, at build time.
+
+        The run keeps its own copy cut to ``expectation_relations``; a later
+        replacement of the global baseline file cannot change this run or its
+        offline re-scoring.
+        """
+
+        contract = spec.observable_evidence_contract
+        assert isinstance(contract, ObservableEvidenceContractV2)
+        baseline = self._trusted_baseline()
+        wanted = set(contract.expectation_relations)
+        missing = sorted(wanted - {relation.name for relation in baseline.relations})
+        if missing:
+            raise self._clean(
+                IncidentExecutionError("期望关系不在健康基线中：" + "、".join(missing))
+            )
+        payload = {
+            "schema_version": "p1.evidence_baseline.v1",
+            "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "baseline_fingerprint": baseline.fingerprint,
+            "relations": [
+                {
+                    "name": relation.name,
+                    "columns": [
+                        {
+                            "name": column.name,
+                            "expected_data_type": column.data_type,
+                            "expected_nullable": column.nullable,
+                            "ordinal_position": column.ordinal_position,
+                        }
+                        for column in relation.columns
+                    ],
+                }
+                for relation in baseline.relations
+                if relation.name in wanted
+            ],
+        }
+        self._write_text(
+            run_root / EVIDENCE_BASELINE_FILENAME,
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        )
+
+    def _write_runtime_v2(
+        self,
+        run_root: Path,
+        spec: ScenarioSpec,
+        run_id: str,
+        dbt_exit_code: int,
+        profile_spec_sha256: str,
+    ) -> None:
+        """Write the v2 runtime record over the final archived bytes.
+
+        Everything hashed here was already redacted, and the record itself is
+        written afterwards; the build refuses to finish when the run's own
+        artifacts disagree with each other or carry another invocation's id.
+        """
+
+        contract = spec.observable_evidence_contract
+        assert isinstance(contract, ObservableEvidenceContractV2)
+        manifest_bytes = self._read_bytes(run_root / "dbt/target/manifest.json")
+        results_bytes = self._read_bytes(run_root / "dbt/target/run_results.json")
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        results = json.loads(results_bytes.decode("utf-8"))
+        invocation = results.get("metadata", {}).get("invocation_id")
+        if (
+            not isinstance(invocation, str)
+            or not invocation.strip()
+            or manifest.get("metadata", {}).get("invocation_id") != invocation
+        ):
+            raise self._clean(IncidentExecutionError("dbt invocation 标识缺失或不一致"))
+        sources: dict[str, set[str]] = {}
+        results_by_id = {
+            result.get("unique_id"): result
+            for result in results.get("results", [])
+            if isinstance(result, dict)
+        }
+        for node_id, node in (manifest.get("nodes") or {}).items():
+            if not isinstance(node, dict):
+                continue
+            texts = set()
+            if isinstance(node.get("compiled_code"), str):
+                texts.add(node["compiled_code"])
+            result = results_by_id.get(node_id)
+            if isinstance(result, dict) and isinstance(result.get("compiled_code"), str):
+                texts.add(result["compiled_code"])
+            compiled_path = node.get("compiled_path")
+            if isinstance(compiled_path, str):
+                candidate = Path(compiled_path)
+                if not candidate.is_absolute():
+                    candidate = run_root / candidate
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except OSError:
+                    resolved = None
+                if (
+                    resolved is not None
+                    and resolved.is_file()
+                    and resolved.is_relative_to(run_root)
+                    and not resolved.is_symlink()
+                ):
+                    texts.add(resolved.read_bytes().decode("utf-8"))
+            if texts:
+                sources[node_id] = texts
+        conflicts = sorted(node_id for node_id, texts in sources.items() if len(texts) > 1)
+        if conflicts:
+            raise self._clean(
+                IncidentExecutionError("运行产物自相矛盾：" + "、".join(conflicts[:3]))
+            )
+        baseline_bytes = self._read_bytes(run_root / EVIDENCE_BASELINE_FILENAME)
+        runtime = {
+            "schema_version": RUNTIME_V2_SCHEMA_VERSION,
+            "run_id": run_id,
+            "dbt_exit_code": dbt_exit_code,
+            "artifacts": _EXPECTED_ARTIFACTS,
+            "observable_relations": {
+                "schema": list(contract.schema_relations),
+                "profile": list(contract.profile_relations),
+                "history": list(contract.history_relations),
+                "expectation": list(contract.expectation_relations),
+            },
+            "observable_nodes": {"definition": list(contract.definition_nodes)},
+            "evidence_baseline": {
+                "path": EVIDENCE_BASELINE_FILENAME,
+                "baseline_fingerprint": json.loads(baseline_bytes.decode("utf-8"))[
+                    "baseline_fingerprint"
+                ],
+                "sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+            },
+            "build_provenance": {
+                "dbt_invocation_id": invocation,
+                "artifact_sha256": {
+                    "manifest": hashlib.sha256(manifest_bytes).hexdigest(),
+                    "run_results": hashlib.sha256(results_bytes).hexdigest(),
+                    "compiled_tree": compiled_tree_digest(
+                        run_root / "dbt" / "target" / "compiled"
+                    ),
+                },
+            },
+            "profile_spec_sha256": profile_spec_sha256,
+        }
+        self._write_text(
+            run_root / "runtime.json",
+            json.dumps(runtime, indent=2, sort_keys=True) + "\n",
+        )
+        self._write_text(
+            run_root / "incident_brief.json",
+            json.dumps(
+                spec.incident_brief.model_dump(mode="json"),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+
+    @staticmethod
+    def _read_bytes(path: Path) -> bytes:
+        try:
+            return path.read_bytes()
+        except OSError:
+            raise IncidentExecutionError("运行产物不可读") from None
+
     def _write_private_scenario(self, run_id: str, spec: ScenarioSpec) -> None:
         payload = {
             "schema_version": "scenario_snapshot.v1",
@@ -1005,19 +1229,31 @@ class IncidentLab:
         schema = self._public_schema(spec)
         self._write_text(run_root / "schema.json", schema.to_json())
         profile_hash = self._public_profile(spec, run_root)
-        self._write_runtime(run_root, spec, run_id, dbt_result.return_code, profile_hash)
-        for artifact in (
+        is_v2 = isinstance(spec.observable_evidence_contract, ObservableEvidenceContractV2)
+        if is_v2:
+            self._write_evidence_baseline(run_root, spec)
+        else:
+            self._write_runtime(run_root, spec, run_id, dbt_result.return_code, profile_hash)
+        artifacts = [
             run_root / "dbt/target/manifest.json",
             run_root / "dbt/target/run_results.json",
             run_root / "dbt/logs/dbt.log",
             run_root / "schema.json",
             run_root / "profile_snapshot.json",
-            run_root / "runtime.json",
             run_root / "incident_brief.json",
             run_root / "dbt/stdout.log",
             run_root / "dbt/stderr.log",
-        ):
+        ]
+        if is_v2:
+            artifacts.append(run_root / EVIDENCE_BASELINE_FILENAME)
+        else:
+            artifacts.append(run_root / "runtime.json")
+        for artifact in artifacts:
             self._redact_file(artifact)
+        if is_v2:
+            # Digests bind the archived bytes; the runtime record is written
+            # last so it can never be redacted after being hashed.
+            self._write_runtime_v2(run_root, spec, run_id, dbt_result.return_code, profile_hash)
 
         try:
             verification = self.verifier.verify(run_id)

@@ -37,6 +37,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisStatus,
     NonBlankStr,
     RootCauseCode,
+    TargetRefusal,
     UnresolvedEvidence,
 )
 from data_incident_gym.evidence import EvidenceRecord, EvidenceToolError, safe_error_code
@@ -224,6 +225,10 @@ class ToolReceipt(BaseModel):
     duplicate: StrictBool = False
     error: ProtocolError | None = None
     tool_calls_used: StrictInt = Field(ge=0)
+    #: v2 batch tools only: the atomic refusal's per-target ``(target, code)``
+    #: detail, in request order. Empty for v1 calls and successful calls; the
+    #: call-level error code never witnesses a gap on its own.
+    target_refusals: tuple[TargetRefusal, ...] = ()
 
 
 class FinalSubmission(BaseModel):
@@ -265,6 +270,11 @@ _TOOL_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "get_relation_schema": ("relation_name",),
     "get_relation_data_profile": ("relation_name",),
     "get_relation_history": ("relation_name",),
+    # T13 v2 batch tools: the argument is the frozen comma-joined request
+    # encoding, so the string-argument rule holds for them too. A v1 session
+    # never grants them (the default allowlist stays the six tools).
+    "get_relation_schema_expectation": ("relation_names",),
+    "get_dbt_node_definition": ("node_ids",),
 }
 
 
@@ -354,6 +364,7 @@ class StrategySession:
             duplicate: bool = False,
             code: str | None = None,
             detail: str | None = None,
+            target_refusals: tuple[TargetRefusal, ...] = (),
         ) -> ToolReceipt:
             error = (
                 ProtocolError(code=code, detail=detail, request_id=request.request_id)
@@ -368,6 +379,7 @@ class StrategySession:
                 duplicate=duplicate,
                 error=error,
                 tool_calls_used=self._attempts,
+                target_refusals=target_refusals,
             )
 
         if self._final is not None or self._cancellation is not None:
@@ -402,9 +414,16 @@ class StrategySession:
         try:
             records = self._dispatch(request.tool_name, request.arguments)
         except EvidenceToolError as error:
-            # The refusal is the receipt: keep the backend's real error code.
+            # The refusal is the receipt: keep the backend's real error code and,
+            # for v2 batch tools, the authoritative per-target detail.
             self._last_backend_error = error
-            result = receipt(accepted=False, code=safe_error_code(error))
+            detailed = tuple(
+                TargetRefusal(target=target, code=code)
+                for target, code in getattr(error, "target_refusals", ())
+            )
+            result = receipt(
+                accepted=False, code=safe_error_code(error), target_refusals=detailed
+            )
         except Exception:
             self._last_backend_error = None
             result = receipt(accepted=False, code="TOOL_BACKEND_ERROR")
@@ -436,7 +455,11 @@ class StrategySession:
             return self._tools.get_relation_schema(arguments["relation_name"])
         if tool_name == "get_relation_data_profile":
             return self._tools.get_relation_data_profile(arguments["relation_name"])
-        return self._tools.get_relation_history(arguments["relation_name"])
+        if tool_name == "get_relation_history":
+            return self._tools.get_relation_history(arguments["relation_name"])
+        if tool_name == "get_relation_schema_expectation":
+            return self._tools.get_relation_schema_expectation(arguments["relation_names"])
+        return self._tools.get_dbt_node_definition(arguments["node_ids"])
 
     def acquire_model_request(self) -> ProtocolError | None:
         """Grant one model-request slot, or explain the refusal.

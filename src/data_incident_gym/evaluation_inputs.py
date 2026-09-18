@@ -493,7 +493,7 @@ def build_evaluation_input_bundle(
     )
 
 
-def _rename_with_retry(temporary: Path, final: Path) -> None:
+def rename_directory_with_retry(temporary: Path, final: Path) -> None:
     """Rename a freshly written bundle directory, tolerating Windows handles.
 
     On Windows a just-written directory can fail to rename with
@@ -551,7 +551,7 @@ def write_evaluation_input_bundle(
             (temporary / name).write_text(payload, encoding="utf-8", newline="")
         if final.is_symlink() or final.exists():
             _error("SCORING_INPUTS_EXISTS", bundle.run_id)
-        _rename_with_retry(temporary, final)
+        rename_directory_with_retry(temporary, final)
     except EvaluationInputsError:
         raise
     except OSError:

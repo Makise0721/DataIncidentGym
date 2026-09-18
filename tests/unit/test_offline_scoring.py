@@ -921,3 +921,52 @@ def test_the_bundle_write_still_fails_closed_under_a_persistent_lock(
     assert error.value.code == "SCORING_INPUTS_WRITE_FAILED"
     assert attempts["count"] == evaluation_inputs._RENAME_ATTEMPTS
     assert not (tmp_path / ".dig" / "scoring-inputs" / f".{RUN_ID}.tmp").exists()
+
+
+def test_the_offline_score_writer_shares_the_rename_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same 1-in-100 Windows rename lock also hit the rescore writer."""
+
+    from data_incident_gym import evaluation_rescore
+
+    final = tmp_path / "rescores" / ("a" * 64)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    original_rename = Path.rename
+    locks = {"count": 0}
+
+    def flaky_rename(self: Path, target: Path) -> Path:
+        if self.name.startswith(".") and locks["count"] == 0:
+            locks["count"] += 1
+            raise PermissionError(5, "access denied", str(self))
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky_rename)
+
+    evaluation_rescore._write_score_dir(final, {"index.json": "{}"})
+
+    assert locks["count"] == 1
+    assert (final / "index.json").is_file()
+
+
+def test_the_offline_score_writer_still_fails_closed_under_a_persistent_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from data_incident_gym import evaluation_inputs, evaluation_rescore
+
+    final = tmp_path / "rescores" / ("b" * 64)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    attempts = {"count": 0}
+
+    def locked_rename(self: Path, target: Path) -> Path:
+        attempts["count"] += 1
+        raise PermissionError(5, "access denied", str(self))
+
+    monkeypatch.setattr(Path, "rename", locked_rename)
+
+    with pytest.raises(evaluation_rescore.OfflineScoreError) as error:
+        evaluation_rescore._write_score_dir(final, {"index.json": "{}"})
+
+    assert error.value.code == "OFFLINE_SCORE_WRITE_FAILED"
+    assert attempts["count"] == evaluation_inputs._RENAME_ATTEMPTS
+    assert not (tmp_path / "rescores" / f".{final.name}.tmp").exists()

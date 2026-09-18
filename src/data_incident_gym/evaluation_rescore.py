@@ -48,6 +48,7 @@ from data_incident_gym.evaluation_inputs import (
     evaluator_identity_for,
     load_archived_evaluation,
     load_evaluation_input_bundle,
+    rename_directory_with_retry,
     verification_from_payload,
 )
 
@@ -482,7 +483,9 @@ def _write_score_dir(final: Path, payloads: dict[str, str]) -> None:
             (temporary / name).write_text(payload, encoding="utf-8", newline="")
         if final.is_symlink() or final.exists():
             _error("OFFLINE_SCORE_EXISTS", str(final))
-        temporary.rename(final)
+        # One shared bounded retry: Windows can transiently refuse a directory
+        # rename while a handle is held (measured on this repository).
+        rename_directory_with_retry(temporary, final)
     except OfflineScoreError:
         raise
     except OSError:

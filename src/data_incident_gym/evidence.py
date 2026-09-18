@@ -30,6 +30,9 @@ class EvidenceType(StrEnum):
     DBT_LINEAGE = "DBT_LINEAGE"
     RELATION_DATA_PROFILE = "RELATION_DATA_PROFILE"
     RELATION_HISTORY = "RELATION_HISTORY"
+    # T13 v2 facts; only the batch tools of the v2 surface produce them.
+    RELATION_SCHEMA_EXPECTATION = "RELATION_SCHEMA_EXPECTATION"
+    DBT_NODE_DEFINITION = "DBT_NODE_DEFINITION"
 
 
 class EvidenceSource(StrEnum):
@@ -37,6 +40,8 @@ class EvidenceSource(StrEnum):
     DBT_MANIFEST = "dbt_artifact:manifest.json"
     POSTGRES_CATALOG = "postgres_catalog"
     POSTGRES_PROFILE_SNAPSHOT = "postgres_profile_snapshot"
+    #: The run-bound copy of the trusted healthy baseline (T13 E1).
+    RUN_BASELINE = "run_artifact:baseline_evidence.json"
 
 
 class RelationSchemaColumn(BaseModel):
@@ -110,6 +115,55 @@ class RelationDataProfileFact(BaseModel):
     snapshot: RelationProfileSnapshot
 
 
+class ExpectedColumn(BaseModel):
+    """One baseline expectation row: what the healthy contract recorded."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: StrictStr
+    expected_data_type: StrictStr
+    expected_nullable: StrictBool
+    ordinal_position: StrictInt
+
+
+class RelationSchemaExpectationFact(BaseModel):
+    """The trusted baseline's column expectations for one relation (T13 E1).
+
+    A fact only: it reports what the healthy baseline recorded, never whether
+    the current observation deviates from it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["RELATION_SCHEMA_EXPECTATION"]
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
+    relation_name: StrictStr
+    baseline_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    known: StrictBool
+    columns: tuple[ExpectedColumn, ...] = ()
+
+
+class DbtNodeDefinitionFact(BaseModel):
+    """One run-bound node definition: what the model actually executed (T13 E2).
+
+    ``complete`` is False when the text exceeds the size cap (the text is then
+    truncated): a partial definition must never be used for column mapping.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["DBT_NODE_DEFINITION"]
+    run_id: StrictStr = Field(pattern=RUN_ID_PATTERN)
+    node_id: StrictStr
+    known: StrictBool
+    resource_type: StrictStr | None = None
+    declared_columns: tuple[StrictStr, ...] = ()
+    depends_on: tuple[StrictStr, ...] = ()
+    compiled_sql_sha256: StrictStr | None = None
+    compiled_sql: StrictStr | None = None
+    complete: StrictBool = True
+
+
 class RelationHistoryFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -130,7 +184,9 @@ type EvidenceContent = Annotated[
     | RelationSchemaFact
     | DbtLineageFact
     | RelationDataProfileFact
-    | RelationHistoryFact,
+    | RelationHistoryFact
+    | RelationSchemaExpectationFact
+    | DbtNodeDefinitionFact,
     Field(discriminator="kind"),
 ]
 
@@ -157,6 +213,8 @@ _CONTENT_TYPES: dict[EvidenceType, type[BaseModel]] = {
     EvidenceType.DBT_LINEAGE: DbtLineageFact,
     EvidenceType.RELATION_DATA_PROFILE: RelationDataProfileFact,
     EvidenceType.RELATION_HISTORY: RelationHistoryFact,
+    EvidenceType.RELATION_SCHEMA_EXPECTATION: RelationSchemaExpectationFact,
+    EvidenceType.DBT_NODE_DEFINITION: DbtNodeDefinitionFact,
 }
 
 _SOURCE_TYPES: dict[EvidenceType, EvidenceSource] = {
@@ -166,6 +224,8 @@ _SOURCE_TYPES: dict[EvidenceType, EvidenceSource] = {
     EvidenceType.DBT_LINEAGE: EvidenceSource.DBT_MANIFEST,
     EvidenceType.RELATION_DATA_PROFILE: EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
     EvidenceType.RELATION_HISTORY: EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
+    EvidenceType.RELATION_SCHEMA_EXPECTATION: EvidenceSource.RUN_BASELINE,
+    EvidenceType.DBT_NODE_DEFINITION: EvidenceSource.DBT_MANIFEST,
 }
 
 #: The frozen T13 batch tool surface (``p1.evidence_tools.v2``). Witness rules
@@ -369,6 +429,42 @@ class ProfileSnapshotMismatchError(EvidenceToolError):
 
 class ProfileOutputLimitError(EvidenceToolError):
     code = "PROFILE_OUTPUT_LIMIT"
+
+
+class BatchTargetsRefusedError(EvidenceToolError):
+    """An atomic batch refusal: every requested target is refused or none is.
+
+    ``target_refusals`` is the authoritative per-target detail — ``(target,
+    code)`` pairs in request order, deduped. The call-level code
+    (``TARGETS_REFUSED``) only summarises; witnesses match the pairs.
+    """
+
+    code = TARGETS_REFUSED_CODE
+
+    def __init__(
+        self,
+        message: object = "Batch request refused",
+        *,
+        target_refusals: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.target_refusals = target_refusals
+
+
+class TargetsEmptyError(EvidenceToolError):
+    code = "TARGETS_EMPTY"
+
+
+class BatchTooLargeError(EvidenceToolError):
+    code = "BATCH_TOO_LARGE"
+
+
+class NodeNotAllowedError(EvidenceToolError):
+    code = "NODE_NOT_ALLOWED"
+
+
+class EvidenceIntegrityError(EvidenceToolError):
+    code = "EVIDENCE_INTEGRITY_ERROR"
 
 
 InvalidRunId = InvalidRunIdError

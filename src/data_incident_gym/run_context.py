@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 CASE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 ACTIVE_RUN_SCHEMA_VERSION = "p1.active_run.v1"
 RUNTIME_SCHEMA_VERSION = "p1.runtime.v1"
+RUNTIME_V2_SCHEMA_VERSION = "p1.runtime.v2"
 ACTIVE_RUN_PATH = Path(".dig/lab/active_run.json")
 ACTIVE_RUN_TEMP_PATH = Path(".dig/lab/active_run.json.tmp")
 _ACTIVE_RUN_KEYS = {"run_id", "schema_version"}
@@ -26,7 +28,18 @@ _RUNTIME_KEYS = {
     "observable_relations",
     "profile_spec_sha256",
 }
+#: v2 adds the T13 evidence whitelists, the run-bound baseline snapshot and the
+#: build provenance binding. Only scenarios using the v2 contract produce it.
+_RUNTIME_V2_EXTRA_KEYS = {
+    "observable_nodes",
+    "evidence_baseline",
+    "build_provenance",
+}
 _OBSERVABLE_RELATION_KEYS = {"schema", "profile", "history"}
+_OBSERVABLE_V2_RELATION_KEYS = {*_OBSERVABLE_RELATION_KEYS, "expectation"}
+_OBSERVABLE_NODE_KEYS = {"definition"}
+EVIDENCE_BASELINE_FILENAME = "baseline_evidence.json"
+_DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _EXPECTED_ARTIFACTS = {
     "manifest": "dbt/target/manifest.json",
     "run_results": "dbt/target/run_results.json",
@@ -121,12 +134,59 @@ class ObservableRunContext:
     def dbt_log_path(self) -> Path:
         return self.artifact_dir / _EXPECTED_ARTIFACTS["dbt_log"]
 
+    @property
+    def is_v2(self) -> bool:
+        """Whether this run carries the T13 evidence whitelists and binding."""
+
+        return self.runtime.get("schema_version") == RUNTIME_V2_SCHEMA_VERSION
+
+    @property
+    def evidence_baseline_path(self) -> Path:
+        return self.artifact_dir / EVIDENCE_BASELINE_FILENAME
+
+    @property
+    def expectation_relations(self) -> tuple[str, ...]:
+        return tuple(
+            self.runtime.get("observable_relations", {}).get("expectation", ())
+        )
+
+    @property
+    def definition_nodes(self) -> tuple[str, ...]:
+        return tuple(self.runtime.get("observable_nodes", {}).get("definition", ()))
+
 
 RunContext = ObservableRunContext
 
 
 def _fail(message: str = "Invalid run context") -> None:
     raise RunContextError(message)
+
+
+def compiled_tree_digest(compiled_root: Path) -> str:
+    """Canonical digest of a compiled-SQL tree, missing tree included.
+
+    Frozen form: sha256 over the UTF-8 bytes of a JSON array of
+    ``[relative_posix_path, file_sha256]`` pairs sorted by path. Both the
+    build-time writer and the evidence reader use this one helper, so the
+    recorded value and the re-checked value can never drift apart.
+    """
+
+    pairs: list[list[str]] = []
+    try:
+        candidates = sorted(
+            (path for path in compiled_root.rglob("*") if path.is_file()),
+            key=lambda path: path.relative_to(compiled_root).as_posix(),
+        )
+    except OSError:
+        candidates = []
+    for path in candidates:
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        pairs.append([path.relative_to(compiled_root).as_posix(), digest])
+    canonical = json.dumps(pairs, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _validate_run_id(run_id: object) -> str:
@@ -221,16 +281,23 @@ def _validate_relative_artifact(value: object, expected: str) -> None:
 
 
 def _validate_runtime(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
-    if set(payload) != _RUNTIME_KEYS:
-        _fail("runtime 字段集合无效")
-    if payload["schema_version"] != RUNTIME_SCHEMA_VERSION:
+    version = payload.get("schema_version")
+    if version == RUNTIME_SCHEMA_VERSION:
+        if set(payload) != _RUNTIME_KEYS:
+            _fail("runtime 字段集合无效")
+        relation_keys = _OBSERVABLE_RELATION_KEYS
+    elif version == RUNTIME_V2_SCHEMA_VERSION:
+        if set(payload) != _RUNTIME_KEYS | _RUNTIME_V2_EXTRA_KEYS:
+            _fail("runtime v2 字段集合无效")
+        relation_keys = _OBSERVABLE_V2_RELATION_KEYS
+    else:
         _fail("runtime schema_version 无效")
     if payload["run_id"] != run_id:
         _fail("runtime run_id 不一致")
     if type(payload["dbt_exit_code"]) is not int:
         _fail("runtime dbt_exit_code 类型无效")
     digest = payload["profile_spec_sha256"]
-    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+    if not isinstance(digest, str) or _DIGEST_PATTERN.fullmatch(digest) is None:
         _fail("runtime ProfileSpec hash 无效")
     artifacts = payload["artifacts"]
     if not isinstance(artifacts, dict) or set(artifacts) != set(_EXPECTED_ARTIFACTS):
@@ -238,7 +305,7 @@ def _validate_runtime(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
     for key, expected in _EXPECTED_ARTIFACTS.items():
         _validate_relative_artifact(artifacts[key], expected)
     observable = payload["observable_relations"]
-    if not isinstance(observable, dict) or set(observable) != _OBSERVABLE_RELATION_KEYS:
+    if not isinstance(observable, dict) or set(observable) != relation_keys:
         _fail("runtime observable_relations 无效")
     for values in observable.values():
         if not isinstance(values, list) or len(values) != len(set(values)):
@@ -249,6 +316,54 @@ def _validate_runtime(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
             for value in values
         ):
             _fail("runtime observable relation 名称无效")
+    if version == RUNTIME_V2_SCHEMA_VERSION:
+        expectation = observable["expectation"]
+        if not set(expectation).issubset(observable["schema"]):
+            _fail("runtime expectation relations 必须是可见 schema 关系的子集")
+        nodes = payload["observable_nodes"]
+        if not isinstance(nodes, dict) or set(nodes) != _OBSERVABLE_NODE_KEYS:
+            _fail("runtime observable_nodes 无效")
+        definitions = nodes["definition"]
+        if (
+            not isinstance(definitions, list)
+            or len(definitions) != len(set(definitions))
+            or any(not isinstance(value, str) or not value.strip() for value in definitions)
+        ):
+            _fail("runtime definition nodes 无效")
+        baseline = payload["evidence_baseline"]
+        if not isinstance(baseline, dict) or set(baseline) != {
+            "path",
+            "baseline_fingerprint",
+            "sha256",
+        }:
+            _fail("runtime evidence_baseline 无效")
+        if baseline["path"] != EVIDENCE_BASELINE_FILENAME:
+            _fail("runtime evidence_baseline 路径不符合固定契约")
+        for name in ("baseline_fingerprint", "sha256"):
+            value = baseline[name]
+            if not isinstance(value, str) or _DIGEST_PATTERN.fullmatch(value) is None:
+                _fail(f"runtime evidence_baseline {name} 无效")
+        provenance = payload["build_provenance"]
+        if not isinstance(provenance, dict) or set(provenance) != {
+            "dbt_invocation_id",
+            "artifact_sha256",
+        }:
+            _fail("runtime build_provenance 无效")
+        if (
+            not isinstance(provenance["dbt_invocation_id"], str)
+            or not provenance["dbt_invocation_id"].strip()
+        ):
+            _fail("runtime dbt_invocation_id 无效")
+        artifact_digests = provenance["artifact_sha256"]
+        if not isinstance(artifact_digests, dict) or set(artifact_digests) != {
+            "manifest",
+            "run_results",
+            "compiled_tree",
+        }:
+            _fail("runtime artifact_sha256 无效")
+        for value in artifact_digests.values():
+            if not isinstance(value, str) or _DIGEST_PATTERN.fullmatch(value) is None:
+                _fail("runtime artifact_sha256 摘要无效")
     return payload
 
 

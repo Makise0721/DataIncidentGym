@@ -127,12 +127,20 @@ def test_evidence_record_is_strict_and_frozen() -> None:
         EvidenceRecord.model_validate({**record.model_dump(), "extra": "nope"})
 
 
-def test_all_six_evidence_types_are_registered() -> None:
-    assert tuple(item.value for item in EvidenceType) == (
+def test_the_v1_evidence_types_stay_frozen_and_v2_appends_two() -> None:
+    values = tuple(item.value for item in EvidenceType)
+
+    # The first six are the frozen v1 vocabulary every stored record uses.
+    assert values[:6] == (
         "DBT_RUN_RESULTS",
         "DBT_NODE_ERROR",
         "RELATION_SCHEMA",
         "DBT_LINEAGE",
         "RELATION_DATA_PROFILE",
         "RELATION_HISTORY",
+    )
+    # T13 appends the two v2 facts; nothing is reordered or removed.
+    assert values[6:] == (
+        "RELATION_SCHEMA_EXPECTATION",
+        "DBT_NODE_DEFINITION",
     )
