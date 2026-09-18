@@ -15,11 +15,15 @@
 | 恢复操作 | 每次 build 后 `lab reset`（`FULL_REFRESH_BASELINE`），并以基线 fingerprint 核对 |
 | 运行次数 | 2 次 inject、2 次 build、2 次 reset（每个 mutation 目标一次）；不做额外复跑 |
 | 不包含 | 真实模型调用、`certify --admit`、benchmark 运行、manifest 冻结、任何写入 `config/` 的改动 |
-| 前置检查 | `uv run data-incident-gym doctor`（确认 Docker/PostgreSQL 与基线可用） |
+| 前置检查 | **纯环境检查**：`docker compose up -d --wait postgres`（服务名 `postgres`，healthcheck `pg_isready`）+ 下列第 1 步的 `pipeline build`——它连不上数据库、seed 或 dbt 都会失败，本身就是完整的环境证明 |
+| **明确不运行** | `data-incident-gym doctor`：其模型探针不可关闭（`doctor.py` 在 endpoint 可达且模型存在时无条件执行 `_model_probe_check`，失败还会使整体 FAILED），运行它会违反"不调真实模型"的既有约束；模型不可用时它又与本计划无关地失败。本计划的前置检查不依赖 doctor |
 
 ## 2. 逐步执行清单（两条目标各一遍，先 T1′ 后 T2′）
 
-1. `uv run data-incident-gym pipeline build` —— 保证基线健康；记录输出的 `fingerprint`（记为 `F0`）。
+1. `uv run data-incident-gym pipeline build` —— 保证基线健康；记录输出的 `fingerprint`（记为 `F0`），并核对
+   `F0` 等于历史基线指纹 `e5c7848eb2b7af16ec37463650b63dbb5d1f52293adf456003517b51c496cb18`
+   （`decision.md` 三处记录；该指纹覆盖 schema + 每个关系的行数与列名/类型/序号）。不等即**停止**：数据面
+   已漂移（seed 或 fixture），本次结论不可与历史比较。
 2. `uv run data-incident-gym lab inject schema_type_change_raw_customer_id_a` —— 注入
    `COLUMN_TYPE_CHANGE(raw_customers.id: integer→text)`；记录输出的 `state` 与 `fingerprint`。
 3. `uv run data-incident-gym lab build schema_type_change_raw_customer_id_a` —— 运行场景 dbt build；
@@ -45,10 +49,13 @@
 | O5 | 消息点名的是哪一条比较点 | 待定：`... = customer_orders.customer_id`（风险 A）或 `... = customer_payments.customer_id`（风险 B） | 由 O4 判定 |
 | O6 | `failure_class`/错误码在节点错误事实中的形态（供切片 4 参考解判别） | 类型类错误 | 从 run_results 的失败消息与 node_error 事实比对 |
 | O7 | v2 构建路径是否成立：`evidence_baseline.json` 存在、`runtime.json` 为 `p1.runtime.v2`、`build_provenance.node_definitions` 覆盖全部编译节点 | 应成立 | 读归档文件字段 |
-| O8 | 恢复后 fingerprint == `F0` | 应成立 | `lab reset` 输出 + 基线摘要比对 |
+| O8 | 恢复后 fingerprint == `F0`，且 `F0` == 历史基线指纹 `e5c7848e…cb18` | 应成立 | `lab reset` 输出 + `.dig/baseline-summary.json` 与 `decision.md` 的记录比对 |
 
 ## 4. 预先约定的判定规则（结果出来当天即可定，不再二次讨论）
 
+- **O4 形态不符预期**（消息不含 `operator does not exist` 类类型错误，或没有 `LINE n:` 回显编译 SQL）：
+  停止并如实记录；切片 2 读器的**表达式识别前提**（候选文本须以自身边界出现在消息中）因此不成立，
+  按设计 §4.1 的"消息形态"检查项**另行裁定**（走设计变更流程），**不现场解释、不临时改写读器**。
 - **O5 = 风险 A（消息点名 `customer_orders` 侧）**：验收路径按设计 §4.1 原样成立，切片 4 按计划接线。
 - **O5 = 风险 B（消息点名 `customer_payments` 侧）**：该侧经**无别名限定投影**（`customer_payments` 内的
   `orders.customer_id`）向下追溯，切片 2 读器按已记录的窄点返回 `UNKNOWN_COLUMN`，A 变体将在"应确认"
@@ -59,7 +66,10 @@
   "构造 dry run 若不成立，如实重设计或按负面结论处理"执行；不得以既有场景数据顶替。
 - **O7 不成立（v2 构建路径失败）**：停止并先修切片 1 的构建路径（视为切片 1 的实施缺陷），dry run 结论
   不成立、需重跑（重跑同样需要授权）。
-- **O8 不成立（恢复失败）**：停止，先恢复数据库并如实记录，不继续第二条目标。
+- **O8 不成立（恢复后 fingerprint ≠ F0，或 F0 ≠ 历史基线指纹）**：停止，先恢复数据库并如实记录；数据面漂移
+  时本次 dry run 的结论作废，不继续第二条目标、不以漂移基线录入任何比较。
+- **前置环境检查失败**（compose 起不来或 `pipeline build` 失败）：停止并如实记录，不进入注入步骤；
+  不使用 doctor 作为替代（见授权范围）。
 
 ## 5. 产出
 
