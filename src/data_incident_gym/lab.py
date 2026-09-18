@@ -22,6 +22,7 @@ from data_incident_gym.baseline import (
     RelationSummary,
     make_baseline_summary,
 )
+from data_incident_gym.column_mapping import relation_identity
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.dbt_runner import DbtExecutionError, DbtRunner
 from data_incident_gym.lab_verifier import (
@@ -1010,6 +1011,11 @@ class IncidentLab:
             raise self._clean(
                 IncidentExecutionError("期望关系不在健康基线中：" + "、".join(missing))
             )
+        # The identity bridge (design §4.1 wiring requirement): each relation's
+        # full identity and resource type, straight from this run's manifest, so
+        # a caller can match a reader origin to a whitelisted relation without
+        # any name-similarity guessing.
+        bridge = self._relation_bridge(run_root)
         payload = {
             "schema_version": "p1.evidence_baseline.v1",
             "generated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -1026,6 +1032,14 @@ class IncidentLab:
                         }
                         for column in relation.columns
                     ],
+                    **(
+                        {}
+                        if relation.name not in bridge
+                        else {
+                            "relation_identity": bridge[relation.name]["identity"],
+                            "resource_type": bridge[relation.name]["resource_type"],
+                        }
+                    ),
                 }
                 for relation in baseline.relations
                 if relation.name in wanted
@@ -1035,6 +1049,39 @@ class IncidentLab:
             run_root / EVIDENCE_BASELINE_FILENAME,
             json.dumps(payload, indent=2, sort_keys=True) + "\n",
         )
+
+    def _relation_bridge(self, run_root: Path) -> dict[str, dict[str, str]]:
+        """Relation name -> (identity, resource type) from this run's manifest.
+
+        Public run metadata, read from the archived manifest; a relation the
+        manifest does not describe is simply absent from the bridge. A missing
+        manifest yields an empty bridge instead of failing here — the build
+        reads it again later and fails there with a clear error, and the
+        affected facts then carry no identity at all (callers must abstain).
+        """
+
+        try:
+            manifest = json.loads(
+                self._read_bytes(run_root / "dbt/target/manifest.json").decode("utf-8")
+            )
+        except (IncidentExecutionError, ValueError):
+            return {}
+        bridge: dict[str, dict[str, str]] = {}
+        for node in (manifest.get("nodes") or {}).values():
+            if not isinstance(node, dict):
+                continue
+            name = node.get("name")
+            identity = relation_identity(node.get("relation_name"))
+            resource_type = node.get("resource_type")
+            if (
+                not isinstance(name, str)
+                or not name
+                or identity is None
+                or not isinstance(resource_type, str)
+            ):
+                continue
+            bridge.setdefault(name, {"identity": identity, "resource_type": resource_type})
+        return bridge
 
     def _write_runtime_v2(
         self,

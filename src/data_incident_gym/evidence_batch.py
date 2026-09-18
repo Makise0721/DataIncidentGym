@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from data_incident_gym.column_mapping import relation_identity
 from data_incident_gym.evidence import (
     BatchTargetsRefusedError,
     BatchTooLargeError,
@@ -54,10 +55,24 @@ _TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
 
 @dataclass(frozen=True)
+class _BaselineRelation:
+    """One relation of the run-bound baseline snapshot.
+
+    ``identity`` and ``resource_type`` come from the run's public metadata (the
+    manifest) at build time; they are absent in snapshots written before the
+    identity bridge existed.
+    """
+
+    identity: str | None
+    resource_type: str | None
+    columns: tuple[ExpectedColumn, ...]
+
+
+@dataclass(frozen=True)
 class _EvidenceBaseline:
     fingerprint: str
     generated_at: datetime
-    relations: dict[str, tuple[ExpectedColumn, ...]]
+    relations: dict[str, _BaselineRelation]
 
 
 def truncate_utf8(text: str, limit: int) -> str:
@@ -113,12 +128,17 @@ def parse_evidence_baseline(
     if payload["baseline_fingerprint"] != binding.get("baseline_fingerprint"):
         raise_without_context(EvidenceIntegrityError("Baseline fingerprint does not match"))
     generated_at = _parse_timestamp(payload["generated_at"])
-    relations: dict[str, tuple[ExpectedColumn, ...]] = {}
+    relations: dict[str, _BaselineRelation] = {}
     raw_relations = payload["relations"]
     if not isinstance(raw_relations, list):
         raise_without_context(EvidenceIntegrityError("Baseline relations are invalid"))
     for relation in raw_relations:
-        if not isinstance(relation, dict) or set(relation) != {"name", "columns"}:
+        if not isinstance(relation, dict) or not {"name", "columns"}.issubset(relation):
+            raise_without_context(EvidenceIntegrityError("Baseline relation is invalid"))
+        # The identity bridge is optional so snapshots written before it stay
+        # readable (their E1 facts carry no identity and callers must abstain);
+        # anything else in a relation entry is a shape error.
+        if set(relation) - {"name", "columns", "relation_identity", "resource_type"}:
             raise_without_context(EvidenceIntegrityError("Baseline relation is invalid"))
         name = relation["name"]
         raw_columns = relation["columns"]
@@ -130,7 +150,17 @@ def parse_evidence_baseline(
                 columns.append(ExpectedColumn.model_validate(column))
             except Exception:
                 raise_without_context(EvidenceIntegrityError("Baseline column is invalid"))
-        relations[name] = tuple(columns)
+        identity = relation.get("relation_identity")
+        resource_type = relation.get("resource_type")
+        if identity is not None and not isinstance(identity, str):
+            raise_without_context(EvidenceIntegrityError("Baseline relation identity is invalid"))
+        if resource_type is not None and not isinstance(resource_type, str):
+            raise_without_context(EvidenceIntegrityError("Baseline resource type is invalid"))
+        relations[name] = _BaselineRelation(
+            identity=identity,
+            resource_type=resource_type,
+            columns=tuple(columns),
+        )
     return _EvidenceBaseline(
         fingerprint=str(payload["baseline_fingerprint"]),
         generated_at=generated_at,
@@ -164,14 +194,16 @@ class BatchEvidenceTools:
         baseline = self._evidence_baseline()
         records: list[EvidenceRecord] = []
         for target in targets:
-            expected = baseline.relations.get(target)
+            expected: _BaselineRelation | None = baseline.relations.get(target)
             content = RelationSchemaExpectationFact(
                 kind="RELATION_SCHEMA_EXPECTATION",
                 run_id=self._run_id,
                 relation_name=target,
                 baseline_fingerprint=baseline.fingerprint,
                 known=expected is not None,
-                columns=() if expected is None else expected,
+                columns=() if expected is None else expected.columns,
+                relation_identity=None if expected is None else expected.identity,
+                resource_type=None if expected is None else expected.resource_type,
             )
             records.append(
                 EvidenceRecord.create(
@@ -242,6 +274,7 @@ class BatchEvidenceTools:
                 and not recorded.get(target, {}).get("redacted", True)
                 and len(text.encode("utf-8")) <= MAX_COMPILED_SQL_BYTES
             )
+            relation_name = node.get("relation_name")
             content = DbtNodeDefinitionFact(
                 kind="DBT_NODE_DEFINITION",
                 run_id=self._run_id,
@@ -249,6 +282,13 @@ class BatchEvidenceTools:
                 known=text is not None,
                 resource_type=node.get("resource_type")
                 if isinstance(node.get("resource_type"), str)
+                else None,
+                # The identity bridge: the node's declared name and the identity
+                # its SQL writes, both straight from the run's manifest. Absent
+                # for nodes without a relation (tests), never guessed.
+                name=node.get("name") if isinstance(node.get("name"), str) else None,
+                relation_identity=relation_identity(relation_name)
+                if isinstance(relation_name, str)
                 else None,
                 declared_columns=tuple(
                     sorted(str(name) for name in (node.get("columns") or {}))

@@ -74,9 +74,15 @@ def _run_root(
         "metadata": {"invocation_id": published_invocation},
         "nodes": {
             node_id: {
-                "resource_type": "model",
+                "resource_type": node.get("resource_type", "model"),
                 "columns": {name: {} for name in node.get("columns", ())},
                 "depends_on": {"nodes": node.get("depends_on", [])},
+                **({"name": node["name"]} if node.get("name") is not None else {}),
+                **(
+                    {"relation_name": node["relation_name"]}
+                    if node.get("relation_name") is not None
+                    else {}
+                ),
                 **(
                     {"compiled_code": node["manifest_text"]}
                     if node.get("manifest_text") is not None
@@ -1163,3 +1169,178 @@ def test_a_crlf_run_loads_and_serves_its_definition(tmp_path: Path) -> None:
     assert content.known is True
     assert content.complete is True
     assert content.compiled_sql == lf
+
+
+# -- slice 4: the public identity bridge (design §4.1 wiring requirement) ----
+
+
+def test_the_definition_fact_carries_the_public_identity_bridge(tmp_path: Path) -> None:
+    """E2 publishes the node name and the identity its SQL writes, taken from
+    the manifest — so a reader origin can be matched to a whitelisted relation
+    explicitly, never by name similarity."""
+
+    run_root, digests = _run_root(
+        tmp_path,
+        nodes={
+            CUSTOMERS: {
+                "depends_on": ["seed.jaffle_shop.raw_customers"],
+                "manifest_text": "select 1",
+                "file": "customers.sql",
+                "name": "customers",
+                "relation_name": '"data_incident_gym"."analytics"."customers"',
+            }
+        },
+        parent_map={CUSTOMERS: ["seed.jaffle_shop.raw_customers"]},
+        results=[{"unique_id": CUSTOMERS, "status": "error", "compiled_code": "select 1"}],
+        compiled_files={"customers.sql": "select 1"},
+    )
+    tools = _tools(run_root, digests, definition=(CUSTOMERS,))
+
+    content = tools.get_dbt_node_definition(CUSTOMERS)[0].content
+
+    assert isinstance(content, DbtNodeDefinitionFact)
+    assert content.name == "customers"
+    assert content.relation_identity == "data_incident_gym.analytics.customers"
+
+
+def test_a_quoted_relation_name_keeps_its_identity_in_the_fact(tmp_path: Path) -> None:
+    """The identity the fact publishes is the one the reader reports: quoting
+    and case are preserved, so distinct identifiers never collapse."""
+
+    run_root, digests = _run_root(
+        tmp_path,
+        nodes={
+            CUSTOMERS: {
+                "depends_on": [],
+                "manifest_text": "select 1",
+                "file": "customers.sql",
+                "name": "customers",
+                "relation_name": '"analytics"."STG_CUSTOMERS"',
+            }
+        },
+        parent_map={CUSTOMERS: []},
+        results=[{"unique_id": CUSTOMERS, "status": "error", "compiled_code": "select 1"}],
+        compiled_files={"customers.sql": "select 1"},
+    )
+    tools = _tools(run_root, digests, definition=(CUSTOMERS,))
+
+    content = tools.get_dbt_node_definition(CUSTOMERS)[0].content
+
+    assert isinstance(content, DbtNodeDefinitionFact)
+    assert content.relation_identity == 'analytics."STG_CUSTOMERS"'
+
+
+def test_a_test_node_carries_no_relation_identity(tmp_path: Path) -> None:
+    """Tests have no relation of their own: the bridge must stay empty rather
+    than name something that does not exist."""
+
+    run_root, digests = _run_root(
+        tmp_path,
+        nodes={CUSTOMERS: {"depends_on": [], "manifest_text": "select 1"}},
+        parent_map={CUSTOMERS: []},
+        results=[{"unique_id": CUSTOMERS, "status": "error", "compiled_code": "select 1"}],
+        compiled_files={},
+    )
+    tools = _tools(run_root, digests, definition=(CUSTOMERS,))
+
+    content = tools.get_dbt_node_definition(CUSTOMERS)[0].content
+
+    assert isinstance(content, DbtNodeDefinitionFact)
+    assert content.name is None
+    assert content.relation_identity is None
+
+
+def test_the_expectation_fact_carries_the_bridge_when_the_snapshot_has_it(
+    tmp_path: Path,
+) -> None:
+    run_root, digests = _run_root(
+        tmp_path,
+        nodes={CUSTOMERS: {"depends_on": [], "manifest_text": "select 1"}},
+        parent_map={CUSTOMERS: []},
+        results=[{"unique_id": CUSTOMERS, "status": "error", "compiled_code": "select 1"}],
+        compiled_files={},
+        baseline_relations=[
+            {
+                "name": "raw_customers",
+                "relation_identity": "data_incident_gym.analytics.raw_customers",
+                "resource_type": "seed",
+                "columns": [
+                    {
+                        "name": "id",
+                        "expected_data_type": "integer",
+                        "expected_nullable": True,
+                        "ordinal_position": 1,
+                    }
+                ],
+            }
+        ],
+    )
+    tools = _tools(run_root, digests, expectation=("raw_customers",), definition=())
+
+    content = tools.get_relation_schema_expectation("raw_customers")[0].content
+
+    assert isinstance(content, RelationSchemaExpectationFact)
+    assert content.relation_identity == "data_incident_gym.analytics.raw_customers"
+    assert content.resource_type == "seed"
+
+
+def test_a_snapshot_without_the_bridge_stays_readable(tmp_path: Path) -> None:
+    """Backward compatibility: a snapshot written before the bridge existed
+    loads, and its facts carry no identity (callers must then abstain)."""
+
+    run_root, digests = _run_root(
+        tmp_path,
+        nodes={CUSTOMERS: {"depends_on": [], "manifest_text": "select 1"}},
+        parent_map={CUSTOMERS: []},
+        results=[{"unique_id": CUSTOMERS, "status": "error", "compiled_code": "select 1"}],
+        compiled_files={},
+    )
+    tools = _tools(run_root, digests, expectation=("raw_customers",), definition=())
+
+    content = tools.get_relation_schema_expectation("raw_customers")[0].content
+
+    assert isinstance(content, RelationSchemaExpectationFact)
+    assert content.known is True
+    assert content.relation_identity is None
+    assert content.resource_type is None
+
+
+def test_the_build_writes_the_bridge_into_the_snapshot(tmp_path: Path) -> None:
+    """The writer takes the bridge from this run's manifest (public metadata)."""
+
+    _write_trusted_baseline(tmp_path)
+    spec = _v2_spec(expectation=["raw_customers", "raw_orders"])
+    _run_root(
+        tmp_path,
+        nodes={
+            "seed.jaffle_shop.raw_customers": {
+                "depends_on": [],
+                "manifest_text": None,
+                "resource_type": "seed",
+                "name": "raw_customers",
+                "relation_name": '"data_incident_gym"."analytics"."raw_customers"',
+            },
+            "seed.jaffle_shop.raw_orders": {
+                "depends_on": [],
+                "manifest_text": None,
+                "resource_type": "seed",
+                "name": "raw_orders",
+                "relation_name": '"data_incident_gym"."analytics"."raw_orders"',
+            },
+        },
+        parent_map={},
+        results=[],
+        compiled_files={},
+    )
+
+    _lab(tmp_path)._write_evidence_baseline(tmp_path, spec)
+
+    payload = json.loads((tmp_path / EVIDENCE_BASELINE_FILENAME).read_text(encoding="utf-8"))
+    entries = {entry["name"]: entry for entry in payload["relations"]}
+    assert entries["raw_customers"]["relation_identity"] == (
+        "data_incident_gym.analytics.raw_customers"
+    )
+    assert entries["raw_customers"]["resource_type"] == "seed"
+    assert entries["raw_orders"]["relation_identity"] == (
+        "data_incident_gym.analytics.raw_orders"
+    )

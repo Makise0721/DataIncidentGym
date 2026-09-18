@@ -282,6 +282,19 @@ def _render_identity(parts: tuple[str, ...]) -> str:
     return ".".join(_quote_part(part) for part in parts)
 
 
+def relation_identity(reference: str) -> str | None:
+    """Public text of one relation identity, or None when malformed.
+
+    The harness publishes this form (in the baseline snapshot and the node
+    definition facts) so a caller can match an identity the tools reported
+    against the identity the reader reports, without any name-similarity
+    guessing: both sides go through the same segments-and-quoting rules.
+    """
+
+    parts = _relation_parts(reference)
+    return None if parts is None else _render_identity(parts)
+
+
 def _split_top_level(text: str, separator: str) -> list[str]:
     """Split on ``separator`` outside parentheses and quotes."""
 

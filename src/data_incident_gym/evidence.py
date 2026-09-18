@@ -130,7 +130,12 @@ class RelationSchemaExpectationFact(BaseModel):
     """The trusted baseline's column expectations for one relation (T13 E1).
 
     A fact only: it reports what the healthy baseline recorded, never whether
-    the current observation deviates from it.
+    the current observation deviates from it. ``relation_identity`` and
+    ``resource_type`` are the public bridge to the run's own metadata: the
+    identity is the exact text the column-mapping reader reports for that
+    relation, and the resource type says whether a walk may end there
+    (seed/source) or must keep resolving (model). Both are absent when the
+    snapshot predates the bridge.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -141,6 +146,8 @@ class RelationSchemaExpectationFact(BaseModel):
     baseline_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     known: StrictBool
     columns: tuple[ExpectedColumn, ...] = ()
+    relation_identity: StrictStr | None = None
+    resource_type: StrictStr | None = None
 
 
 class DbtNodeDefinitionFact(BaseModel):
@@ -148,6 +155,12 @@ class DbtNodeDefinitionFact(BaseModel):
 
     ``complete`` is False when the text exceeds the size cap (the text is then
     truncated): a partial definition must never be used for column mapping.
+
+    ``name`` and ``relation_identity`` are the public bridge of §4.1's wiring
+    requirement: the node's declared name (the same name the expectation fact
+    and the observable relation list use) and the identity the compiled SQL
+    writes for it, so a reader origin can be matched to a whitelisted relation
+    explicitly — never by name similarity. Test nodes carry no relation.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -157,6 +170,8 @@ class DbtNodeDefinitionFact(BaseModel):
     node_id: StrictStr
     known: StrictBool
     resource_type: StrictStr | None = None
+    name: StrictStr | None = None
+    relation_identity: StrictStr | None = None
     declared_columns: tuple[StrictStr, ...] = ()
     depends_on: tuple[StrictStr, ...] = ()
     compiled_sql_sha256: StrictStr | None = None
