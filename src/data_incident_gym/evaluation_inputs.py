@@ -496,11 +496,12 @@ def build_evaluation_input_bundle(
 def _rename_with_retry(temporary: Path, final: Path) -> None:
     """Rename a freshly written bundle directory, tolerating Windows handles.
 
-    On Windows a just-written directory can transiently fail to rename with
-    ``PermissionError`` (defender/indexer holding a handle); a probe on this
-    repository measured ~1% of such renames failing once and succeeding later.
-    Only that transient error is retried, a bounded number of times — any other
-    OSError keeps its immediate, honest failure.
+    On Windows a just-written directory can fail to rename with
+    ``PermissionError`` while a transient handle is held; a probe on this
+    repository measured ~1% of renames failing once and succeeding later. The
+    code cannot tell in advance which occurrence is transient, so every
+    ``PermissionError`` is retried a bounded number of times; any other OSError
+    keeps its immediate, honest failure.
     """
 
     for attempt in range(_RENAME_ATTEMPTS):

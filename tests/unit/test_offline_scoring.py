@@ -875,8 +875,9 @@ def test_the_bundle_write_retries_a_transient_windows_rename_lock(
     """Audit round: a 1-in-100 Windows rename lock used to fail a completed run.
 
     A probe on this repository measured ~1% of scoring-input renames failing
-    once with WinError 5 and succeeding afterwards, so the writer retries that
-    specific transient error a bounded number of times.
+    once with WinError 5 and succeeding afterwards, so the writer retries
+    ``PermissionError`` a bounded number of times — it cannot tell in advance
+    which occurrence is transient.
     """
 
     bundle = _prepared_bundle(tmp_path)
