@@ -354,9 +354,10 @@ def test_m11_catalog_and_test_twin_are_exact(project_root: Path) -> None:
     )
     assert len(P1_SCENARIO_IDS) == 17
     assert len(P1_SCENARIO_IDS) == len(set(P1_SCENARIO_IDS))
-    # 18 historical scenarios plus the 4 T12 dev-extension variants; the
-    # manifest catalog itself stays frozen at the 17 P1 entries.
-    assert len(SUPPORTED_SCENARIO_IDS) == 22
+    # 18 historical scenarios, the 4 T12 dev-extension variants and the 4 T13
+    # public-evidence pairs; the manifest catalog itself stays frozen at the 17
+    # P1 entries.
+    assert len(SUPPORTED_SCENARIO_IDS) == 26
 
     dev, confirmable, insufficient, health = (
         load_scenario_spec(case_id, project_root) for case_id in P1_M11_SCENARIO_IDS

@@ -35,6 +35,7 @@ from data_incident_gym.lab import _DEPENDENT_VIEWS
 from data_incident_gym.scenario_certification import _receipt_proved
 from data_incident_gym.scenarios import (
     _TYPE_CHANGE_TARGETS,
+    P1_T13_PUBLIC_EVIDENCE_IDS,
     SUPPORTED_SCENARIO_IDS,
     ColumnTypeMutation,
     ObservableEvidenceContractV2,
@@ -106,7 +107,7 @@ def test_every_type_changeable_relation_has_its_dependent_view() -> None:
 # -- observable_evidence v1 unchanged, v2 added ------------------------------
 
 
-def test_v1_serialization_is_byte_stable_for_every_catalog_scenario() -> None:
+def test_v1_serialization_is_byte_stable_for_every_v1_scenario() -> None:
     v1_keys = {
         "schema_version",
         "schema_relations",
@@ -114,9 +115,14 @@ def test_v1_serialization_is_byte_stable_for_every_catalog_scenario() -> None:
         "history_relations",
         "unresolved_gaps",
     }
+    v2_case_ids = set(P1_T13_PUBLIC_EVIDENCE_IDS)
     for case_id in SUPPORTED_SCENARIO_IDS:
         spec = load_scenario_spec(case_id)
         payload = spec.model_dump(mode="json")["observable_evidence_contract"]
+        if case_id in v2_case_ids:
+            # The T13 pairs are the only scenarios on the v2 contract.
+            assert payload["schema_version"] == "observable_evidence.v2", case_id
+            continue
         assert set(payload) == v1_keys, case_id
         # Round-trip through the union must preserve the digest the
         # certification/admission records carry.

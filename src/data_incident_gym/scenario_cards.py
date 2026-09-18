@@ -70,6 +70,10 @@ AB_SCENARIO_PAIRS: tuple[tuple[str, str], ...] = (
     # T12 dev-extension pairs (payments side, recombined frozen mutations).
     ("required_null_payment_id_distractor_a", "required_null_payment_id_distractor_b"),
     ("type_change_payment_amount_drift_a", "type_change_payment_amount_drift_b"),
+    # T13 public-evidence pairs (design §4.1): mirror pairs whose type deviation
+    # falls on the left or the right origin of the same failing join.
+    ("schema_type_change_raw_customer_id_a", "schema_type_change_raw_customer_id_b"),
+    ("schema_type_change_raw_order_user_id_a", "schema_type_change_raw_order_user_id_b"),
 )
 
 # Scenarios that are themselves healthy controls (no injection, NO_INCIDENT).

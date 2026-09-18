@@ -16,6 +16,8 @@ from data_incident_gym.scenario_sets import (
 )
 from data_incident_gym.scenarios import (
     P1_SCENARIO_IDS,
+    P1_T12_DEV_EXTENSION_IDS,
+    P1_T13_PUBLIC_EVIDENCE_IDS,
     REGRESSION_SCENARIO_IDS,
     SUPPORTED_SCENARIO_IDS,
 )
@@ -52,13 +54,15 @@ def test_checked_in_registry_marks_the_whole_catalog_dev() -> None:
     assert sets.set_for("not_a_catalog_case") == "unknown"
     historical = set(REGRESSION_SCENARIO_IDS) | set(P1_SCENARIO_IDS)
     for entry in sets.dev_scenarios:
-        # The pre-T12 catalog shares one frozen reason; the T12 dev-extension
-        # variants carry their own creation record instead.
+        # The pre-T12 catalog shares one frozen reason; each later extension
+        # carries its own creation record instead.
         if entry.case_id in historical:
             assert entry.reason == DEV_REASON
+        elif entry.case_id in set(P1_T12_DEV_EXTENSION_IDS):
+            assert entry.reason and "T12 dev-extension" in entry.reason
         else:
-            assert entry.reason and entry.reason != DEV_REASON
-            assert "T12 dev-extension" in entry.reason
+            assert entry.case_id in set(P1_T13_PUBLIC_EVIDENCE_IDS)
+            assert entry.reason and "T13 public-evidence" in entry.reason
 
 
 def test_partition_rule_names_mechanism_and_seed_policy() -> None:

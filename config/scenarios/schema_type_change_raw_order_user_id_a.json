@@ -1,0 +1,50 @@
+{
+  "schema_version": "scenario.v1",
+  "incident_case_id": "schema_type_change_raw_order_user_id_a",
+  "suite": "P1",
+  "fault_family": "SCHEMA_TYPE_CHANGE",
+  "variant_role": "TEST_CONFIRMABLE",
+  "answerability": "CONFIRMABLE",
+  "seed": {
+    "schema_version": "seed.v1",
+    "fixture_path": "third_party/jaffle_shop",
+    "fixture_commit": "36bde6cba69d962b83be1d52fc65a0dce1cb4ebb",
+    "seed_names": ["raw_customers", "raw_orders", "raw_payments"],
+    "refresh": "FULL_REFRESH"
+  },
+  "incident_brief": {
+    "schema_version": "incident_brief.v1",
+    "signal_code": "DBT_BUILD_FAILED",
+    "summary": "A customer-facing dbt model failed after an upstream schema change.",
+    "subjects": ["model.jaffle_shop.customers"],
+    "logical_observed_at": "2018-04-09T12:00:00Z",
+    "observations": [
+      {"kind": "DBT_MODEL_FAILURE", "subject": "model.jaffle_shop.customers", "value": "error"}
+    ]
+  },
+  "reset_and_injection_contract": {
+    "schema_version": "reset_injection.v1",
+    "mutations": [
+      {"kind": "COLUMN_TYPE_CHANGE", "relation": "raw_orders", "column": "user_id", "from_type": "integer", "to_type": "text"}
+    ],
+    "restore_strategy": "FULL_REFRESH_BASELINE"
+  },
+  "ground_truth_or_acceptable_root_causes": ["SOURCE_SCHEMA_COLUMN_TYPE_CHANGED"],
+  "direct_failure": "model.jaffle_shop.customers",
+  "affected_assets": [
+    "model.jaffle_shop.customers"
+  ],
+  "observable_evidence_contract": {
+    "schema_version": "observable_evidence.v2",
+    "schema_relations": ["raw_customers", "raw_orders"],
+    "profile_relations": [],
+    "history_relations": [],
+    "unresolved_gaps": [],
+    "expectation_relations": ["raw_customers", "raw_orders"],
+    "definition_nodes": ["model.jaffle_shop.customers", "model.jaffle_shop.stg_customers", "model.jaffle_shop.stg_orders"]
+  },
+  "required_evidence_types": ["DBT_RUN_RESULTS", "DBT_NODE_ERROR", "RELATION_SCHEMA", "RELATION_SCHEMA_EXPECTATION", "DBT_NODE_DEFINITION"],
+  "forbidden_leakage": ["SCENARIO_SPEC", "GROUND_TRUTH", "VARIANT_ROLE", "ANSWERABILITY", "EXPECTED_STATUS", "PRIVATE_PATH"],
+  "distractors": [],
+  "expected_status": "CONFIRMED"
+}

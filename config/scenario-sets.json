@@ -89,6 +89,22 @@
     {
       "case_id": "type_change_payment_amount_drift_b",
       "reason": "T12 dev-extension regression variant (2026-09-18): created after all planner prompt/rule development; dev-only by construction, never exposed to holdout"
+    },
+    {
+      "case_id": "schema_type_change_raw_customer_id_a",
+      "reason": "T13 public-evidence pairs (observable_evidence.v2), created for the expectation/definition acceptance path"
+    },
+    {
+      "case_id": "schema_type_change_raw_customer_id_b",
+      "reason": "T13 public-evidence pairs (observable_evidence.v2), created for the expectation/definition acceptance path"
+    },
+    {
+      "case_id": "schema_type_change_raw_order_user_id_a",
+      "reason": "T13 public-evidence pairs (observable_evidence.v2), created for the expectation/definition acceptance path"
+    },
+    {
+      "case_id": "schema_type_change_raw_order_user_id_b",
+      "reason": "T13 public-evidence pairs (observable_evidence.v2), created for the expectation/definition acceptance path"
     }
   ],
   "holdout_scenarios": []

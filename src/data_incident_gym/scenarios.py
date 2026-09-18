@@ -75,10 +75,21 @@ P1_T12_DEV_EXTENSION_IDS = (
     "type_change_payment_amount_drift_a",
     "type_change_payment_amount_drift_b",
 )
+# T13 public-evidence pairs (design §4.1): the same surface symptom with the
+# type deviation on either side of the failing join, carrying the first
+# ``observable_evidence.v2`` contracts. Deliberately NOT part of
+# ``P1_SCENARIO_IDS`` — the frozen manifest catalog keeps its original entries.
+P1_T13_PUBLIC_EVIDENCE_IDS = (
+    "schema_type_change_raw_customer_id_a",
+    "schema_type_change_raw_customer_id_b",
+    "schema_type_change_raw_order_user_id_a",
+    "schema_type_change_raw_order_user_id_b",
+)
 SUPPORTED_SCENARIO_IDS = (
     REGRESSION_SCENARIO_IDS
     + P1_SCENARIO_IDS
     + P1_T12_DEV_EXTENSION_IDS
+    + P1_T13_PUBLIC_EVIDENCE_IDS
 )
 
 
