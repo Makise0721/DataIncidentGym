@@ -22,16 +22,23 @@ failing expression actually read?** It is deliberately narrow:
 - relation scope follows SQL semantics: a written alias *replaces* the relation
   name. ``from raw_orders as raw_customers`` resolves the qualifier
   ``raw_customers`` to ``raw_orders`` and refuses the qualifier ``raw_orders``;
+- relations are matched by their **full identity** (quoting and case only):
+  ``analytics.raw_orders`` and ``other.analytics.raw_orders`` never share a
+  definition or a terminal declaration. Two spellings of one relation must be
+  established by the caller from public run metadata (for example by listing
+  both as keys of the same definition); unknown spellings stay UNKNOWN;
 - the walk only ends at a relation the caller reports as a **terminal input**
-  (a publicly known seed/source). A relation with neither a definition nor a
-  terminal status — for example a model whose definition was withheld — is an
-  explicit UNKNOWN, never an origin;
+  (a publicly known seed/source, by full identity). A relation with neither a
+  definition nor a terminal status — for example a model whose definition was
+  withheld — is an explicit UNKNOWN, never an origin;
 - inside that subgraph only the documented shapes are supported (single-source
   alias projections, arithmetic/cast expressions, multi-CTE chains, two-source
-  equi-joins between single-column sides, aggregates over grouped keys).
-  Anything else — window functions, subqueries, non-equi or conjunctive join
-  conditions, functions the keyword table does not know, deeper nesting — is an
-  explicit UNKNOWN.
+  equi-joins between single-column sides, aggregates over grouped keys), and
+  every expression must be consumed completely. Anything else — window
+  functions, subqueries, non-equi or conjunctive join conditions, function calls
+  outside the documented set, unsupported keywords or symbols — is an explicit
+  UNKNOWN; a word is never counted as a column just because it could not be
+  classified.
 
 UNKNOWN never counts as evidence in any direction. Definitions that are not
 ``complete`` (truncated or redaction-changed, per the E2 fact) must not be
@@ -62,8 +69,8 @@ UNKNOWN_REASONS = frozenset(
     }
 )
 
-#: Keywords and function names the token scanner may see inside an expression.
-#: Anything outside this table (plus identifiers, literals and operators) makes
+#: Keywords the token scanner may see inside an expression. Anything outside
+#: this table (plus identifiers, literals, operators and the function set) makes
 #: the expression unsupported.
 _EXPRESSION_KEYWORDS = frozenset(
     {
@@ -80,16 +87,69 @@ _EXPRESSION_KEYWORDS = frozenset(
         "true",
         "false",
         "as",
-        "cast",
-        "coalesce",
-        "nullif",
-        "sum",
-        "min",
-        "max",
-        "count",
-        "avg",
     }
 )
+#: Function names the scanner accepts. A name followed by ``(`` that is not
+#: listed here is an unsupported construct, never a column reference.
+_ALLOWED_FUNCTIONS = frozenset(
+    {"cast", "coalesce", "nullif", "sum", "min", "max", "count", "avg"}
+)
+#: Bare words that introduce constructs this reader does not support. Seeing one
+#: refuses the expression instead of counting the word as a column.
+_UNSUPPORTED_KEYWORDS = frozenset(
+    {
+        "all",
+        "any",
+        "between",
+        "collate",
+        "cross",
+        "distinct",
+        "escape",
+        "except",
+        "exists",
+        "extract",
+        "filter",
+        "following",
+        "from",
+        "group",
+        "having",
+        "ilike",
+        "in",
+        "intersect",
+        "interval",
+        "join",
+        "lateral",
+        "like",
+        "limit",
+        "natural",
+        "offset",
+        "on",
+        "order",
+        "over",
+        "overlay",
+        "partition",
+        "position",
+        "preceding",
+        "range",
+        "recursive",
+        "row",
+        "rows",
+        "select",
+        "similar",
+        "some",
+        "substring",
+        "trim",
+        "unbounded",
+        "union",
+        "using",
+        "where",
+        "window",
+        "with",
+    }
+)
+#: Punctuation and operators the scanner passes over. Anything else (``::``,
+#: ``||``, ``#``, …) refuses the expression instead of being skipped.
+_ALLOWED_OPERATORS = frozenset({"+", "-", "*", "/", "%", "=", "<", ">", "!"})
 #: Constructs that are never supported inside an expression.
 _UNSUPPORTED_PATTERNS = (
     re.compile(r"\bover\s*\(", re.IGNORECASE),
@@ -507,70 +567,152 @@ def _bounded_occurrence(normalized: str, message: str) -> bool:
     return False
 
 
+def _tokenize_expression(expression: str) -> list[str] | None:
+    """Tokens of one expression, or None when a symbol is not recognised.
+
+    The tokenizer is complete by construction: a gap between two tokens that is
+    not whitespace means an unsupported symbol (``::``, ``||``, …) and refuses
+    the expression instead of being skipped on the way to a confirmation.
+    """
+
+    tokens: list[str] = []
+    position = 0
+    for match in _TOKENS.finditer(expression):
+        if expression[position : match.start()].strip():
+            return None
+        tokens.append(match.group(0))
+        position = match.end()
+    if expression[position:].strip():
+        return None
+    return tokens
+
+
 def _expression_references(expression: str) -> list[str] | None:
-    """Identifiers one expression reads, or None when unsupported."""
+    """Column references one expression reads, or None when unsupported.
+
+    A word followed by ``(`` is a function call: only the documented function
+    set is accepted, so an unknown function refuses the expression instead of
+    being counted as a column. Everything else must be consumed as a reference,
+    a literal, a known keyword or an allowed operator.
+    """
 
     for pattern in _UNSUPPORTED_PATTERNS:
         if pattern.search(expression):
             return None
+    tokens = _tokenize_expression(expression)
+    if tokens is None:
+        return None
     references: list[str] = []
-    cast_skip = False
-    tokens = _TOKENS.findall(expression)
-    for position, token in enumerate(tokens):
+    casts: list[int] = []
+    type_skip_depth: int | None = None
+    depth = 0
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
         lowered = token.lower()
-        if lowered in {"(", ")", ",", "*", "."}:
+        if token == "(":
+            depth += 1
+            index += 1
+            continue
+        if token == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+            if casts and depth < casts[-1]:
+                casts.pop()
+                type_skip_depth = None
+            index += 1
+            continue
+        if type_skip_depth is not None:
+            # Inside a cast, the target type (with its own modifiers) is not
+            # part of what the expression reads.
+            index += 1
+            continue
+        if token == ",":
+            index += 1
             continue
         if token.startswith("'") or token[0].isdigit():
+            index += 1
             continue
         if lowered in _EXPRESSION_KEYWORDS:
-            cast_skip = lowered == "as" and any(
-                item.lower() == "cast" for item in tokens[:position]
-            )
+            if lowered == "as" and casts and casts[-1] == depth:
+                type_skip_depth = depth
+            index += 1
             continue
-        if cast_skip:
-            # The type name right after `cast(... as <type>)`.
-            cast_skip = False
-            continue
-        if not _ALIAS_PATTERN.match(token):
-            continue
-        if position + 2 < len(tokens) and tokens[position + 1] == ".":
-            qualifier = token.lower()
-            column = tokens[position + 2].lower()
-            if not _ALIAS_PATTERN.match(tokens[position + 2]):
-                return None
-            references.append(f"{qualifier}.{column}")
-        else:
-            if position > 0 and tokens[position - 1] == ".":
+        if lowered in _UNSUPPORTED_KEYWORDS:
+            return None
+        if _ALIAS_PATTERN.match(token):
+            following = tokens[index + 1] if index + 1 < len(tokens) else ""
+            if following == "(":
+                if lowered not in _ALLOWED_FUNCTIONS:
+                    return None
+                if lowered == "cast":
+                    casts.append(depth + 1)
+                index += 1
+                continue
+            if following == ".":
+                if index + 2 >= len(tokens) or not _ALIAS_PATTERN.match(tokens[index + 2]):
+                    return None
+                column = tokens[index + 2].lower()
+                if column in _EXPRESSION_KEYWORDS or column in _UNSUPPORTED_KEYWORDS:
+                    return None
+                references.append(f"{lowered}.{column}")
+                index += 3
+                continue
+            if index > 0 and tokens[index - 1] == ".":
+                index += 1
                 continue
             references.append(lowered)
+            index += 1
+            continue
+        if token not in _ALLOWED_OPERATORS:
+            return None
+        index += 1
+    if depth != 0 or casts:
+        return None
     return list(dict.fromkeys(references))
+
+
+def _relation_identity(reference: str) -> str:
+    """Full identity of one relation reference: quoting and case only.
+
+    Names are never shortened to their last identifier. ``analytics.raw_orders``
+    and ``other.analytics.raw_orders`` are different relations, and matching on
+    the last identifier alone would resolve a definition from another schema.
+    Equivalent spellings of one relation (a two-part name and the three-part
+    name of the same table) must be established by the caller from public run
+    metadata, for example by listing both as keys of the same definition.
+    """
+
+    return _unquote(reference).lower()
 
 
 def _index_definitions(
     upstream: Mapping[str, UpstreamDefinition],
 ) -> dict[str, UpstreamDefinition]:
-    """Index definitions by their unqualified relation name.
+    """Index definitions by full relation identity.
 
-    Two keys that normalise to the same relation name are a caller error: the
-    reader refuses to choose between them instead of silently picking one.
+    Two keys with the same identity and different definitions are a caller
+    error: the reader refuses to choose between them instead of silently
+    picking one.
     """
 
     index: dict[str, UpstreamDefinition] = {}
     for key, definition in upstream.items():
-        name = _last_identifier(key).lower()
-        if not name:
+        identity = _relation_identity(key)
+        if not identity:
             raise ValueError("upstream definition key has no relation name")
-        if name in index and index[name] != definition:
-            raise ValueError(f"duplicate upstream definition for relation {name!r}")
-        index[name] = definition
+        if identity in index and index[identity] != definition:
+            raise ValueError(f"duplicate upstream definition for relation {identity!r}")
+        index[identity] = definition
     return index
 
 
 def _index_terminals(relations: Collection[str]) -> frozenset[str]:
-    names = {_last_identifier(relation).lower() for relation in relations}
-    if "" in names:
+    identities = {_relation_identity(relation) for relation in relations}
+    if "" in identities:
         raise ValueError("terminal relation name is empty")
-    return frozenset(names)
+    return frozenset(identities)
 
 
 class _Resolver:
@@ -632,39 +774,39 @@ class _Resolver:
         chain: tuple[str, ...],
         depth: int,
     ) -> tuple[ColumnReference, ...] | str:
-        name = _last_identifier(source).lower()
-        if "." not in source and name in ctes:
-            inner = _parse_select(ctes[name])
+        identity = _relation_identity(source)
+        if "." not in identity and identity in ctes:
+            inner = _parse_select(ctes[identity])
             if inner is None:
                 # `select *` chains and single-source CTEs are the supported
                 # multi-CTE shapes; anything else is unsupported.
-                inner = _passthrough_select(ctes[name])
+                inner = _passthrough_select(ctes[identity])
                 if inner is None:
                     return "UNSUPPORTED_SELECT"
             return self._project(
                 column=column,
                 select=inner,
                 ctes=ctes,
-                chain=chain + (name,),
+                chain=chain + (identity,),
                 depth=depth,
             )
-        definition = self._upstream.get(name)
+        definition = self._upstream.get(identity)
         if definition is None:
-            if name not in self._terminals:
+            if identity not in self._terminals:
                 # Not a declared seed/source: it may be a model whose
                 # definition is missing, so it can never be an origin.
                 return "DEFINITION_MISSING"
             return (
                 ColumnReference(
                     reference=f"{alias}.{column}",
-                    relation=name,
+                    relation=identity,
                     column=column,
                     chain=chain,
                 ),
             )
         if not definition.complete:
             return "DEFINITION_INCOMPLETE"
-        query = self._query_for(name, definition.sql)
+        query = self._query_for(identity, definition.sql)
         if query is None:
             return "UNSUPPORTED_SELECT"
         select = _parse_select(query.body)
@@ -676,7 +818,7 @@ class _Resolver:
             column=column,
             select=select,
             ctes=query.ctes,
-            chain=chain + (name,),
+            chain=chain + (identity,),
             depth=depth + 1,
         )
 
@@ -796,14 +938,16 @@ def map_failing_expression(
 
     ``node_sql`` is the failing node's archived compiled SQL (complete), and
     ``upstream`` maps relation names to the definitions of the models the SQL
-    reads (each carrying its E2 completeness). Keys are normalised to their
-    unqualified relation name; two keys sharing that name raise ``ValueError``.
+    reads (each carrying its E2 completeness). Keys are matched by full relation
+    identity — quoting and case only, never the last identifier alone; two keys
+    with the same identity and different definitions raise ``ValueError``.
 
     ``terminal_relations`` names the relations publicly known to be inputs
-    (seeds/sources). Only those may end a walk: a relation with no definition
-    and no terminal status is ``DEFINITION_MISSING``, never an origin. A
-    relation listed in both places is walked (the definition is the richer
-    statement); the terminal list only decides relations without one.
+    (seeds/sources), by the same full identity. Only those may end a walk: a
+    relation with no definition and no terminal status is
+    ``DEFINITION_MISSING``, never an origin. A relation listed in both places is
+    walked (the definition is the richer statement); the terminal list only
+    decides relations without one.
     """
 
     resolver = _Resolver(dict(upstream or {}), terminal_relations or ())

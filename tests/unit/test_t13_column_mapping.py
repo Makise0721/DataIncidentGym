@@ -17,7 +17,14 @@ from data_incident_gym.column_mapping import (
     normalize_sql_text,
 )
 
-TERMINALS = {"raw_customers", "raw_orders", "raw_payments"}
+#: Terminal relations by full identity, per spelling used in the SQL below.
+TERMINALS = {"analytics.raw_customers", "analytics.raw_orders", "analytics.raw_payments"}
+BARE_TERMINALS = {"raw_customers", "raw_orders", "raw_payments"}
+REAL_TERMINALS = {
+    "data_incident_gym.analytics.raw_customers",
+    "data_incident_gym.analytics.raw_orders",
+    "data_incident_gym.analytics.raw_payments",
+}
 
 STG_CUSTOMERS = (
     'with source as (select * from "analytics"."raw_customers"), '
@@ -73,6 +80,10 @@ TWO_SOURCE_JOIN = (
     'with a as (select * from "analytics"."stg_orders"), '
     'b as (select * from "analytics"."stg_payments"), '
     "final as (select a.order_id from a join b on {condition}) select * from final"
+)
+PAYMENTS_PROJECTION = (
+    'with source as (select * from "analytics"."raw_payments"), '
+    "renamed as (select {expression} from source) select * from renamed"
 )
 
 # The archived compiled text of a real run, copied verbatim: multi-line SQL,
@@ -209,7 +220,10 @@ def test_the_customers_join_resolves_both_renamed_origins() -> None:
     assert result.expression == "customers.customer_id = customer_orders.customer_id"
     # The order follows the condition's own sides: T2′ (the mirror pair) needs
     # the left origin and the right origin to stay distinguishable.
-    assert _origins(result) == [("raw_customers", "id"), ("raw_orders", "user_id")]
+    assert _origins(result) == [
+        ("analytics.raw_customers", "id"),
+        ("analytics.raw_orders", "user_id"),
+    ]
     # The unrelated third join and the other CTEs never entered the subgraph.
     assert all("customer_payments" not in reference.chain for reference in result.references)
 
@@ -228,7 +242,10 @@ def test_the_orders_join_resolves_both_origins() -> None:
     )
 
     assert result.status == "RESOLVED"
-    assert _origins(result) == [("raw_orders", "id"), ("raw_payments", "order_id")]
+    assert _origins(result) == [
+        ("analytics.raw_orders", "id"),
+        ("analytics.raw_payments", "order_id"),
+    ]
 
 
 def test_the_real_compiled_text_shape_resolves_the_customers_join() -> None:
@@ -244,11 +261,14 @@ def test_the_real_compiled_text_shape_resolves_the_customers_join() -> None:
             "data_incident_gym.analytics.stg_customers": UpstreamDefinition(REAL_STG_CUSTOMERS),
             "data_incident_gym.analytics.stg_orders": UpstreamDefinition(REAL_STG_ORDERS),
         },
-        terminal_relations=TERMINALS,
+        terminal_relations=REAL_TERMINALS,
     )
 
     assert result.status == "RESOLVED"
-    assert _origins(result) == [("raw_customers", "id"), ("raw_orders", "user_id")]
+    assert _origins(result) == [
+        ("data_incident_gym.analytics.raw_customers", "id"),
+        ("data_incident_gym.analytics.raw_orders", "user_id"),
+    ]
 
 
 def test_a_projection_with_arithmetic_maps_to_its_source_column() -> None:
@@ -260,7 +280,7 @@ def test_a_projection_with_arithmetic_maps_to_its_source_column() -> None:
     )
 
     assert result.status == "RESOLVED"
-    assert _origins(result) == [("raw_payments", "amount")]
+    assert _origins(result) == [("analytics.raw_payments", "amount")]
 
 
 def test_an_aggregate_maps_to_the_columns_it_reads() -> None:
@@ -273,7 +293,22 @@ def test_an_aggregate_maps_to_the_columns_it_reads() -> None:
     )
 
     assert result.status == "RESOLVED"
-    assert _origins(result) == [("raw_payments", "payment_method"), ("raw_payments", "amount")]
+    assert _origins(result) == [
+        ("analytics.raw_payments", "payment_method"),
+        ("analytics.raw_payments", "amount"),
+    ]
+
+
+def test_a_documented_function_still_resolves() -> None:
+    result = map_failing_expression(
+        PAYMENTS_PROJECTION.format(expression="coalesce(amount, 0) as amount"),
+        "LINE 3:     coalesce(amount, 0) as amount",
+        upstream={},
+        terminal_relations=TERMINALS,
+    )
+
+    assert result.status == "RESOLVED"
+    assert _origins(result) == [("analytics.raw_payments", "amount")]
 
 
 # -- identification rules ----------------------------------------------------
@@ -319,7 +354,7 @@ def test_a_hit_bounded_by_punctuation_still_matches() -> None:
     )
 
     assert result.status == "RESOLVED"
-    assert _origins(result) == [("raw_customers", "id")]
+    assert _origins(result) == [("analytics.raw_customers", "id")]
 
 
 def test_two_maximal_hits_stay_ambiguous() -> None:
@@ -337,7 +372,7 @@ def test_two_maximal_hits_stay_ambiguous() -> None:
     assert result.reason == "EXPRESSION_AMBIGUOUS"
 
 
-# -- relation scope ----------------------------------------------------------
+# -- relation identity -------------------------------------------------------
 
 
 def test_a_relation_alias_replaces_the_relation_name() -> None:
@@ -352,7 +387,7 @@ def test_a_relation_alias_replaces_the_relation_name() -> None:
     result = map_failing_expression(
         sql,
         "LINE 2:     on raw_customers.id = raw_orders.id",
-        terminal_relations=TERMINALS,
+        terminal_relations=BARE_TERMINALS,
     )
 
     assert result.status == "RESOLVED"
@@ -363,11 +398,57 @@ def test_an_aliased_relation_is_not_visible_under_its_own_name() -> None:
     result = map_failing_expression(
         "select * from raw_orders as o join raw_customers as c on raw_orders.id = c.id",
         "LINE 2:     on raw_orders.id = c.id",
-        terminal_relations=TERMINALS,
+        terminal_relations=BARE_TERMINALS,
     )
 
     assert result.status == "UNKNOWN"
     assert result.reason == "UNKNOWN_SOURCE"
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        pytest.param("stg_customers", id="bare-name"),
+        pytest.param("other.stg_customers", id="another-schema"),
+        pytest.param("other.analytics.stg_customers", id="another-database"),
+    ],
+)
+def test_a_definition_from_another_relation_identity_is_not_used(reference: str) -> None:
+    """A same-named relation elsewhere is not the model whose definition was
+    provided: identity is the full name, never the last identifier. Were the
+    last identifier enough, the walk would enter the analytics definition and
+    report its raw_customers.id origin."""
+
+    result = map_failing_expression(
+        f'with source as (select * from "{reference}") select customer_id from source',
+        "LINE 2: select customer_id from source",
+        upstream={"analytics.stg_customers": UpstreamDefinition(STG_CUSTOMERS)},
+        terminal_relations=TERMINALS,
+    )
+
+    assert result.status == "UNKNOWN"
+    assert result.reason == "DEFINITION_MISSING"
+    assert result.references == ()
+
+
+def test_two_spellings_of_one_relation_can_be_declared() -> None:
+    """Equivalent spellings are established by the caller (public metadata), by
+    listing both as keys of the same definition — and the origin is reported
+    under the identity the SQL actually used."""
+
+    result = map_failing_expression(
+        'with source as (select * from "data_incident_gym"."analytics"."stg_customers"), '
+        "renamed as (select customer_id from source) select * from renamed",
+        "LINE 3:     select customer_id",
+        upstream={
+            "analytics.stg_customers": UpstreamDefinition(REAL_STG_CUSTOMERS),
+            "data_incident_gym.analytics.stg_customers": UpstreamDefinition(REAL_STG_CUSTOMERS),
+        },
+        terminal_relations=REAL_TERMINALS,
+    )
+
+    assert result.status == "RESOLVED"
+    assert _origins(result) == [("data_incident_gym.analytics.raw_customers", "id")]
 
 
 # -- relations that can end a walk -------------------------------------------
@@ -381,11 +462,11 @@ def test_a_declared_terminal_relation_ends_the_trace() -> None:
         STG_CUSTOMERS,
         "LINE 3:     select id as customer_id",
         upstream={},
-        terminal_relations={"raw_customers"},
+        terminal_relations={"analytics.raw_customers"},
     )
 
     assert result.status == "RESOLVED"
-    assert _origins(result) == [("raw_customers", "id")]
+    assert _origins(result) == [("analytics.raw_customers", "id")]
 
 
 def test_a_relation_without_definition_or_terminal_status_is_unknown() -> None:
@@ -454,6 +535,49 @@ def test_a_subquery_is_unsupported() -> None:
 
     assert result.status == "UNKNOWN"
     assert result.reason in UNKNOWN_REASONS
+
+
+def test_an_unknown_function_is_never_a_column_reference() -> None:
+    """``mystery(amount)`` reads one column, not two: an unknown function
+    refuses the expression instead of adding a column named after it."""
+
+    result = map_failing_expression(
+        PAYMENTS_PROJECTION.format(expression="mystery(amount) as amount"),
+        "LINE 3:     mystery(amount) as amount",
+        upstream={},
+        terminal_relations=TERMINALS,
+    )
+
+    assert result.status == "UNKNOWN"
+    assert result.reason == "UNSUPPORTED_EXPRESSION"
+    assert result.references == ()
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        pytest.param("amount::numeric as amount", id="cast-operator"),
+        pytest.param(
+            "case when amount between 1 and 2 then amount else 0 end as amount",
+            id="unsupported-keyword",
+        ),
+        pytest.param("amount || amount as amount", id="concat-operator"),
+    ],
+)
+def test_an_expression_is_consumed_completely(expression: str) -> None:
+    """Unsupported symbols and keywords refuse the expression; they are never
+    skipped on the way to a confirmation."""
+
+    result = map_failing_expression(
+        PAYMENTS_PROJECTION.format(expression=expression),
+        f"LINE 3:     {expression}",
+        upstream={},
+        terminal_relations=TERMINALS,
+    )
+
+    assert result.status == "UNKNOWN"
+    assert result.reason == "UNSUPPORTED_EXPRESSION"
+    assert result.references == ()
 
 
 def test_a_non_equi_join_condition_is_refused() -> None:
@@ -568,14 +692,14 @@ def test_an_ambiguous_unqualified_column_is_refused() -> None:
     assert result.reason in {"AMBIGUOUS_COLUMN", "UNKNOWN_COLUMN"}
 
 
-def test_duplicate_definition_keys_are_a_caller_error() -> None:
+def test_duplicate_definition_identities_are_a_caller_error() -> None:
     with pytest.raises(ValueError):
         map_failing_expression(
             STG_PAYMENTS,
             "LINE 20:         amount / 100 as amount",
             upstream={
                 "analytics.raw_payments": UpstreamDefinition(STG_PAYMENTS),
-                "other.raw_payments": UpstreamDefinition(STG_PAYMENTS, complete=False),
+                '"analytics"."raw_payments"': UpstreamDefinition(STG_PAYMENTS, complete=False),
             },
             terminal_relations=TERMINALS,
         )
@@ -594,5 +718,5 @@ def test_identification_ignores_whitespace_and_comment_differences() -> None:
     )
 
     assert result.status == "RESOLVED"
-    assert _origins(result) == [("raw_payments", "amount")]
+    assert _origins(result) == [("analytics.raw_payments", "amount")]
     assert normalize_sql_text("A  B\n C") == "a b c"
