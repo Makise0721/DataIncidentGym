@@ -1,10 +1,13 @@
-# T13 数据库 dry run 结果（T1′ 执行、T2′ 未执行，按计划停止）
+# T13 数据库 dry run 结果（T1′ 两次执行、T2′ 两次均未执行，按计划停止）
 
 - 日期：2026-09-18。授权范围与判定规则见 `docs/superpowers/plans/2026-09-18-t13-dry-run-plan.md`（`d329a49`）。
-- **结论：dry run 未完成。T1′ 的 dbt 运行产物给出了 O1–O6 的实测值，但瓶颈 O7（v2 构建自检）失败，
-  按计划 §4 的规则停止：T2′ 未执行、无重跑、无认证、无 manifest 冻结。** 构建自检的缺陷已离线修复并
-  带回归；另一项需设计变更裁定（错误行截断导致读器识别退化）。
-- 数据面未漂移：`F0` = 历史基线指纹 `e5c7848eb2b7af16ec37463650b63dbb5d1f52293adf456003517b51c496cb18`。
+- **结论：dry run 仍未完成，两次都在 T1′ 的 O7 上停下。** 第一次是构建自检按原始文本比较（Windows 上
+  dbt 编译文件 CRLF）→ 已修复（`270d96a`）；第二次自检通过、v2 记录写出，但**校验器**仍按 v1 字段集合
+  校验而拒绝 v2 运行 → 已修复（见 §7.3）。两次都按计划停止：T2′ 未执行、无第二次重跑、无认证、
+  无 manifest 冻结。
+- 另有一项已批准的设计变更待实施：错误行截断导致读器识别退化（§4）。
+- 数据面未漂移：两次 `pipeline build` 的 `F0` = 历史基线指纹
+  `e5c7848eb2b7af16ec37463650b63dbb5d1f52293adf456003517b51c496cb18`。
 
 ## 1. 实际执行（逐步，命令与结果）
 
@@ -126,3 +129,48 @@ chain: ('customers', 'data_incident_gym.analytics.stg_customers', 'renamed', 'so
 - 未执行：T2′ 注入与构建、重跑、`certify --admit`、benchmark、manifest 冻结、真实模型调用。
 - 报告中的 dbt 事实来自真实的数据库运行（授权范围内的一次 inject + build + reset），但那次运行**不是**
   合格的 v2 运行产物（自检未通过），其用途仅限于上表的观察项。
+
+## 7. 第二次执行（重跑授权下，2026-09-18）
+
+授权条件：范围与 `d329a49` 计划一致；执行 HEAD 必须含 `270d96a`；T2′ 同样逐字节记录 O4；O7 再次失败即
+停止且不允许在同一授权内再跑。**执行 HEAD = `3e1e931`（含 `270d96a` ✓），工作树干净。**
+
+### 7.1 逐步结果
+
+| # | 命令 | 结果 |
+| --- | --- | --- |
+| 1 | `docker compose ps` | `postgres running healthy` |
+| 2 | `uv run data-incident-gym pipeline build` | 成功，fingerprint == **F0** ✓ |
+| 3 | `uv run data-incident-gym lab inject schema_type_change_raw_customer_id_a` | `state: INJECTED`，fingerprint `f15aecba…`（与第一次相同） |
+| 4 | `uv run data-incident-gym lab build schema_type_change_raw_customer_id_a` | **失败**：`[FAULT_VERIFICATION_ERROR]：runtime 字段集合无效`；run_id `65626c9a9a564c32b3b8bf27f3502eb5` |
+| 5 | `uv run data-incident-gym lab reset schema_type_change_raw_customer_id_a` | `state: HEALTHY`，fingerprint == **F0** ✓ |
+| 6 | （按授权条件停止） | T2′ 未执行；未在同一授权内再跑 |
+
+### 7.2 O1–O6、O8（第二次，实测与第一次一致）
+
+- O1：status=error 仍**只有** `model.jaffle_shop.customers`；O2：`skipped` 恰为三条（relationships、
+  not_null_customers_customer_id、unique_customers_customer_id）；O3/O6 同第一次；
+- O4/O5：消息上下文四行与第一次**逐行相同**（仅末行 `compiled code at <本次 run 路径>` 随 run_id 变化），
+  仍是 64 字符截断、仍点名 `customer_orders` 侧；
+- O8：reset 后 fingerprint == F0 ✓。
+
+### 7.3 O7：自检已通过，卡在**校验器的 v1 字段集合**
+
+CRLF 修复生效：22 个编译节点在 `_definition_texts` 中全部一致（不再报"运行产物自相矛盾"），v2 运行记录
+写出且内容完整——`evidence_baseline`（fingerprint == F0）、`dbt_invocation_id` + 三个产物摘要、
+`node_definitions` **22/22 覆盖全部编译节点**、`redacted` 全为 false、`observable_nodes.definition` 与合同
+三项白名单一致。**共享记录校验器（读取期用）接受该记录**（`resolve_run_context` 实测通过）。
+
+失败点：`lab_verifier._validate_runtime` 仍写死 v1 字段集合与 v1 schema_version，任何 v2 运行都会在
+构建的最后一步被自己的校验器拒绝。**修复**（本报告同批提交）：新增公开的
+`run_context.validate_runtime_record`（v1/v2 的单一权威，读取期已用它），校验器对 v2 记录委派给它，
+v1 分支逐字节不变；并新增 3 条回归——v2 记录被接受、删掉 `artifact_sha256` 子键被拒、
+`expectation` 越出可见 schema 被拒（未修复代码上 3 条全失败）。
+
+### 7.4 结论
+
+- 第二次执行把 O7 的阻塞从"写入期自检"推进到"校验器版本识别"，两处缺陷均已修复并带回归；**O7 仍需一次
+  完整执行才能宣告成立**（需要第三次授权，范围同计划）。
+- T2′ 的 O1–O6 依旧未实测；按审计口径不得从 T1′ 推断。
+- 环境：数据库健康（F0），无活动运行指针；运行归档 `22c98522…`（第一次）与 `65626c9a…`（第二次）保留在
+  `.dig/lab/runs/`。
