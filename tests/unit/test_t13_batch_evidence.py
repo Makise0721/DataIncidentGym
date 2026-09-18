@@ -30,6 +30,7 @@ from data_incident_gym.evidence_batch import (
     MAX_COMPILED_SQL_BYTES,
     BatchEvidenceTools,
 )
+from data_incident_gym.lab import IncidentExecutionError
 from data_incident_gym.run_context import (
     EVIDENCE_BASELINE_FILENAME,
     RUNTIME_V2_SCHEMA_VERSION,
@@ -102,7 +103,9 @@ def _run_root(
     for name, text in compiled_files.items():
         path = compiled_root / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        # Bytes, not text mode: the fixture must control line endings exactly,
+        # as dbt does (it writes CRLF compiled files on Windows).
+        path.write_bytes(text.encode("utf-8"))
     baseline_payload = {
         "schema_version": "p1.evidence_baseline.v1",
         "generated_at": GENERATED_AT,
@@ -1067,3 +1070,96 @@ def test_an_empty_definition_whitelist_still_produces_a_valid_runtime(
     with pytest.raises(BatchTargetsRefusedError) as error:
         tools.get_dbt_node_definition(CUSTOMERS)
     assert error.value.target_refusals == ((CUSTOMERS, "NODE_NOT_ALLOWED"),)
+
+
+# -- dry run finding: dbt writes CRLF compiled files on Windows --------------
+
+
+CRLF_BODY = "with source as (\n    select * from seed\n)\n\nselect * from source\n"
+
+
+def test_a_crlf_compiled_file_agrees_with_its_lf_json_copies(tmp_path: Path) -> None:
+    """Dry-run reproduction: dbt writes the compiled file with CRLF while the
+    manifest and run_results copies of the same SQL keep LF. The raw string
+    comparison refused the whole build as self-contradictory."""
+
+    lf = CRLF_BODY
+    crlf = lf.replace("\n", "\r\n")
+    run_root, _ = _run_root(
+        tmp_path,
+        nodes={CUSTOMERS: {"depends_on": [], "manifest_text": lf, "file": "customers.sql"}},
+        parent_map={CUSTOMERS: []},
+        results=[{"unique_id": CUSTOMERS, "status": "error", "compiled_code": lf}],
+        compiled_files={"customers.sql": crlf},
+    )
+    lab = _lab(tmp_path)
+
+    texts = lab._definition_texts(run_root)
+
+    # Precedence picks run_results, and the file is not treated as a conflict.
+    assert texts[CUSTOMERS] == lf
+
+
+def test_a_genuinely_different_compiled_file_is_still_refused(tmp_path: Path) -> None:
+    """The canonical comparison must not weaken the integrity check."""
+
+    run_root, _ = _run_root(
+        tmp_path,
+        nodes={
+            CUSTOMERS: {
+                "depends_on": [],
+                "manifest_text": CRLF_BODY,
+                "file": "customers.sql",
+            }
+        },
+        parent_map={CUSTOMERS: []},
+        results=[
+            {"unique_id": CUSTOMERS, "status": "error", "compiled_code": CRLF_BODY}
+        ],
+        compiled_files={"customers.sql": CRLF_BODY + "\n-- trailing difference\n"},
+    )
+
+    with pytest.raises(IncidentExecutionError) as error:
+        _lab(tmp_path)._definition_texts(run_root)
+
+    assert "运行产物自相矛盾" in str(error.value)
+
+
+def test_a_crlf_run_loads_and_serves_its_definition(tmp_path: Path) -> None:
+    """Write→load: a CRLF compiled file must survive the whole v2 path and the
+    served definition must be the canonical (run_results) text."""
+
+    _write_trusted_baseline(tmp_path)
+    spec = _v2_spec(expectation=[])
+    lab = _lab(tmp_path)
+    lab._write_evidence_baseline(tmp_path, spec)
+    lf = CRLF_BODY
+    run_root, _ = _run_root(
+        tmp_path,
+        nodes={CUSTOMERS: {"depends_on": [], "manifest_text": lf, "file": "customers.sql"}},
+        parent_map={CUSTOMERS: []},
+        results=[{"unique_id": CUSTOMERS, "status": "error", "compiled_code": lf}],
+        compiled_files={"customers.sql": lf.replace("\n", "\r\n")},
+    )
+    lab._write_runtime_v2(
+        tmp_path,
+        spec,
+        RUN_ID,
+        1,
+        "b" * 64,
+        original_texts=lab._definition_texts(run_root),
+    )
+    runtime = _validate_runtime(
+        json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8")), RUN_ID
+    )
+    context = ObservableRunContext(
+        RUN_ID, tmp_path, runtime, SimpleNamespace()  # type: ignore[arg-type]
+    )
+    tools = BatchEvidenceTools(RUN_ID, _artifacts(tmp_path, context))
+
+    content = tools.get_dbt_node_definition(CUSTOMERS)[0].content
+
+    assert isinstance(content, DbtNodeDefinitionFact)
+    assert content.known is True
+    assert content.complete is True
+    assert content.compiled_sql == lf

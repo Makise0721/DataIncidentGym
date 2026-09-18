@@ -41,6 +41,7 @@ from data_incident_gym.run_context import (
     EVIDENCE_BASELINE_FILENAME,
     RUNTIME_V2_SCHEMA_VERSION,
     RunContextError,
+    canonical_compiled_text,
     clear_active_run,
     compiled_tree_digest,
     publish_active_run,
@@ -1180,7 +1181,10 @@ class IncidentLab:
             present = [value for value in by_source.values() if value is not None]
             if not present:
                 continue
-            if len(set(present)) > 1:
+            # Line endings are the platform's, not the SQL's: compare the
+            # canonical text (dry-run finding: dbt writes CRLF files on Windows
+            # while the JSON copies keep LF).
+            if len({canonical_compiled_text(value) for value in present}) > 1:
                 conflicts.append(node_id)
                 continue
             chosen = None

@@ -41,7 +41,7 @@ from data_incident_gym.evidence import (
     TargetsEmptyError,
     raise_without_context,
 )
-from data_incident_gym.run_context import compiled_tree_digest
+from data_incident_gym.run_context import canonical_compiled_text, compiled_tree_digest
 
 #: Frozen batch semantics: at most this many targets per call.
 BATCH_TARGET_LIMIT = 8
@@ -353,7 +353,15 @@ class BatchEvidenceTools:
                 EvidenceIntegrityError("Artifact invocation does not match this build")
             )
         for node_id, sources in self._node_sources().items():
-            if len({text for text in sources.values() if text is not None}) > 1:
+            # Line endings are the platform's, not the SQL's: agree on the
+            # canonical text so a Windows compiled file (CRLF) does not look
+            # like a different definition from its JSON copy (LF).
+            canonical = {
+                canonical_compiled_text(text)
+                for text in sources.values()
+                if text is not None
+            }
+            if len(canonical) > 1:
                 raise_without_context(
                     EvidenceIntegrityError(
                         f"compiled text disagrees across sources: {node_id}"

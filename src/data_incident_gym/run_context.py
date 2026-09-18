@@ -162,6 +162,20 @@ def _fail(message: str = "Invalid run context") -> None:
     raise RunContextError(message)
 
 
+def canonical_compiled_text(text: str) -> str:
+    """Text of one compiled definition for *cross-source agreement* checks.
+
+    dbt writes the compiled files with the platform's line endings while the
+    JSON copies of the same SQL (``compiled_code`` in manifest and run_results)
+    always keep ``\\n``: comparing the raw strings would refuse every Windows
+    run even though the SQL is identical (dry-run finding, 2026-09-18). Only
+    line endings are normalised; digests and the reported text stay over the
+    raw archived bytes, so recorded and re-checked values cannot drift apart.
+    """
+
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def compiled_tree_digest(compiled_root: Path) -> str:
     """Canonical digest of a compiled-SQL tree, missing tree included.
 
