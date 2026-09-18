@@ -60,6 +60,20 @@ class _EvidenceBaseline:
     relations: dict[str, tuple[ExpectedColumn, ...]]
 
 
+def truncate_utf8(text: str, limit: int) -> str:
+    """Cut ``text`` to at most ``limit`` UTF-8 bytes without splitting a char.
+
+    A character slice (``text[:limit]``) returns up to four times the limit for
+    non-ASCII text; the cap is defined in bytes, so the cut happens on the
+    encoded form and a trailing partial sequence is dropped.
+    """
+
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
 def batch_targets(raw: str) -> tuple[str, ...]:
     """The frozen batch request encoding: comma-joined, deduped, in order."""
 
@@ -206,13 +220,27 @@ class BatchEvidenceTools:
         sources = self._node_sources()
         observed_at = self._artifacts.manifest_generated_at
         records: list[EvidenceRecord] = []
+        recorded = context.runtime["build_provenance"]["node_definitions"]
         for target in targets:
             node = catalog[target]
             text = self._compiled_text(sources.get(target))
-            # A missing or truncated definition is never complete: the mapping
-            # reader treats both as UNKNOWN.
+            if text is not None:
+                # Run membership for the text itself: it must be the archived
+                # definition, and a redaction-modified definition is never
+                # complete (recorded at build time, never guessed from ``***``).
+                entry = recorded.get(target)
+                if entry is None:
+                    raise_without_context(
+                        EvidenceIntegrityError("Definition is not bound to this build")
+                    )
+                if hashlib.sha256(text.encode("utf-8")).hexdigest() != entry["sha256"]:
+                    raise_without_context(
+                        EvidenceIntegrityError("Definition text does not match the build record")
+                    )
             complete = (
-                text is not None and len(text.encode("utf-8")) <= MAX_COMPILED_SQL_BYTES
+                text is not None
+                and not recorded.get(target, {}).get("redacted", True)
+                and len(text.encode("utf-8")) <= MAX_COMPILED_SQL_BYTES
             )
             content = DbtNodeDefinitionFact(
                 kind="DBT_NODE_DEFINITION",
@@ -231,7 +259,7 @@ class BatchEvidenceTools:
                 compiled_sql_sha256=None
                 if text is None
                 else hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                compiled_sql=None if text is None else text[:MAX_COMPILED_SQL_BYTES],
+                compiled_sql=None if text is None else truncate_utf8(text, MAX_COMPILED_SQL_BYTES),
                 complete=complete,
             )
             records.append(

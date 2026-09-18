@@ -150,8 +150,12 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
      （绝对路径，解析限定运行根内、拒符号链接与越界，沿用 `_artifact_path` 语义）→ ③ manifest
      `compiled_code`；三者（存在的）规范化文本互不相同 → `EVIDENCE_INTEGRITY_ERROR`，不静默选边。
      仅剩 manifest 的回退路径**同样**受归属校验（摘要 + invocation），不存在无新鲜度条件的路径。
-- **文本完整性**：`MAX_COMPILED_SQL_BYTES`（建议 16 KiB）；超限或 redaction 改变文本 → `complete=false`，
-  禁止作为完整映射输入，两个摘要均记录。
+- **文本完整性（实施期审计修正）**：`MAX_COMPILED_SQL_BYTES`（16 KiB）按 **UTF-8 字节**截断且不切断
+  多字节字符（字符切片对非 ASCII 文本会返回数倍上限）。构建时在
+  `build_provenance.node_definitions` 记录**逐节点**的归档文本摘要与 `redacted` 标记（脱敏是否改写了
+  该文本）；E2 据此判定 `complete` 并校验文本归属，**绝不通过文本内容猜测**。compiled 树（`target/
+  compiled/**`）与 manifest/run_results 内的副本使用**同一套脱敏规则**——否则文件可能保留 JSON 副本
+  已脱敏的秘密，且三个来源会相互矛盾。
 - 正常缺失（节点未执行、无编译产物）→ `known=false` 的明确 UNKNOWN。
 
 ## 3. 对照与身份影响

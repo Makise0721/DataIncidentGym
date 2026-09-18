@@ -32,7 +32,7 @@
 | E2 拒绝码 | 不在合同 `definition_nodes` 白名单 → `NODE_NOT_ALLOWED`；在白名单但本运行 manifest 中不存在 → `NODE_NOT_FOUND`；在 manifest 但不在失败节点上游闭包 → `NODE_NOT_ALLOWED` |
 | E1 拒绝码 | 不在 `expectation_relations` → `RELATION_NOT_ALLOWED`；v1 运行（无 v2 绑定）一律拒绝 |
 | 逐项 UNKNOWN | E1：关系不在快照 → `known=false`；E2：无任何编译文本 → `known=false` |
-| 文本完整性 | 超过 16 KiB → 文本截断 + `complete=false`；**缺失定义同样 `complete=false`**（映射读器对二者一律 UNKNOWN） |
+| 文本完整性 | 超过 16 KiB → 按 **UTF-8 字节**截断（不切断多字节字符）+ `complete=false`；**缺失定义同样 `complete=false`**；**构建时记录的 `redacted` 标记为真 → 永不 `complete`**（映射读器对以上一律 UNKNOWN） |
 | 归属校验 | manifest/run_results 字节摘要、compiled_tree 摘要、两处 `invocation_id`；来源冲突 → `EVIDENCE_INTEGRITY_ERROR`（内容一致性与归属分别校验） |
 | 计数 | 一次调用 = 一次工具尝试（与列表长度无关）；每条事实单独登记 |
 
@@ -65,6 +65,23 @@
 实现，没有上轮加入的有界重试，撞上同一类 Windows 瞬态。本次把重试提为共享的
 `evaluation_inputs.rename_directory_with_retry` 并同时用于两个写入端（含两条针对重评写入端的回归），
 复跑该案例 **1 passed**。这是对已确证写入路径问题的第二处同类修复，不改变任何身份。
+
+## 4b. 实施期审计整改（2026-09-18）
+
+审计在 `d86d103` 上发现两处 E2 文本完整性缺陷，均已离线复现并修复：
+
+1. **脱敏改写后的 SQL 仍被标记为完整**：`complete` 只看存在与长度，脱敏改写（密码 → `***`）后仍为真；
+   且 compiled 文件当时**不在脱敏范围内**，可能保留 JSON 副本已脱敏的秘密。修复：构建时在
+   `build_provenance.node_definitions` 记录逐节点 `{sha256, redacted}`（脱敏前后文本比较），E2 依据该
+   标记判定 `complete` 并校验文本摘要归属；`_redact_compiled_tree` 把 compiled 树纳入同一套脱敏，
+   脱敏前后各做一次"三来源一致"校验，节点集合变化即构建失败。
+2. **16 KiB 上限按字符截断**：`text[:limit]` 对中文注释返回 ~49 KB。修复：`truncate_utf8` 按 UTF-8
+   字节截断并用 `errors="ignore"` 丢弃不完整的多字节尾部。回归含非 ASCII 超限用例（返回字节数
+   ≤ 上限且可完整解码）。
+
+回归：`test_a_redaction_changed_definition_is_never_complete`（含秘密的编译 SQL 经构建链路 → 归档无秘密、
+`redacted=true`、E2 返回脱敏文本且 `complete=false`，未受影响的兄弟节点仍 `complete=true`）与
+`test_oversized_non_ascii_definitions_stay_within_the_byte_cap`。
 
 ## 5. 边界（如实）
 

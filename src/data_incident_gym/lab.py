@@ -1042,12 +1042,19 @@ class IncidentLab:
         run_id: str,
         dbt_exit_code: int,
         profile_spec_sha256: str,
+        *,
+        original_texts: dict[str, str],
     ) -> None:
         """Write the v2 runtime record over the final archived bytes.
 
         Everything hashed here was already redacted, and the record itself is
         written afterwards; the build refuses to finish when the run's own
         artifacts disagree with each other or carry another invocation's id.
+        ``node_definitions`` freezes, per node, the digest of the archived
+        definition text and whether redaction changed it — a redacted
+        definition is never ``complete`` and must not feed column mapping
+        (audit finding: the flag must be recorded at build time, never guessed
+        from the text later).
         """
 
         contract = spec.observable_evidence_contract
@@ -1063,44 +1070,16 @@ class IncidentLab:
             or manifest.get("metadata", {}).get("invocation_id") != invocation
         ):
             raise self._clean(IncidentExecutionError("dbt invocation 标识缺失或不一致"))
-        sources: dict[str, set[str]] = {}
-        results_by_id = {
-            result.get("unique_id"): result
-            for result in results.get("results", [])
-            if isinstance(result, dict)
+        final_texts = self._definition_texts(run_root)
+        if set(final_texts) != set(original_texts):
+            raise self._clean(IncidentExecutionError("定义节点集合在脱敏前后不一致"))
+        node_definitions = {
+            node_id: {
+                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "redacted": original_texts[node_id] != text,
+            }
+            for node_id, text in sorted(final_texts.items())
         }
-        for node_id, node in (manifest.get("nodes") or {}).items():
-            if not isinstance(node, dict):
-                continue
-            texts = set()
-            if isinstance(node.get("compiled_code"), str):
-                texts.add(node["compiled_code"])
-            result = results_by_id.get(node_id)
-            if isinstance(result, dict) and isinstance(result.get("compiled_code"), str):
-                texts.add(result["compiled_code"])
-            compiled_path = node.get("compiled_path")
-            if isinstance(compiled_path, str):
-                candidate = Path(compiled_path)
-                if not candidate.is_absolute():
-                    candidate = run_root / candidate
-                try:
-                    resolved = candidate.resolve(strict=True)
-                except OSError:
-                    resolved = None
-                if (
-                    resolved is not None
-                    and resolved.is_file()
-                    and resolved.is_relative_to(run_root)
-                    and not resolved.is_symlink()
-                ):
-                    texts.add(resolved.read_bytes().decode("utf-8"))
-            if texts:
-                sources[node_id] = texts
-        conflicts = sorted(node_id for node_id, texts in sources.items() if len(texts) > 1)
-        if conflicts:
-            raise self._clean(
-                IncidentExecutionError("运行产物自相矛盾：" + "、".join(conflicts[:3]))
-            )
         baseline_bytes = self._read_bytes(run_root / EVIDENCE_BASELINE_FILENAME)
         runtime = {
             "schema_version": RUNTIME_V2_SCHEMA_VERSION,
@@ -1130,6 +1109,7 @@ class IncidentLab:
                         run_root / "dbt" / "target" / "compiled"
                     ),
                 },
+                "node_definitions": node_definitions,
             },
             "profile_spec_sha256": profile_spec_sha256,
         }
@@ -1146,6 +1126,89 @@ class IncidentLab:
             )
             + "\n",
         )
+
+    def _definition_texts(self, run_root: Path) -> dict[str, str]:
+        """Per-node canonical compiled text, using the frozen source precedence.
+
+        Every source present for a node must agree; a node without any compiled
+        text is omitted (E2 reports it as an explicit unknown).
+        """
+
+        manifest = json.loads(
+            self._read_bytes(run_root / "dbt/target/manifest.json").decode("utf-8")
+        )
+        results = json.loads(
+            self._read_bytes(run_root / "dbt/target/run_results.json").decode("utf-8")
+        )
+        results_by_id = {
+            result.get("unique_id"): result
+            for result in results.get("results", [])
+            if isinstance(result, dict)
+        }
+        texts: dict[str, str] = {}
+        conflicts: list[str] = []
+        for node_id, node in (manifest.get("nodes") or {}).items():
+            if not isinstance(node, dict):
+                continue
+            file_text: str | None = None
+            compiled_path = node.get("compiled_path")
+            if isinstance(compiled_path, str):
+                candidate = Path(compiled_path)
+                if not candidate.is_absolute():
+                    candidate = run_root / candidate
+                try:
+                    resolved = candidate.resolve(strict=True)
+                except OSError:
+                    resolved = None
+                if (
+                    resolved is not None
+                    and resolved.is_file()
+                    and resolved.is_relative_to(run_root)
+                    and not resolved.is_symlink()
+                ):
+                    file_text = resolved.read_bytes().decode("utf-8")
+            result = results_by_id.get(node_id)
+            by_source = {
+                "run_results": result.get("compiled_code")
+                if isinstance(result, dict) and isinstance(result.get("compiled_code"), str)
+                else None,
+                "file": file_text,
+                "manifest": node.get("compiled_code")
+                if isinstance(node.get("compiled_code"), str)
+                else None,
+            }
+            present = [value for value in by_source.values() if value is not None]
+            if not present:
+                continue
+            if len(set(present)) > 1:
+                conflicts.append(node_id)
+                continue
+            chosen = None
+            for name in ("run_results", "file", "manifest"):
+                if by_source[name] is not None:
+                    chosen = by_source[name]
+                    break
+            assert chosen is not None
+            texts[node_id] = chosen
+        if conflicts:
+            raise self._clean(
+                IncidentExecutionError("运行产物自相矛盾：" + "、".join(sorted(conflicts)[:3]))
+            )
+        return texts
+
+    def _redact_compiled_tree(self, run_root: Path) -> None:
+        """Bring the compiled SQL files under the same redaction as the copies.
+
+        Without this the on-disk file could keep a secret the JSON copies
+        already redacted, and the three sources would disagree.
+        """
+
+        root = run_root / "dbt" / "target" / "compiled"
+        if not root.is_dir():
+            return
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and not path.is_symlink():
+                self._redact_file(path)
 
     @staticmethod
     def _read_bytes(path: Path) -> bytes:
@@ -1230,8 +1293,13 @@ class IncidentLab:
         self._write_text(run_root / "schema.json", schema.to_json())
         profile_hash = self._public_profile(spec, run_root)
         is_v2 = isinstance(spec.observable_evidence_contract, ObservableEvidenceContractV2)
+        definition_texts: dict[str, str] = {}
         if is_v2:
             self._write_evidence_baseline(run_root, spec)
+            # Capture the executed texts before redaction so the runtime record
+            # can mark, per node, whether redaction changed them.
+            definition_texts = self._definition_texts(run_root)
+            self._redact_compiled_tree(run_root)
         else:
             self._write_runtime(run_root, spec, run_id, dbt_result.return_code, profile_hash)
         artifacts = [
@@ -1253,7 +1321,14 @@ class IncidentLab:
         if is_v2:
             # Digests bind the archived bytes; the runtime record is written
             # last so it can never be redacted after being hashed.
-            self._write_runtime_v2(run_root, spec, run_id, dbt_result.return_code, profile_hash)
+            self._write_runtime_v2(
+                run_root,
+                spec,
+                run_id,
+                dbt_result.return_code,
+                profile_hash,
+                original_texts=definition_texts,
+            )
 
         try:
             verification = self.verifier.verify(run_id)

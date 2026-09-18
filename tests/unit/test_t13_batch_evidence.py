@@ -129,11 +129,32 @@ def _run_root(
     def _digest(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
+    def _node_text(node: dict) -> str | None:
+        by_source = (
+            node.get("run_results_text"),
+            node.get("file_text"),
+            node.get("manifest_text"),
+        )
+        for value in by_source:
+            if value is not None:
+                return value
+        return None
+
+    node_definitions = {}
+    for node_id, node in nodes.items():
+        text_value = _node_text(node)
+        if text_value is None:
+            continue
+        node_definitions[node_id] = {
+            "sha256": hashlib.sha256(text_value.encode("utf-8")).hexdigest(),
+            "redacted": False,
+        }
     digests = {
         "baseline": _digest(tmp_path / EVIDENCE_BASELINE_FILENAME),
         "manifest": _digest(target / "manifest.json"),
         "run_results": _digest(target / "run_results.json"),
         "compiled_tree": compiled_tree_digest(compiled_root),
+        "node_definitions": node_definitions,
     }
     return tmp_path, digests
 
@@ -178,6 +199,7 @@ def _context(
                     "run_results": digests["run_results"],
                     "compiled_tree": digests["compiled_tree"],
                 },
+                "node_definitions": digests["node_definitions"],
             },
             "profile_spec_sha256": "b" * 64,
         }
@@ -293,6 +315,7 @@ def test_v2_runtime_requires_the_expectation_subset() -> None:
                 "run_results": "a" * 64,
                 "compiled_tree": "a" * 64,
             },
+            "node_definitions": {},
         },
         "profile_spec_sha256": "b" * 64,
     }
@@ -420,7 +443,9 @@ def test_definitions_resolve_each_source_precedence_case(tmp_path: Path) -> None
         {
             "unique_id": CUSTOMERS,
             "status": "error",
-            "compiled_code": _compiled_text(CUSTOMERS),
+            "compiled_code": nodes[CUSTOMERS].get("run_results_text")
+            or nodes[CUSTOMERS].get("manifest_text")
+            or nodes[CUSTOMERS].get("file_text"),
         }
     ]
     files = {"customers.sql": _compiled_text(CUSTOMERS)}
@@ -752,7 +777,14 @@ def test_the_v2_runtime_records_build_provenance_over_final_bytes(tmp_path: Path
         compiled_files={},
     )
 
-    lab._write_runtime_v2(tmp_path, spec, RUN_ID, 1, "b" * 64)
+    lab._write_runtime_v2(
+        tmp_path,
+        spec,
+        RUN_ID,
+        1,
+        "b" * 64,
+        original_texts=lab._definition_texts(tmp_path),
+    )
 
     runtime = json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))
     assert runtime["schema_version"] == RUNTIME_V2_SCHEMA_VERSION
@@ -785,6 +817,139 @@ def test_the_v2_runtime_refuses_artifacts_that_disagree(tmp_path: Path) -> None:
     )
 
     with pytest.raises(Exception) as error:
-        lab._write_runtime_v2(tmp_path, spec, RUN_ID, 1, "b" * 64)
+        lab._write_runtime_v2(
+        tmp_path,
+        spec,
+        RUN_ID,
+        1,
+        "b" * 64,
+        original_texts=lab._definition_texts(tmp_path),
+    )
 
     assert "运行产物自相矛盾" in str(error.value)
+
+# -- audit round: redaction change and byte-exact truncation -----------------
+
+SENTINEL = "AUDIT_SECRET_SENTINEL"
+
+
+def _artifacts(run_root: Path, context: ObservableRunContext) -> SimpleNamespace:
+    target = run_root / "dbt" / "target"
+    return SimpleNamespace(
+        context=context,
+        run_root=run_root,
+        manifest=json.loads((target / "manifest.json").read_text(encoding="utf-8")),
+        run_results=json.loads((target / "run_results.json").read_text(encoding="utf-8")),
+        manifest_generated_at=datetime(2026, 9, 18, tzinfo=UTC),
+        read_json=lambda path: json.loads(Path(path).read_text(encoding="utf-8")),
+    )
+
+
+def test_a_redaction_changed_definition_is_never_complete(tmp_path: Path) -> None:
+    """Audit reproduction: a password-bearing definition was redacted in the
+    archived copies yet still reported ``complete=True``."""
+
+    from data_incident_gym.config import PROJECT_ROOT, Settings
+    from data_incident_gym.lab import IncidentLab
+
+    settings = Settings(_env_file=None, postgres_password=SENTINEL)
+    original = f"select '{SENTINEL}' as customer_id"
+    nodes = {
+        CUSTOMERS: {
+            "depends_on": [STG_CUSTOMERS],
+            "manifest_text": original,
+            "file": "customers.sql",
+        },
+        STG_CUSTOMERS: {"depends_on": [], "manifest_text": _compiled_text(STG_CUSTOMERS)},
+    }
+    parent_map = {CUSTOMERS: [STG_CUSTOMERS], STG_CUSTOMERS: []}
+    results = [{"unique_id": CUSTOMERS, "status": "error", "compiled_code": original}]
+    run_root, _ = _run_root(
+        tmp_path,
+        nodes=nodes,
+        parent_map=parent_map,
+        results=results,
+        compiled_files={"customers.sql": original},
+    )
+    lab = IncidentLab(settings, PROJECT_ROOT)
+
+    original_texts = lab._definition_texts(run_root)
+    lab._redact_compiled_tree(run_root)
+    for artifact in (
+        run_root / "dbt" / "target" / "manifest.json",
+        run_root / "dbt" / "target" / "run_results.json",
+    ):
+        lab._redact_file(artifact)
+    spec = _v2_spec(expectation=[])
+    lab._write_runtime_v2(
+        run_root, spec, RUN_ID, 1, "b" * 64, original_texts=original_texts
+    )
+
+    compiled_file = run_root / "dbt" / "target" / "compiled" / "customers.sql"
+    assert SENTINEL not in compiled_file.read_text(encoding="utf-8")
+    runtime = json.loads((run_root / "runtime.json").read_text(encoding="utf-8"))
+    definitions = runtime["build_provenance"]["node_definitions"]
+    assert definitions[CUSTOMERS]["redacted"] is True
+    assert definitions[STG_CUSTOMERS]["redacted"] is False
+
+    def _digest(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    context = _context(
+        run_root,
+        {
+            "baseline": _digest(run_root / EVIDENCE_BASELINE_FILENAME),
+            "manifest": _digest(run_root / "dbt" / "target" / "manifest.json"),
+            "run_results": _digest(run_root / "dbt" / "target" / "run_results.json"),
+            "compiled_tree": compiled_tree_digest(run_root / "dbt" / "target" / "compiled"),
+            "node_definitions": definitions,
+        },
+        definition=(CUSTOMERS, STG_CUSTOMERS),
+    )
+    tools = BatchEvidenceTools(RUN_ID, _artifacts(run_root, context))
+
+    contents = tools.get_dbt_node_definition(f"{CUSTOMERS},{STG_CUSTOMERS}")
+
+    redacted = contents[0].content
+    assert isinstance(redacted, DbtNodeDefinitionFact)
+    assert redacted.known is True
+    assert redacted.complete is False
+    assert redacted.compiled_sql is not None and "***" in redacted.compiled_sql
+    untouched = contents[1].content
+    assert isinstance(untouched, DbtNodeDefinitionFact)
+    assert untouched.complete is True
+
+
+def test_oversized_non_ascii_definitions_stay_within_the_byte_cap(
+    tmp_path: Path,
+) -> None:
+    """Audit reproduction: a character slice returned ~49 KB for a 16 KiB cap."""
+
+    comment = "注释" * 100  # 600 UTF-8 bytes per repetition
+    big = "-- " + comment * 100 + "select 1"
+    assert len(big.encode("utf-8")) > MAX_COMPILED_SQL_BYTES
+    nodes = {
+        CUSTOMERS: {
+            "depends_on": [],
+            "manifest_text": big,
+            "file": "customers.sql",
+        }
+    }
+    run_root, digests = _run_root(
+        tmp_path,
+        nodes=nodes,
+        parent_map={CUSTOMERS: []},
+        results=[{"unique_id": CUSTOMERS, "status": "error", "compiled_code": big}],
+        compiled_files={"customers.sql": big},
+    )
+    tools = _tools(run_root, digests, definition=(CUSTOMERS,))
+
+    content = tools.get_dbt_node_definition(CUSTOMERS)[0].content
+
+    assert isinstance(content, DbtNodeDefinitionFact)
+    assert content.complete is False
+    assert content.compiled_sql is not None
+    returned = content.compiled_sql
+    assert len(returned.encode("utf-8")) <= MAX_COMPILED_SQL_BYTES
+    assert returned == returned.encode("utf-8").decode("utf-8")
+    assert returned.endswith("\ufffd") is False

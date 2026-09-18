@@ -347,6 +347,7 @@ def _validate_runtime(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
         if not isinstance(provenance, dict) or set(provenance) != {
             "dbt_invocation_id",
             "artifact_sha256",
+            "node_definitions",
         }:
             _fail("runtime build_provenance 无效")
         if (
@@ -364,6 +365,22 @@ def _validate_runtime(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
         for value in artifact_digests.values():
             if not isinstance(value, str) or _DIGEST_PATTERN.fullmatch(value) is None:
                 _fail("runtime artifact_sha256 摘要无效")
+        node_definitions = provenance["node_definitions"]
+        valid_node_ids = set(definitions)
+        if (
+            not isinstance(node_definitions, dict)
+            or not set(node_definitions).issubset(valid_node_ids)
+        ):
+            _fail("runtime node_definitions 无效")
+        for entry in node_definitions.values():
+            if (
+                not isinstance(entry, dict)
+                or set(entry) != {"sha256", "redacted"}
+                or not isinstance(entry["sha256"], str)
+                or _DIGEST_PATTERN.fullmatch(entry["sha256"]) is None
+                or not isinstance(entry["redacted"], bool)
+            ):
+                _fail("runtime node_definitions 条目无效")
     return payload
 
 
