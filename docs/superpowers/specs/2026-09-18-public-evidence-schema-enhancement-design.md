@@ -1,6 +1,6 @@
 # T13 设计：可公开验证的 schema / 转换证据增强（候选）
 
-- 日期：2026-09-18。状态：**设计待审（第 3 版：补齐可执行场景清单与运行归属绑定；修正 T1 构造）**；不进入实施。
+- 日期：2026-09-18。状态：**设计待审（第 4 版：冻结批量拒绝见证语义，限定读器只解析失败表达式的依赖子图）**；不进入实施。
 - 依据：改进计划 T13；T12 收口结论；第 2 版（`c2be701`）的审计意见。
 - 边界：不改 kernel/static 的既有身份与历史结果，不冻结 manifest，不做真实模型测量；T14 跨任务另行。
 
@@ -45,38 +45,64 @@
 
 ### 2.1 证据合同 `p1.column_evidence.v1`：两个新事实（**批量签名**，一次调用可请求多个目标）
 
+**批量语义（本版冻结；全部计入 v2 身份）**
+
+- **原子拒绝**：请求中任一目标不可读 → **整次调用拒绝**，不返回任何记录；拒绝记录必须**逐目标**给出被
+  后端明确拒绝的 target 与真实错误码（§2.3）。
+- **全部可读** → 返回逐目标事实记录（与现有工具返回记录元组同构）。
+- **顺序**：返回顺序 = 请求顺序（去重后）；**重复目标**按首次出现去重，不报错；**空列表**拒绝
+  （新码 `TARGETS_EMPTY`）；**批量上限** 8 个目标（新码 `BATCH_TOO_LARGE`）。
+- **计数**：一次调用 = 一次工具尝试（与列表长度无关）；每条返回记录单独登记证据。被拒的批量调用同样
+  消耗一次工具尝试。
+- **模型可见回执**：拒绝回执携带 `refused_targets`（有序、去重）与统一错误码；事实回执携带逐项记录。
+
 | 事实 | 工具 | 来源（只读、运行绑定） | 每项字段 | 每项语义 |
 | --- | --- | --- | --- | --- |
 | `RELATION_SCHEMA_EXPECTATION` | `get_relation_schema_expectation(relation_names: list[str])` | 运行目录内的基线期望快照（§2.4），目标限定在合同 `expectation_relations` | `name`、`expected_data_type`、`expected_nullable`、`ordinal_position`、`baseline_fingerprint` | 关系不在快照 → `known=false` |
 | `DBT_NODE_DEFINITION` | `get_dbt_node_definition(node_ids: list[str])` | 该运行产物（§2.4 优先级），目标限定在合同 `definition_nodes ∩ 运行血缘闭包` | `node_id`、`resource_type`、`declared_columns`、`depends_on`、`compiled_sql_sha256`、`compiled_sql`、`complete` | 节点无编译产物 → `known=false`；文本截断/脱敏 → `complete=false`（禁止用作完整映射输入） |
 
-一次调用返回**逐项**事实记录（与现有工具返回记录元组同构）；批量签名是为了在 8 次工具预算内完成
-验收路径（§4.1 给出逐步清单）。两个事实都不做判别。
+两个事实都不做判别。批量签名是为了在 8 次工具预算内完成验收路径（§4.1 给出逐步清单）。
+**v2 与 v1 不是同一预算条件**：单次调用的信息量更高、语义更复杂（原子拒绝、上限、去重、拒绝目标集），
+任何报告必须同时写明政策身份不同与这一差异，不得以"仍为 8 次调用"表述为条件逐项相同。
 
 ### 2.2 列映射：窄读器 + 显式 UNKNOWN
 
-只读 E2 已暴露的 SQL；按真实 fixture 实测列出的形状支持：
+只读 E2 已暴露的 SQL，且**只解析失败表达式所需的依赖子图**：
+
+- **失败表达式的识别**：以 `node_error` 消息中被点名的表达式（dbt 错误行片段）为唯一候选——按规范化
+  空白后的表达式文本在已暴露 SQL 中定位；无法唯一识别（0 或 >1 个匹配）→ UNKNOWN。识别只用于**选定
+  表达式**，不用于列名相似度映射。
+- **依赖子图**：只解析该表达式两侧引用所在的 CTE/别名链（例如 `customers.customer_id` 与
+  `customer_orders.customer_id` 各自的来源链）；SQL 中与失败表达式无关的其余连接/聚合**不需要**解析，
+  也不影响结论——`customers.sql` 的 `final` 虽是**三方连接**，但失败表达式只涉及其中两侧的依赖子图。
+- 子图之外的部分即使形状不受支持，也不触发 UNKNOWN；**子图内**出现不支持形状 → UNKNOWN。
+
+支持形状（按真实 fixture 实测）：
 
 | 形状 | 例 | 首切片 |
 | --- | --- | --- |
 | 单源别名投影（**改名**） | `id as payment_id`、`user_id as customer_id` | 支持 |
 | 算术/转换表达式 | `amount / 100 as amount` | 支持 |
-| 多 CTE 链 | `customers` → `customer_orders` → `orders` | 支持（按序展开） |
-| 两源等值连接（**限定同名列**） | `orders.order_id = order_payments.order_id` | 支持（按依赖图归因） |
-| 聚合 | `sum(...) as x`、`group by` 键 | 支持 |
-| 其他（窗口、非等值、三源以上、宏生成、来源不可判定） | — | **UNKNOWN** |
+| 多 CTE 链（子图内） | `customer_orders` → `orders` | 支持（按序展开） |
+| 两源等值连接（**限定同名列**） | `customers.customer_id = customer_orders.customer_id` | 支持（按依赖图归因） |
+| 聚合（子图内） | `sum(...) as x`、`group by` 键 | 支持 |
+| 子图内的其他形状（窗口、非等值、宏生成、来源不可判定） | — | **UNKNOWN** |
 
 **UNKNOWN 永不作为任何方向的证据**；`complete=false` 一律按 UNKNOWN。
 
-### 2.3 权限（第 2 版已确认，保留）
+### 2.3 权限与拒绝见证（本版修订批量语义）
 
 - 合同 v2 新增 `expectation_relations`、`definition_nodes`，**均默认空**；实际可读 = **合同白名单 ∩ 运行约束**
   （E1 ∩ 关系白名单；E2 ∩ 由 `parent_map` 计算的失败节点上游闭包）。
 - **v1 合同与 v1 工具面不开放 E1/E2**；越界拒绝用真实码：E1 `RELATION_NOT_ALLOWED`，E2 新增
-  `NODE_NOT_ALLOWED`（不在图中仍 `NODE_NOT_FOUND`）。
-- 缺口由真实拒绝收据支撑。批量签名下，`_receipt_proved`（certification）与 `_insufficiency_matches`
-  （evaluator）的"subject 出现在该次调用参数值中"匹配需**扩展到列表值的元素**（一次拒绝可支撑其中
-  每个被点名的 target）；该扩展带回归，属本任务交付的一部分。
+  `NODE_NOT_ALLOWED`（不在图中仍 `NODE_NOT_FOUND`）；批量形态另加 `TARGETS_EMPTY`、`BATCH_TOO_LARGE`。
+- **拒绝见证只认被明确拒绝的 target（关键修订）**：批量调用原子拒绝，拒绝回执携带
+  `refused_targets`（逐目标、有序、去重）与该次错误码；**缺口 `(kind, subject, tool, code)` 成立的
+  充要条件是 `subject ∈ refused_targets` 且 `code` 等于该次拒绝码**——仅"出现在请求列表里"不构成见证。
+  例：请求 `[可读 A, 禁止 B]` 因 B 被拒 → 只支持 subject=B 的缺口，**绝不支持 A**。
+- **归档承载**：拒绝目标的逐目标信息必须进入归档轨迹（`ToolTraceEvent` 新增可选 `refused_targets`，
+  成功调用为空；v2 身份的一部分），certification 的 `_receipt_proved` 与 evaluator 的
+  `_insufficiency_matches` 相应改为按 `refused_targets` 匹配（带回归；不再使用"参数列表成员"匹配）。
 - 不新增数据库查询：E1 读运行目录快照，E2 读运行产物。
 
 ### 2.4 运行绑定与产物完整性（第 3 版重写）
@@ -113,8 +139,12 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
 - 新场景用新 case id 与新合同版本（`observable_evidence.v2`）；老场景文件与摘要不动。
 - **v2 联合类型（待裁定点 1，已认可方向）**：v1 独立模型与序列化；验收含旧场景 digest 不变、旧证书可
   加载、六策略身份逐字节不变；`ScenarioSpec` 总 schema 摘要变化如实记录。
-- 工具面版本 `p1.evidence_tools.v2` = 六工具 + E1/E2 + `NODE_NOT_ALLOWED` / `EVIDENCE_INTEGRITY_ERROR`；
-  v1 面逐字节不变。影响面：需求 §10.6/§11、MCP 白名单、evaluator gap 词表与 receipt 匹配扩展、身份版本号。
+- 工具面版本 `p1.evidence_tools.v2` = 六工具 + E1/E2 + `NODE_NOT_ALLOWED` / `EVIDENCE_INTEGRITY_ERROR` /
+  `TARGETS_EMPTY` / `BATCH_TOO_LARGE`；**批量语义（原子拒绝、上限 8、去重、顺序、计数）与
+  `ToolTraceEvent.refused_targets` 一并计入 v2 身份**；v1 面逐字节不变。影响面：需求 §10.6/§11、
+  MCP 白名单、evaluator gap 词表与按 `refused_targets` 的匹配、身份版本号。
+- **条件表述纪律**：v2 的批量工具单次信息量更高，报告与文档必须同时写明"政策身份不同"与"单次调用
+  信息量不同"，不得以"工具预算仍为 8 次"表述为与 v1 条件逐项相同。
 
 ## 4. 验收（确定性优先，离线先行）
 
@@ -154,12 +184,15 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
   `get_dbt_lineage` 复核闭包）。模型回合：6 + 关闭批次 1 + 提交 1 = 8，正好在 `request_limit=8` 内；可再
   把 3/4 或 2/5 同回合批处理留出余量。`close_obligation` 不消耗工具预算。
 - 预算约束：工具 8/8、模型请求 8/8、提交重试 2、300 秒，全部在既有预算内，无任何豁免。
+  **条件差异（必须写明）**：v2 的 E1/E2 是批量工具，单次调用信息量高于 v1 的逐目标工具；"仍为 8 次"
+  不表示与 v1 预算条件逐项相同——政策身份与单次信息量都不同（§3）。
 
 - B 变体：同一故障与表面症状；`schema_relations` 保持 `[raw_customers, raw_orders]`（观测仍可读）；
   E1 `expectation_relations = []`、E2 `definition_nodes = []`。终态 `INSUFFICIENT_EVIDENCE`，缺口两条，
   均由**真实拒绝收据**支撑：`(RELATION_SCHEMA_EXPECTATION, raw_customers, get_relation_schema_expectation,
   RELATION_NOT_ALLOWED)`、`(DBT_NODE_DEFINITION, model.jaffle_shop.customers, get_dbt_node_definition,
-  NODE_NOT_ALLOWED)`（subject 取自该次被拒调用的请求列表元素，依赖 §2.3 的匹配扩展）。
+  NODE_NOT_ALLOWED)`（subject 须出现在该次拒绝回执的 `refused_targets` 中，见 §2.3；仅出现在请求列表
+  中不构成见证）。
 
 **对 2（镜像：偏差落在另一侧起源；T2′，既有目标；失败节点同为 customers）**
 
@@ -194,7 +227,12 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
   `complete=false`/UNKNOWN 不作证据。
 - **完整性回归**：E1 摘要不符 → `EVIDENCE_INTEGRITY_ERROR`；E2 来源冲突 → 同码；**旧 manifest + 旧
   compiled 成对换入 → 被归属校验拒绝**；仅 manifest 回退路径的归属同样被校验；替换全局基线后重评不变。
-- **匹配扩展回归**：一次批量拒绝收据可支撑其请求列表内每个 subject 的缺口。
+- **匹配回归（见证精确性）**：**混合权限**——请求 `[可读 A, 禁止 B]` 的拒绝只支撑 subject=B 的缺口，
+  **绝不支撑 A**；一次原子拒绝的 `refused_targets` 与归档轨迹一致；批量语义逐项——空列表 →
+  `TARGETS_EMPTY`、超上限 → `BATCH_TOO_LARGE`、重复目标去重且顺序为首次出现、返回顺序等于请求顺序、
+  一次调用计一次工具尝试。
+- **子图回归**：`customers.sql` 的三方连接中，失败表达式只依赖其中两侧时读器正常工作（不因无关的
+  第三侧触发 UNKNOWN）；子图内不支持形状 → UNKNOWN。
 - **身份回归**：六工具 v1 身份逐字节不变；旧场景 digest 不变；旧证书加载。T05 九条回放不变。
 
 ## 5. 边界
@@ -205,9 +243,10 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
 
 ## 6. 实施切片（设计通过后）
 
-0. 管理平面与前置：T1′ 目标登记 + T2′ 复用确认；两对 dry run 构造验证；合同 v2 校验器；
-   receipt 匹配扩展（certification + evaluator）；
-1. 事实层：E1/E2 批量工具、运行上下文 v2（含 `dbt_invocation_id` 与 `artifacts_sha256`，redaction 之后
+0. 管理平面与前置：T1′ 目标登记 + T2′ 复用确认；两对 dry run 构造验证（含失败表达式在消息中的
+   唯一识别）；合同 v2 校验器；`refused_targets` 归档字段与按此匹配的认证/评测改造；
+1. 事实层：E1/E2 批量工具（原子拒绝、上限/去重/顺序/计数冻结）、运行上下文 v2（含
+   `dbt_invocation_id` 与 `artifacts_sha256`，redaction 之后
    记录）、两个新固定码、六工具 v1 身份回归；
 2. 读器：窄列映射读器 + 形状矩阵单测（含全部反例与 UNKNOWN 负例）；
 3. 场景：两对 A/B 落盘、认证与准入；
