@@ -1080,7 +1080,20 @@ class IncidentLab:
                 or not isinstance(resource_type, str)
             ):
                 continue
-            bridge.setdefault(name, {"identity": identity, "resource_type": resource_type})
+            seen = bridge.get(name)
+            if seen is not None:
+                # Two nodes claiming one name cannot be told apart by name, and
+                # silently keeping the first would bind the bridge to whichever
+                # package happened to be read first (audit observation on the
+                # identity bridge): refuse instead.
+                if seen["identity"] != identity:
+                    raise self._clean(
+                        IncidentExecutionError(
+                            f"关系名在 manifest 中不唯一：{name}（{seen['identity']} / {identity}）"
+                        )
+                    )
+                continue
+            bridge[name] = {"identity": identity, "resource_type": resource_type}
         return bridge
 
     def _write_runtime_v2(

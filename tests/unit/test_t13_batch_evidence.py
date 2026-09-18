@@ -1344,3 +1344,38 @@ def test_the_build_writes_the_bridge_into_the_snapshot(tmp_path: Path) -> None:
     assert entries["raw_orders"]["relation_identity"] == (
         "data_incident_gym.analytics.raw_orders"
     )
+
+
+def test_two_nodes_claiming_one_relation_name_are_refused(tmp_path: Path) -> None:
+    """Audit observation: with a name-keyed bridge, a second node claiming the
+    same name must not silently lose to whichever was read first."""
+
+    _write_trusted_baseline(tmp_path)
+    spec = _v2_spec(expectation=["raw_customers"])
+    _run_root(
+        tmp_path,
+        nodes={
+            "seed.jaffle_shop.raw_customers": {
+                "depends_on": [],
+                "manifest_text": None,
+                "resource_type": "seed",
+                "name": "raw_customers",
+                "relation_name": '"data_incident_gym"."analytics"."raw_customers"',
+            },
+            "seed.other_package.raw_customers": {
+                "depends_on": [],
+                "manifest_text": None,
+                "resource_type": "seed",
+                "name": "raw_customers",
+                "relation_name": '"other_schema"."analytics"."raw_customers"',
+            },
+        },
+        parent_map={},
+        results=[],
+        compiled_files={},
+    )
+
+    with pytest.raises(IncidentExecutionError) as error:
+        _lab(tmp_path)._write_evidence_baseline(tmp_path, spec)
+
+    assert "关系名在 manifest 中不唯一" in str(error.value)

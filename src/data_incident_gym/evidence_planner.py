@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from time import monotonic
 from typing import Any, Literal
@@ -63,7 +63,11 @@ from data_incident_gym.diagnostic_agent import (
     PolicySurface,
     _sha256_json,
 )
-from data_incident_gym.evidence import EvidenceRecord
+from data_incident_gym.evidence import EVIDENCE_BATCH_TOOLS, EvidenceRecord
+from data_incident_gym.fixed_rule import (
+    EVIDENCE_TOOLS_V1_VERSION,
+    EVIDENCE_TOOLS_V2_VERSION,
+)
 from data_incident_gym.strategy_adapter import (
     FinalSubmission,
     StrategySession,
@@ -128,6 +132,35 @@ TOOL_OBLIGATIONS: dict[str, ToolObligationSpec] = {
     ),
 }
 
+#: The v2 surface (T13): the six tools plus the two batch facts. Both take the
+#: frozen comma-joined request encoding, so they stay string-argument tools.
+V2_TOOL_OBLIGATIONS: dict[str, ToolObligationSpec] = {
+    **TOOL_OBLIGATIONS,
+    "get_relation_schema_expectation": ToolObligationSpec(
+        "RELATION_SCHEMA_EXPECTATION", "relation_names", ("relation_names",)
+    ),
+    "get_dbt_node_definition": ToolObligationSpec(
+        "DBT_NODE_DEFINITION", "node_ids", ("node_ids",)
+    ),
+}
+
+
+def tool_obligations_for_allowlist(
+    allowlist: Collection[str],
+) -> dict[str, ToolObligationSpec]:
+    """The obligation contract for a granted tool surface.
+
+    The table follows what the session actually grants, so a v1 run cannot be
+    handed a step for a tool it could never call (and its identity stays the
+    frozen six-tool one).
+    """
+
+    return (
+        V2_TOOL_OBLIGATIONS
+        if set(EVIDENCE_BATCH_TOOLS).issubset(set(allowlist))
+        else TOOL_OBLIGATIONS
+    )
+
 
 def canonical_arguments(arguments: dict[str, Any]) -> str:
     """Canonical JSON of the arguments: sorted keys, no whitespace.
@@ -153,8 +186,10 @@ def _digest(payload: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def obligation_tool_schemas() -> list[dict[str, Any]]:
-    """The six tools as the planner declares them to the model.
+def obligation_tool_schemas(
+    obligations: dict[str, ToolObligationSpec] | None = None,
+) -> list[dict[str, Any]]:
+    """The tools as the planner declares them to the model.
 
     The schema binds argument **names**, their types, the required set and the
     closed-object rule — a name list alone would leave a changed argument set
@@ -171,7 +206,7 @@ def obligation_tool_schemas() -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
         }
-        for tool, spec in sorted(TOOL_OBLIGATIONS.items())
+        for tool, spec in sorted((obligations or TOOL_OBLIGATIONS).items())
     ]
 
 
@@ -372,7 +407,9 @@ def planner_model_tool_payload() -> dict[str, Any]:
     }
 
 
-def planner_controller_payload() -> dict[str, Any]:
+def planner_controller_payload(
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> dict[str, Any]:
     """Everything the planner's controller protocol promises, in one payload.
 
     Any change here changes the policy identity digest, so the plan contract
@@ -385,7 +422,10 @@ def planner_controller_payload() -> dict[str, Any]:
     identity covers what the model is actually offered.
     """
 
-    return {
+    obligations = (
+        V2_TOOL_OBLIGATIONS if surface == EVIDENCE_TOOLS_V2_VERSION else TOOL_OBLIGATIONS
+    )
+    payload: dict[str, Any] = {
         "protocol_version": PLANNER_PROTOCOL_VERSION,
         "model_tools": planner_model_tool_payload(),
         "tools": {
@@ -394,9 +434,9 @@ def planner_controller_payload() -> dict[str, Any]:
                 "subject_argument": spec.subject_argument,
                 "arguments": list(spec.arguments),
             }
-            for tool, spec in sorted(TOOL_OBLIGATIONS.items())
+            for tool, spec in sorted(obligations.items())
         },
-        "tool_schema_sha256": _digest(obligation_tool_schemas()),
+        "tool_schema_sha256": _digest(obligation_tool_schemas(obligations)),
         "budget": {
             "model_request_limit": MODEL_REQUEST_LIMIT,
             "tool_call_limit": TOOL_CALL_LIMIT,
@@ -412,9 +452,14 @@ def planner_controller_payload() -> dict[str, Any]:
         "obligation_schema": EvidenceObligation.model_json_schema(),
         "verdict_schema": PlanVerdict.model_json_schema(),
     }
+    if surface != EVIDENCE_TOOLS_V1_VERSION:
+        payload["tool_surface"] = surface
+    return payload
 
 
-def evidence_planner_policy_identity() -> PolicyIdentity:
+def evidence_planner_policy_identity(
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> PolicyIdentity:
     """The planner's policy identity: prompt, controller payload and tool schema.
 
     The planner is a *model* strategy, so its controller surface is bound here
@@ -429,8 +474,12 @@ def evidence_planner_policy_identity() -> PolicyIdentity:
         strategy_prompt_version=PLANNER_PROMPT_VERSION,
         strategy_prompt_sha256=hashlib.sha256(PLANNER_PROMPT.encode("utf-8")).hexdigest(),
         controller_protocol_version=PLANNER_PROTOCOL_VERSION,
-        controller_protocol_sha256=_digest(planner_controller_payload()),
-        tool_schema_sha256=_digest(obligation_tool_schemas()),
+        controller_protocol_sha256=_digest(planner_controller_payload(surface)),
+        tool_schema_sha256=_digest(
+            obligation_tool_schemas(
+                V2_TOOL_OBLIGATIONS if surface == EVIDENCE_TOOLS_V2_VERSION else None
+            )
+        ),
     )
 
 
@@ -712,11 +761,14 @@ class PlannerController:
         if code is not None:
             return code, detail
         context = self._session.task_context()
-        if tool_name not in TOOL_OBLIGATIONS:
+        obligations = tool_obligations_for_allowlist(
+            self._session.task_context().tool_allowlist
+        )
+        if tool_name not in obligations:
             return "PLAN_TOOL_NOT_ALLOWLISTED", f"unknown tool: {tool_name}"
         if tool_name not in set(context.tool_allowlist):
             return "PLAN_TOOL_NOT_ALLOWLISTED", f"not granted: {tool_name}"
-        expected = TOOL_OBLIGATIONS[tool_name].arguments
+        expected = obligations[tool_name].arguments
         if set(arguments) != set(expected) or any(
             not isinstance(arguments[name], str) for name in expected
         ):
@@ -785,7 +837,9 @@ class PlannerController:
         existing = self._obligations.get(obligation_id)
         if existing is not None:
             return existing
-        spec = TOOL_OBLIGATIONS[tool_name]
+        spec = tool_obligations_for_allowlist(
+            self._session.task_context().tool_allowlist
+        )[tool_name]
         obligation = _Obligation(
             obligation_id=obligation_id,
             tool_name=tool_name,
@@ -869,6 +923,8 @@ __all__ = [
     "PlanVerdict",
     "PlannerController",
     "TOOL_OBLIGATIONS",
+    "V2_TOOL_OBLIGATIONS",
+    "tool_obligations_for_allowlist",
     "canonical_arguments",
     "evidence_planner_policy_identity",
     "obligation_id_for",

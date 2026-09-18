@@ -66,11 +66,13 @@ from data_incident_gym.evidence_planner import (
     register_planner_tools,
 )
 from data_incident_gym.evidence_tools import EvidenceTools
+from data_incident_gym.fixed_rule import tool_surface_for_context
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 from data_incident_gym.strategy_adapter import (
     FinalSubmission,
     StrategySession,
     builtin_declaration,
+    tool_allowlist_for_context,
 )
 
 PLANNER_STRATEGY = DiagnosticStrategy.EVIDENCE_PLANNER
@@ -132,7 +134,9 @@ class EvidencePlannerRunner:
         self._model = model
         self._model_identity = model_identity
         self._owned_model_client = owned_model_client
-        self._policy_identity = evidence_planner_policy_identity()
+        self._policy_identity = evidence_planner_policy_identity(
+            tool_surface_for_context(context)
+        )
         self._accepted: Diagnosis | None = None
 
     @classmethod
@@ -182,6 +186,7 @@ class EvidencePlannerRunner:
                     model_name=model_identity.model,
                     deterministic=False,
                 ),
+                allowlist=tool_allowlist_for_context(context),
             )
         return cls(
             run_id=run_id,

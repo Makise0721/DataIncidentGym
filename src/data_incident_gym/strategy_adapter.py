@@ -40,7 +40,12 @@ from data_incident_gym.diagnosis import (
     TargetRefusal,
     UnresolvedEvidence,
 )
-from data_incident_gym.evidence import EvidenceRecord, EvidenceToolError, safe_error_code
+from data_incident_gym.evidence import (
+    EVIDENCE_BATCH_TOOLS,
+    EvidenceRecord,
+    EvidenceToolError,
+    safe_error_code,
+)
 from data_incident_gym.run_context import IncidentBrief, ObservableRunContext
 
 STRATEGY_PROTOCOL_VERSION = "p1.strategy_adapter.v1"
@@ -55,6 +60,20 @@ PROTOCOL_TOOL_ALLOWLIST = frozenset(
         "get_relation_history",
     }
 )
+
+#: The v2 tool surface: the six read-only tools plus the two T13 batch facts.
+EVIDENCE_V2_TOOL_ALLOWLIST = PROTOCOL_TOOL_ALLOWLIST | frozenset(EVIDENCE_BATCH_TOOLS)
+
+
+def tool_allowlist_for_context(context: ObservableRunContext) -> frozenset[str]:
+    """The tool surface one run's context grants.
+
+    Keeping the choice here means a v1 run can never be handed the v2 tools
+    (its identity stays frozen), while a v2 run's session can serve the facts
+    its contract requires.
+    """
+
+    return EVIDENCE_V2_TOOL_ALLOWLIST if context.is_v2 else PROTOCOL_TOOL_ALLOWLIST
 
 #: Error codes the protocol itself emits. A refused tool call keeps the
 #: backend's real error code (e.g. ``RELATION_NOT_ALLOWED``) instead of one of
@@ -657,8 +676,10 @@ class ProtocolTools:
 __all__ = [
     "BUILTIN_FRAMEWORK",
     "PROTOCOL_ERROR_CODES",
+    "EVIDENCE_V2_TOOL_ALLOWLIST",
     "PROTOCOL_TOOL_ALLOWLIST",
     "STRATEGY_PROTOCOL_VERSION",
+    "tool_allowlist_for_context",
     "CancellationReceipt",
     "FinalSubmission",
     "ProtocolBudget",

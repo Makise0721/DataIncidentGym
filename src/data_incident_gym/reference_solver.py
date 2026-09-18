@@ -41,16 +41,21 @@ from data_incident_gym.evidence import (
 from data_incident_gym.fixed_rule import (
     BASE_PROMPT,
     BASE_PROMPT_VERSION,
+    EVIDENCE_TOOLS_V1_VERSION,
     FIXED_RULE_TOOL_LIMIT,
-    FIXED_RULE_TOOL_NAMES,
     FixedRuleRunner,
     _digest,
     _relation_names,
+    _surface_payload,
+    tool_names_for_surface,
+    tool_surface_for_context,
 )
 
 REFERENCE_ANALYST_VERSION = "p1.reference-analyst.v1"
 REFERENCE_ANALYST_TOOL_LIMIT = FIXED_RULE_TOOL_LIMIT
-REFERENCE_ANALYST_TOOL_NAMES = FIXED_RULE_TOOL_NAMES
+#: The v1 names stay exported for the frozen identity readers; a run's own
+#: surface comes from its context (v2 adds the two batch facts).
+REFERENCE_ANALYST_TOOL_NAMES = tool_names_for_surface(EVIDENCE_TOOLS_V1_VERSION)
 
 _STRING_TYPES = frozenset({"text", "character varying", "character", "varchar", "string"})
 _KEY_COLUMN_PATTERN = re.compile(r"^[a-z0-9]*(?:_[a-z0-9]+)*_?id$", re.IGNORECASE)
@@ -61,7 +66,10 @@ _TYPE_MISMATCH_PATTERN = re.compile(
 _IDENTIFIER_PATTERN = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 
-def reference_analyst_policy_identity() -> PolicyIdentity:
+def reference_analyst_policy_identity(
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> PolicyIdentity:
+    tools = tool_names_for_surface(surface)
     return PolicyIdentity(
         strategy=DiagnosticStrategy.REFERENCE_ANALYST,
         base_prompt_version=BASE_PROMPT_VERSION,
@@ -78,10 +86,11 @@ def reference_analyst_policy_identity() -> PolicyIdentity:
             {
                 "policy": REFERENCE_ANALYST_VERSION,
                 "tool_limit": REFERENCE_ANALYST_TOOL_LIMIT,
-                "tools": REFERENCE_ANALYST_TOOL_NAMES,
+                "tools": tools,
+                **_surface_payload(surface),
             }
         ),
-        tool_schema_sha256=_digest(REFERENCE_ANALYST_TOOL_NAMES),
+        tool_schema_sha256=_digest(tools),
     )
 
 
@@ -97,7 +106,7 @@ class ReferenceAnalystRunner(FixedRuleRunner):
         return "reference-analyst"
 
     def _build_policy_identity(self) -> PolicyIdentity:
-        return reference_analyst_policy_identity()
+        return reference_analyst_policy_identity(tool_surface_for_context(self._context))
 
     # ------------------------------------------------------------------
     # Evidence helpers

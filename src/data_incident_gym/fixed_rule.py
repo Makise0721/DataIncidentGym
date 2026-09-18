@@ -44,6 +44,7 @@ from data_incident_gym.strategy_adapter import (
     FinalSubmission,
     StrategySession,
     builtin_declaration,
+    tool_allowlist_for_context,
 )
 
 FIXED_RULE_VERSION = "p1.fixed-rule.v1"
@@ -56,6 +57,38 @@ FIXED_RULE_TOOL_NAMES = (
     "get_relation_history",
 )
 FIXED_RULE_TOOL_LIMIT = 8
+#: The v2 tool surface (T13): the six read-only tools plus the two batch facts.
+#: A run's surface follows its run context — v1 runs keep the six tools and
+#: their identity byte-for-byte; v2 runs grant the two additions.
+EVIDENCE_TOOLS_V1_VERSION = "p1.evidence_tools.v1"
+EVIDENCE_TOOLS_V2_VERSION = "p1.evidence_tools.v2"
+EVIDENCE_V2_TOOL_NAMES = FIXED_RULE_TOOL_NAMES + (
+    "get_relation_schema_expectation",
+    "get_dbt_node_definition",
+)
+
+
+def tool_surface_for_context(context: ObservableRunContext) -> str:
+    """The evidence-tool surface version this run's context grants."""
+
+    return EVIDENCE_TOOLS_V2_VERSION if context.is_v2 else EVIDENCE_TOOLS_V1_VERSION
+
+
+def tool_names_for_surface(surface: str) -> tuple[str, ...]:
+    return EVIDENCE_V2_TOOL_NAMES if surface == EVIDENCE_TOOLS_V2_VERSION else (
+        FIXED_RULE_TOOL_NAMES
+    )
+
+
+def _surface_payload(surface: str) -> dict[str, object]:
+    """Extra identity keys for a non-v1 surface.
+
+    The v1 payloads must stay byte-identical (frozen identities), so the
+    surface is named only when it is not v1 — and naming it is what keeps two
+    tool surfaces from ever sharing one identity.
+    """
+
+    return {} if surface == EVIDENCE_TOOLS_V1_VERSION else {"tool_surface": surface}
 
 
 def _canonical_json(value: object) -> str:
@@ -117,7 +150,10 @@ def _named_relation(context: ObservableRunContext, token: str) -> str | None:
     )
 
 
-def fixed_rule_policy_identity() -> PolicyIdentity:
+def fixed_rule_policy_identity(
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> PolicyIdentity:
+    tools = tool_names_for_surface(surface)
     return PolicyIdentity(
         strategy=DiagnosticStrategy.FIXED_RULE,
         base_prompt_version=BASE_PROMPT_VERSION,
@@ -127,6 +163,7 @@ def fixed_rule_policy_identity() -> PolicyIdentity:
             {
                 "policy": FIXED_RULE_VERSION,
                 "rule": "public evidence, bounded calls, fail closed",
+                **_surface_payload(surface),
             }
         ),
         controller_protocol_version=FIXED_RULE_VERSION,
@@ -134,10 +171,11 @@ def fixed_rule_policy_identity() -> PolicyIdentity:
             {
                 "policy": FIXED_RULE_VERSION,
                 "tool_limit": FIXED_RULE_TOOL_LIMIT,
-                "tools": FIXED_RULE_TOOL_NAMES,
+                "tools": tools,
+                **_surface_payload(surface),
             }
         ),
-        tool_schema_sha256=_digest(FIXED_RULE_TOOL_NAMES),
+        tool_schema_sha256=_digest(tools),
     )
 
 
@@ -211,6 +249,7 @@ class FixedRuleRunner:
             declaration=builtin_declaration(
                 model_provider="none", model_name="fixed-rule", deterministic=True
             ),
+            allowlist=tool_allowlist_for_context(context),
         )
         return cls(
             run_id=run_id,
