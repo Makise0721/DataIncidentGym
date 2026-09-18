@@ -159,15 +159,16 @@ _UNSUPPORTED_PATTERNS = (
 )
 _TOKENS = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+\.\d+|\d+|'[^']*'|[(),.*=<>!+-/%|]")
 _ALIAS_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_IDENTIFIER_TEXT = r'(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)'
+_IDENTIFIER_TEXT = r'(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)'
 _QUALIFIED_TEXT = rf"{_IDENTIFIER_TEXT}(?:\s*\.\s*{_IDENTIFIER_TEXT})*"
+#: One identifier segment; group 1 is the text inside quotes (doubled quotes are
+#: an escaped quote), group 2 a bare identifier.
+_IDENTIFIER_PART = re.compile(r'\s*(?:"((?:[^"]|"")*)"|([A-Za-z_][A-Za-z0-9_$]*))')
+#: A segment that needs no quotes when rendered.
+_BARE_IDENTIFIER = re.compile(r"[a-z_][a-z0-9_$]*")
 #: One FROM/JOIN entry: a relation, optionally aliased (``as`` optional).
 _SOURCE_ENTRY_PATTERN = re.compile(
     rf"(?is)^\s*({_QUALIFIED_TEXT})(?:\s+as\s+({_IDENTIFIER_TEXT})|\s+({_IDENTIFIER_TEXT}))?\s*$"
-)
-#: One column reference: an optional qualifier and a column.
-_REFERENCE_PATTERN = re.compile(
-    rf"(?is)^\s*(?:({_IDENTIFIER_TEXT})\s*\.\s*)?({_IDENTIFIER_TEXT})\s*$"
 )
 #: Clause keywords that may follow the FROM/JOIN part of one select.
 _SECTION_PATTERN = re.compile(
@@ -224,15 +225,61 @@ def normalize_sql_text(text: str) -> str:
     return re.sub(r"\s+", " ", _strip_comments(text)).strip().lower()
 
 
-def _unquote(identifier: str) -> str:
-    parts = [part.strip().strip('"') for part in identifier.split(".")]
-    return ".".join(part for part in parts if part)
-
-
 def _last_identifier(identifier: str) -> str:
     parts = [part.strip().strip('"') for part in identifier.split(".")]
     parts = [part for part in parts if part]
     return parts[-1] if parts else ""
+
+
+def _fold_identifier(match: re.Match[str]) -> str:
+    """PostgreSQL identifier folding: bare names lowercase, quoted ones exact."""
+
+    quoted = match.group(1)
+    if quoted is None:
+        return match.group(2).lower()
+    return quoted.replace('""', '"')
+
+
+def _relation_parts(reference: str) -> tuple[str, ...] | None:
+    """Identifier segments of one relation reference, or None when malformed.
+
+    Quoting is significant. A quoted segment keeps its exact text and a dot
+    inside quotes is part of the name, so ``analytics."raw.customers"`` is a
+    relation ``raw.customers`` in schema ``analytics`` — not three segments —
+    and ``analytics."STG_CUSTOMERS"`` is not ``analytics.stg_customers``. Bar
+    segments fold to lowercase, exactly as PostgreSQL resolves them.
+    """
+
+    text = reference.strip()
+    if not text:
+        return None
+    parts: list[str] = []
+    index = 0
+    while True:
+        match = _IDENTIFIER_PART.match(text, index)
+        if match is None:
+            return None
+        parts.append(_fold_identifier(match))
+        index = match.end()
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
+        if text[index] != ".":
+            return None
+        index += 1
+    return tuple(parts)
+
+
+def _quote_part(part: str) -> str:
+    return part if _BARE_IDENTIFIER.fullmatch(part) else '"' + part.replace('"', '""') + '"'
+
+
+def _render_identity(parts: tuple[str, ...]) -> str:
+    """Canonical text of one identity: segments re-quoted where needed, so
+    distinct identifiers never render alike."""
+
+    return ".".join(_quote_part(part) for part in parts)
 
 
 def _split_top_level(text: str, separator: str) -> list[str]:
@@ -319,7 +366,7 @@ def _split_keyword(text: str, keyword: str) -> tuple[str, str] | None:
 @dataclass(frozen=True)
 class _Select:
     projections: tuple[tuple[str, str | None], ...]
-    sources: dict[str, str]
+    sources: dict[str, tuple[str, ...]]
     joins: tuple[tuple[str, str], ...] = ()
     groups: tuple[str, ...] = ()
 
@@ -339,11 +386,11 @@ def _parse_query(sql: str) -> _Query | None:
     while True:
         while index < len(text) and text[index].isspace():
             index += 1
-        name_match = re.match(_IDENTIFIER_TEXT, text[index:])
+        name_match = _IDENTIFIER_PART.match(text, index)
         if name_match is None:
             return None
-        name = name_match.group(0).lower()
-        index += name_match.end()
+        name = _fold_identifier(name_match)
+        index = name_match.end()
         while index < len(text) and text[index].isspace():
             index += 1
         if not text.startswith("as", index):
@@ -372,11 +419,11 @@ def _parse_query(sql: str) -> _Query | None:
     return _Query(ctes, body)
 
 
-def _source_entry(text: str) -> tuple[str, str] | None:
-    """``(alias, relation)`` of one FROM/JOIN entry, or None when unsupported.
+def _source_entry(text: str) -> tuple[str, tuple[str, ...]] | None:
+    """``(alias, relation segments)`` of one FROM/JOIN entry, or None.
 
     The alias is the SQL-visible name: the written alias, or the relation's last
-    identifier. A written alias *replaces* the relation name, so the scope never
+    segment. A written alias *replaces* the relation name, so the scope never
     keeps the original name as a second way in. The entry must be exactly a
     relation with an optional alias — trailing text (a comma-joined source, a
     ``union`` branch, an unparsed keyword) refuses the whole entry.
@@ -385,12 +432,22 @@ def _source_entry(text: str) -> tuple[str, str] | None:
     match = _SOURCE_ENTRY_PATTERN.match(text)
     if match is None:
         return None
-    relation = _unquote(match.group(1))
-    written = match.group(2) or match.group(3)
-    alias = (written or _last_identifier(relation)).strip().strip('"')
-    if not _ALIAS_PATTERN.match(alias):
+    parts = _relation_parts(match.group(1))
+    if parts is None:
         return None
-    return alias.lower(), relation
+    written = match.group(2) or match.group(3)
+    if written is None:
+        alias = parts[-1]
+    else:
+        written_parts = _relation_parts(written)
+        if written_parts is None or len(written_parts) != 1:
+            return None
+        alias = written_parts[0]
+    if not alias:
+        return None
+    # A quoted alias or quoted relation keeps its exact text, so the scope key
+    # never matches a bare (lowercased) qualifier — as in PostgreSQL.
+    return alias, parts
 
 
 def _scan_sections(text: str) -> list[tuple[str, str]]:
@@ -530,16 +587,18 @@ def _split_reference(reference: str) -> tuple[str | None, str]:
 
 
 def _single_reference(text: str) -> tuple[str | None, str] | None:
-    """``(qualifier, column)`` when the text is exactly one column reference."""
+    """``(qualifier, column)`` of one bare column reference, or None.
 
-    match = _REFERENCE_PATTERN.match(text)
-    if match is None:
+    Quoted identifiers are refused: columns are matched lowercased here, and
+    pretending ``"ID"`` were ``id`` would attribute the wrong column.
+    """
+
+    if '"' in text:
         return None
-    qualifier = match.group(1)
-    return (
-        None if qualifier is None else qualifier.strip().strip('"').lower(),
-        match.group(2).strip().strip('"').lower(),
-    )
+    parts = _relation_parts(text)
+    if parts is None or len(parts) > 2:
+        return None
+    return (parts[0] if len(parts) == 2 else None), parts[-1]
 
 
 #: Characters that extend a reference: a hit touching one of them is part of a
@@ -673,46 +732,40 @@ def _expression_references(expression: str) -> list[str] | None:
     return list(dict.fromkeys(references))
 
 
-def _relation_identity(reference: str) -> str:
-    """Full identity of one relation reference: quoting and case only.
-
-    Names are never shortened to their last identifier. ``analytics.raw_orders``
-    and ``other.analytics.raw_orders`` are different relations, and matching on
-    the last identifier alone would resolve a definition from another schema.
-    Equivalent spellings of one relation (a two-part name and the three-part
-    name of the same table) must be established by the caller from public run
-    metadata, for example by listing both as keys of the same definition.
-    """
-
-    return _unquote(reference).lower()
+def _identity_of(reference: str, *, what: str) -> tuple[str, ...]:
+    parts = _relation_parts(reference)
+    if parts is None:
+        raise ValueError(f"{what} is not a relation reference: {reference!r}")
+    return parts
 
 
 def _index_definitions(
     upstream: Mapping[str, UpstreamDefinition],
-) -> dict[str, UpstreamDefinition]:
-    """Index definitions by full relation identity.
+) -> dict[tuple[str, ...], UpstreamDefinition]:
+    """Index definitions by full relation identity (segments, not text).
 
-    Two keys with the same identity and different definitions are a caller
-    error: the reader refuses to choose between them instead of silently
-    picking one.
+    The identity keeps its segments and its quoting: ``analytics.raw_orders``,
+    ``analytics."raw.orders"`` and ``other.analytics.raw_orders`` are three
+    different relations. Two keys with the same identity and different
+    definitions are a caller error: the reader refuses to choose between them
+    instead of silently picking one.
     """
 
-    index: dict[str, UpstreamDefinition] = {}
+    index: dict[tuple[str, ...], UpstreamDefinition] = {}
     for key, definition in upstream.items():
-        identity = _relation_identity(key)
-        if not identity:
-            raise ValueError("upstream definition key has no relation name")
+        identity = _identity_of(key, what="upstream definition key")
         if identity in index and index[identity] != definition:
-            raise ValueError(f"duplicate upstream definition for relation {identity!r}")
+            raise ValueError(
+                f"duplicate upstream definition for relation {_render_identity(identity)!r}"
+            )
         index[identity] = definition
     return index
 
 
-def _index_terminals(relations: Collection[str]) -> frozenset[str]:
-    identities = {_relation_identity(relation) for relation in relations}
-    if "" in identities:
-        raise ValueError("terminal relation name is empty")
-    return frozenset(identities)
+def _index_terminals(relations: Collection[str]) -> frozenset[tuple[str, ...]]:
+    return frozenset(
+        _identity_of(relation, what="terminal relation") for relation in relations
+    )
 
 
 class _Resolver:
@@ -769,44 +822,44 @@ class _Resolver:
         *,
         column: str,
         alias: str,
-        source: str,
+        source: tuple[str, ...],
         ctes: Mapping[str, str],
         chain: tuple[str, ...],
         depth: int,
     ) -> tuple[ColumnReference, ...] | str:
-        identity = _relation_identity(source)
-        if "." not in identity and identity in ctes:
-            inner = _parse_select(ctes[identity])
+        rendered = _render_identity(source)
+        if len(source) == 1 and source[0] in ctes:
+            inner = _parse_select(ctes[source[0]])
             if inner is None:
                 # `select *` chains and single-source CTEs are the supported
                 # multi-CTE shapes; anything else is unsupported.
-                inner = _passthrough_select(ctes[identity])
+                inner = _passthrough_select(ctes[source[0]])
                 if inner is None:
                     return "UNSUPPORTED_SELECT"
             return self._project(
                 column=column,
                 select=inner,
                 ctes=ctes,
-                chain=chain + (identity,),
+                chain=chain + (source[0],),
                 depth=depth,
             )
-        definition = self._upstream.get(identity)
+        definition = self._upstream.get(source)
         if definition is None:
-            if identity not in self._terminals:
+            if source not in self._terminals:
                 # Not a declared seed/source: it may be a model whose
                 # definition is missing, so it can never be an origin.
                 return "DEFINITION_MISSING"
             return (
                 ColumnReference(
                     reference=f"{alias}.{column}",
-                    relation=identity,
+                    relation=rendered,
                     column=column,
                     chain=chain,
                 ),
             )
         if not definition.complete:
             return "DEFINITION_INCOMPLETE"
-        query = self._query_for(identity, definition.sql)
+        query = self._query_for(rendered, definition.sql)
         if query is None:
             return "UNSUPPORTED_SELECT"
         select = _parse_select(query.body)
@@ -818,7 +871,7 @@ class _Resolver:
             column=column,
             select=select,
             ctes=query.ctes,
-            chain=chain + (identity,),
+            chain=chain + (rendered,),
             depth=depth + 1,
         )
 

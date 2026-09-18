@@ -431,6 +431,65 @@ def test_a_definition_from_another_relation_identity_is_not_used(reference: str)
     assert result.references == ()
 
 
+@pytest.mark.parametrize(
+    ("reference", "declared"),
+    [
+        pytest.param('analytics."STG_CUSTOMERS"', "analytics.stg_customers", id="quoted-case"),
+        pytest.param('analytics."raw.customers"', "analytics.raw.customers", id="dot-in-quotes"),
+    ],
+)
+def test_a_quoted_identifier_is_not_the_same_relation(reference: str, declared: str) -> None:
+    """Quoting is significant: a quoted name keeps its case, and a dot inside
+    quotes belongs to the name. Neither may resolve through the declaration of a
+    differently-quoted relation."""
+
+    result = map_failing_expression(
+        f"select customer_id from {reference}",
+        f"LINE 2: select customer_id from {reference}",
+        upstream={},
+        terminal_relations={declared},
+    )
+
+    assert result.status == "UNKNOWN"
+    assert result.reason == "DEFINITION_MISSING"
+    assert result.references == ()
+
+
+def test_a_quoted_identity_matches_and_is_reported_as_written() -> None:
+    result = map_failing_expression(
+        'select customer_id from analytics."raw.customers"',
+        'LINE 2: select customer_id from analytics."raw.customers"',
+        upstream={},
+        terminal_relations={'analytics."raw.customers"'},
+    )
+
+    assert result.status == "RESOLVED"
+    assert _origins(result) == [('analytics."raw.customers"', "customer_id")]
+
+
+def test_an_escaped_quote_inside_an_identifier_is_kept() -> None:
+    result = map_failing_expression(
+        'select customer_id from analytics."weird""name"',
+        'LINE 2: select customer_id from analytics."weird""name"',
+        upstream={},
+        terminal_relations={'analytics."weird""name"'},
+    )
+
+    assert result.status == "RESOLVED"
+    assert _origins(result) == [('analytics."weird""name"', "customer_id")]
+
+
+def test_a_quoted_column_reference_is_refused() -> None:
+    result = map_failing_expression(
+        'select * from raw_orders a join raw_customers b on a."ID" = b.id',
+        'LINE 2:     on a."ID" = b.id',
+        terminal_relations=BARE_TERMINALS,
+    )
+
+    assert result.status == "UNKNOWN"
+    assert result.reason == "UNSUPPORTED_EXPRESSION"
+
+
 def test_two_spellings_of_one_relation_can_be_declared() -> None:
     """Equivalent spellings are established by the caller (public metadata), by
     listing both as keys of the same definition — and the origin is reported

@@ -106,10 +106,14 @@
   （`UNSUPPORTED_SELECT`），不允许"保留可识别前缀、丢弃其余"。
 - **作用域按 SQL 语义**：书写别名**取代**关系名——`from raw_orders as raw_customers` 之下限定符
   `raw_customers` 指向 `raw_orders`，原关系名不再是合法限定符；不支持的别名形态一律 UNKNOWN。
-- **关系身份 = 完整名**（仅去引号、统一大小写）：定义与终止关系都按完整名匹配，**绝不退化为末段名**——
-  `analytics.raw_orders` 与 `other.analytics.raw_orders` 是不同关系，按末段匹配会取到别的 schema 的定义。
-  同一关系的两种写法（二段/三段）须由调用方按公开运行元数据**显式**建立（例如同一份定义下并列两个键）；
-  无法证明同一来源 → UNKNOWN。起源按 SQL 中实际使用的完整身份上报。
+- **关系身份 = 完整分段 + 引用语义**：按分段匹配，**绝不退化为末段名**，也不做"去引号 + 统一小写"的
+  文本归一——未引用的标识符折叠为小写，**引号内保持原样**，且**引号内的点属于名称本身**
+  （`analytics."raw.customers"` 是"schema `analytics` 下名为 `raw.customers` 的关系"，不是三段名）。
+  因此 `analytics."STG_CUSTOMERS"` ≠ `analytics.stg_customers`，`analytics.raw_orders` ≠
+  `other.analytics.raw_orders`。同一关系的两种写法（二段/三段）须由调用方按公开运行元数据**显式**建立
+  （例如同一份定义下并列两个键）；无法证明同一来源 → UNKNOWN。起源按 SQL 中实际使用的身份上报，渲染时
+  对需要引号的段重新加引号，保证不同身份不会渲染成同一文本。带引号的**列**引用（如 `a."ID"`）属未支持
+  形态 → UNKNOWN（列名按小写匹配，假装 `"ID"` 是 `id` 会归因到错误的列）。
 - **终止条件**：只有公开节点类型判定为 seed/source 的关系可以终止追溯（调用方显式声明，按完整身份）；
   其余关系缺定义 → UNKNOWN（新固定码 `DEFINITION_MISSING`），不得当作源列。定义与终止声明同时存在时
   以定义为准。

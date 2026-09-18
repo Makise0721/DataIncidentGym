@@ -1,8 +1,8 @@
 # T13 切片 2 报告：窄列映射读器与形状矩阵
 
 - 日期：2026-09-18。范围：设计 §6 切片 2 —— 窄列映射读器（`column_mapping.py`）与形状矩阵回归。
-- 本版含**两轮审计修复**：第一轮（别名作用域、不支持的 SQL 被部分解析、缺定义被当成源关系）、
-  第二轮（关系身份退化为末段名、未知函数被当作列）。
+- 本版含**三轮审计修复**：第一轮（别名作用域、不支持的 SQL 被部分解析、缺定义被当成源关系）、
+  第二轮（关系身份退化为末段名、未知函数被当作列）、第三轮（关系身份未保留引号语义）。
 - **未包含**：读器接入参考解/规划器（切片 4）、数据库 dry run、manifest 冻结与真实模型测量。
 
 ## 1. 读器契约（与设计 §2.2 及其"实施期收紧"一致）
@@ -22,8 +22,11 @@
   （`::`、`||`）、未支持关键字（`between`、`like`、窗口关键字）、未知函数（`mystery(...)`）一律拒绝
   （`UNSUPPORTED_EXPRESSION`），不允许"跳过不认识的部分继续确认"。
 - **作用域**：书写别名取代关系名。
-- **关系身份 = 完整名**（去引号、统一大小写）：定义与终止关系均按完整身份匹配，不退化为末段名；等价写法
-  由调用方显式并列（同一份定义两个键），无法证明同一来源 → UNKNOWN；起源按 SQL 实际使用的完整身份上报。
+- **关系身份 = 完整分段 + 引用语义**：按分段匹配，不退化为末段名，也不做文本归一——未引用标识符折叠为
+  小写、引号内保持原样、**引号内的点属于名称本身**（`analytics."raw.customers"` 是一个名为
+  `raw.customers` 的关系）；等价写法由调用方显式并列（同一份定义两个键），无法证明同一来源 → UNKNOWN；
+  起源按 SQL 实际使用的身份上报并对需要引号的段重新加引号。带引号的列引用（`a."ID"`）→ UNKNOWN
+  （列名按小写匹配，假装 `"ID"` 是 `id` 会归因到错误的列）。
 - **终止条件**：只有调用方显式声明为 seed/source 的关系可以终止追溯，其余关系缺定义为
   `DEFINITION_MISSING`；定义与终止声明同时存在时以定义为准。
 - **形状矩阵**：单源别名投影（改名）、算术/转换表达式、多 CTE 链、两源**单一等值**连接（两侧各为单列
@@ -31,7 +34,8 @@
   合取连接条件、未知函数/符号/关键字、未声明终止关系、深度超限（含定义环链）等一律 **UNKNOWN**，
   `complete=false` 的上游定义拒绝穿透。
 - **UNKNOWN 理由固定**（`UNKNOWN_REASONS`，第一轮新增 `DEFINITION_MISSING`），调用方不得自造；UNKNOWN
-  永不作为任何方向的证据。同一身份出现两份不同定义 → `ValueError`（调用方错误，不静默选边）。
+  永不作为任何方向的证据。调用方声明一侧的错误——同一身份出现两份不同定义、或声明键不是合法的关系引用
+  （如 `a."b`）→ `ValueError`（调用方错误，不静默选边、也不当成"无匹配"）。
 
 ## 2. 验收形状（实证）
 
@@ -48,7 +52,7 @@
 两条验收形状与审计更正后的源列事实一致（`raw_orders` 的源列是 `id`，`order_id` 是 stg 改名结果）。
 **起源名与 E1 期望名的对应由调用方按公开元数据建立**（见 §5）：读器只保证身份完整、不做名称归一。
 
-## 3. 审计修复（两轮，共五处 P1，均先复现后修）
+## 3. 审计修复（三轮，共六处 P1，均先复现后修）
 
 复现方式：把被审版本的读器模块单独加载（`git show <rev>:...`），跑审计给出的反例（脚本一次性，未入库）。
 
@@ -60,8 +64,10 @@
 | 1 | 3 | `select customer_id / 2 from analytics.stg_customers`（无定义） | `RESOLVED → stg_customers.customer_id`（未取到定义的**模型**被当作源关系） | `UNKNOWN / DEFINITION_MISSING` |
 | 2 | 4 | 只提供 `analytics.stg_customers` 的定义，SQL 读 `stg_customers` / `other.stg_customers` / `other.analytics.stg_customers` | 三种写法都 `RESOLVED → raw_customers.id`（按末段名套用了别的 schema 的定义） | 三种写法都 `UNKNOWN / DEFINITION_MISSING`；身份改为完整名匹配，等价写法须调用方显式并列 |
 | 2 | 5 | `mystery(amount)` | `RESOLVED → raw_payments.mystery, raw_payments.amount`（函数名被当作列，凭空多一个来源列） | `UNKNOWN / UNSUPPORTED_EXPRESSION`；未知符号（`amount::numeric`、`||`）与未支持关键字（`between`）同样拒绝 |
+| 3 | 6a | SQL 读 `analytics."STG_CUSTOMERS"`，只给 `analytics.stg_customers` 的定义 | `RESOLVED → analytics.raw_customers.id`（把引号大写名与小写名合并） | `UNKNOWN / DEFINITION_MISSING`；身份按分段保留引号语义，`analytics."STG_CUSTOMERS"` 只在调用方按带引号身份声明时才匹配（控制组实测 `RESOLVED`） |
+| 3 | 6b | SQL 读 `analytics."raw.customers"`，声明终端 `analytics.raw.customers` | `RESOLVED`（把引号内的点当作限定符分隔） | `UNKNOWN / DEFINITION_MISSING`；申报为 `analytics."raw.customers"` 时可解析，起源渲染为 `analytics."raw.customers"` |
 
-## 4. 修复轮中自行发现的三处问题（如实记录）
+## 4. 修复轮中自行发现并修掉的问题（如实记录）
 
 1. **真实文本上的错误 `RESOLVED`（第一轮发现）**：用真实归档的 `customers.sql` 复跑时，读器返回
    `RESOLVED → stg_customers.customer_id, stg_orders.customer_id`——两个**模型**列被当作起源。两条原因叠加：
@@ -75,10 +81,14 @@
    只覆盖合成 fixture。
 3. **第二轮修复后自查出的漏配**：`coalesce(amount, 0)` 因逗号未被识别为合法标点而误判 UNKNOWN——由
    "文档化函数仍可解析"的正例捕获，已修正（正例保留在回归里，防止过度收紧）。
+4. **第二轮回归的构造缺陷（第三轮自查）**：跨 schema 那条回归最初把消息写成 `select id as customer_id`，
+   命中的是**投影别名表达式** `id`，于是旧读器也返回 `UNKNOWN_COLUMN`——测试"通过"却测不到缺陷。已改为
+   命中被引用的**列**（`select customer_id from "other"."stg_customers"`），并在注释里写明"若末段名足够，
+   就会走进 analytics 定义并报出 raw_customers.id"。
 
 ## 5. 回归与验证
 
-`tests/unit/test_t13_column_mapping.py`（**35 条**，全部离线）：T1′ 与 orders 额外形状、真实归档文本形状、
+`tests/unit/test_t13_column_mapping.py`（**40 条**，全部离线）：T1′ 与 orders 额外形状、真实归档文本形状、
 算术投影、聚合、文档化函数正例、边界命中（负例 + 标点相邻正例）、无关消息、两条最大命中、别名取代关系名、
 原关系名不可用、**跨 schema/裸名/跨库三种写法的定义隔离（参数化）**、两种写法显式并列可用、
 显式终止关系、缺定义 → `DEFINITION_MISSING`、未声明关系不产生半答案、窗口函数、子查询、
@@ -86,21 +96,28 @@
 `complete=false`、不可完整消费的定义（union / 逗号连接 / 无 `ON` 连接，参数化）、定义环链、多源未限定列、
 同一身份两份定义 → `ValueError`、空白/注释差异。
 
-对照验证：把本轮两个反例对着 `0956517` 的读器复跑，`mystery(amount)` 与三种 `stg_customers` 写法全部
-复现为错误 `RESOLVED`；修好后同样输入全部为 UNKNOWN。新测试对被审读器的失败面为 **17/35**（含全部身份
-类断言与扫描类负例）。
+**引号语义回归**：`analytics."STG_CUSTOMERS"` 与 `analytics."raw.customers"` 两种反例各一条（对声明为
+未引用的等价文本必须 UNKNOWN），配套控制组——按带引号身份声明时可解析、起源按带引号身份渲染、含转义引号
+（`"weird""name"`）的标识符保真、裸别名大小写折叠仍按 SQL 语义——以及带引号的列引用（`a."ID"`）→
+`UNSUPPORTED_EXPRESSION`。
 
-`ruff check .`、`git diff --check` 通过；全量单测 **931 passed / 5 skipped**。
+对照验证：把本轮两个反例对着 `a7361af` 的读器复跑，`analytics."STG_CUSTOMERS"` + `analytics.stg_customers`
+定义误判为 `RESOLVED → analytics.raw_customers.id`，`analytics."raw.customers"` + `analytics.raw.customers`
+终端误判为 `RESOLVED`；修好后分别为 UNKNOWN 与 UNKNOWN，控制组为 RESOLVED。上一轮对新读器的失败面为
+17/35，本轮加入 4 条后为 39 条。
+
+`ruff check .`、`git diff --check` 通过；全量单测 **936 passed / 5 skipped**。
 
 ## 6. 边界（如实）
 
 - 读器尚未接入任何策略路径（切片 4）；本切片的结论只覆盖读器本身与形状矩阵。
 - 表达式识别规则以镜像 dbt `LINE n: <sql>` 形态的消息验证；真实失败消息的形态确认属数据库 dry run
   的检查项（设计 §4.1 已列）。
-- **切片 4 的接线要求（本轮新增，必须随接线实现）**：读器上报的起源是**完整关系身份**（如
-  `data_incident_gym.analytics.raw_customers`）；把它对应到合同 `expectation_relations` 与 E1 记录中的
-  `raw_customers`，以及把二段/三段写法并列声明，都必须由接线方按公开运行元数据（manifest 的
-  `relation_name` 等）显式建立，读器不做名称归一。
+- **切片 4 的接线要求（第二轮起新增，必须随接线实现）**：读器上报的起源是**完整关系身份**（如
+  `data_incident_gym.analytics.raw_customers`，带引号的身份按原样加引号）；把它对应到合同
+  `expectation_relations` 与 E1 记录中的 `raw_customers`、以及把二段/三段、带引号/不带引号等**等价写法**
+  并列声明，都必须由接线方按公开运行元数据（manifest 的 `relation_name` 等）显式建立——读器不做名称
+  归一，也不跨引用形态匹配。
 - **已知窄点（fail-closed，不是错误结论）**：无别名的限定投影（如 `select customers.customer_id`）不参与
   "按输出列名查找"，因此经该投影向下追溯列时会返回 `UNKNOWN_COLUMN`；T1′/T2′ 的验收路径不经过它。
 - 文档化函数集是封闭列表（`cast`/`coalesce`/`nullif`/`sum`/`min`/`max`/`count`/`avg`）；出现新函数时按
