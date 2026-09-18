@@ -177,3 +177,83 @@ v1 分支逐字节不变；并新增 3 条回归——v2 记录被接受、删�
 - T2′ 的 O1–O6 依旧未实测；按审计口径不得从 T1′ 推断。
 - 环境：数据库健康（F0），无活动运行指针；运行归档 `22c98522…`（第一次）与 `65626c9a…`（第二次）保留在
   `.dig/lab/runs/`。
+
+## 8. 第三次执行（授权书 `docs/superpowers/plans/2026-09-18-t13-dry-run-round3-authorization.md`）
+
+**结论：dry run 成立。** O1–O8 在 T1′ 与 T2′ 两条目标上各自实测通过，O7（v2 构建路径）在两条目标上
+完整走通（写出 → 自检 → 校验器），两次运行都以 `EXPECTED_FAILURE` 收口并各自回到基线。
+
+### 8.1 前置条件核对
+
+| 项 | 实测 |
+| --- | --- |
+| 执行 HEAD | `a49ba01673a12d69c5e3857a9cfa514d5080e0da`（含 `270d96a`、`125c351` ✓，另含 `a49ba01` 截断识别） |
+| 工作树 | 无已跟踪文件改动 ✓ |
+| 环境检查 | `docker compose up -d --wait postgres` → `Healthy`（未运行 doctor ✓） |
+| `pipeline build` | fingerprint == **F0** == 历史基线指纹 ✓ |
+
+### 8.2 逐步执行
+
+| # | 命令 | 结果 |
+| --- | --- | --- |
+| 1 | `lab inject schema_type_change_raw_customer_id_a` | `INJECTED`，fingerprint `f15aecba…` |
+| 2 | `lab build schema_type_change_raw_customer_id_a` | **`EXPECTED_FAILURE`**，run_id `6c2c5a03079d42ab8ae498767a1394c2`，`dbt_exit_code=1` |
+| 3 | `lab reset schema_type_change_raw_customer_id_a` | `HEALTHY`，fingerprint == F0 ✓ |
+| 4 | `lab inject schema_type_change_raw_order_user_id_a` | `INJECTED`，fingerprint `25b60e5f…` |
+| 5 | `lab build schema_type_change_raw_order_user_id_a` | **`EXPECTED_FAILURE`**，run_id `0c20920a14d9439884dc0091c1b004a5`，`dbt_exit_code=1` |
+| 6 | `lab reset schema_type_change_raw_order_user_id_a` | `HEALTHY`，fingerprint == F0 ✓ |
+
+### 8.3 O1–O8 实测（两条目标各自）
+
+| # | 观察项 | T1′（`raw_customers.id`，run `6c2c5a03…`） | T2′（`raw_orders.user_id`，run `0c20920a…`） | 预期 |
+| --- | --- | --- | --- | --- |
+| O1 | status=error 节点 | `['model.jaffle_shop.customers']` | 同 | ✅ 单失败节点 |
+| O2 | skipped 测试 | `not_null_customers_customer_id`、`unique_customers_customer_id`、`relationships_orders_customer_id…` | 同（三条） | ✅ 关系测试 skipped |
+| O3 | `direct_failure`/`affected_assets` | 与场景文件一致 | 同 | ✅ |
+| O4 | 原始消息 | 见 §8.4 第一段（`text = integer`） | 见 §8.4 第二段（`integer = text`，操作数顺序随偏差侧变化，其余同形态） | ⚠️ 形态一致，操作数顺序按偏差侧互换（合理） |
+| O5 | 点名比较点 | `customer_orders` 侧（**风险 A**） | `customer_orders` 侧（**风险 A**） | ✅ 非风险 B |
+| O6 | 错误类别 | `operator does not exist: …` + `HINT: No operator matches…` | 同 | ✅ 类型类错误 |
+| O7 | v2 构建路径 | **成立**：`runtime.json` = `p1.runtime.v2`（9 键）、`evidence_baseline.json` 存在且 fingerprint == F0、`build_provenance` 含 `dbt_invocation_id` + 三产物摘要、`node_definitions` **22/22** 覆盖全部编译节点、`redacted` 全 false、`observable_nodes.definition` = 合同三项白名单；自检与校验器均通过 | 同（22/22） | ✅ |
+| O8 | 恢复与基线 | reset 后 == F0；无活动运行指针 | 同 | ✅ |
+
+**补充观察（非 O7 判据，供切片 4 使用）**：两个归档都能被读取期以 v2 上下文加载
+（`resolve_run_context` 实测：`expectation = (raw_customers, raw_orders)`、`definition_nodes` = 合同三项），
+且用各自真实消息 + 真实编译文本调用读器，两次都得到完整连接条件与两侧起源
+（`raw_customers.id`、`raw_orders.user_id`，顺序与条件左右侧一致）——截断感知识别在两条目标的真实消息上
+均成立。
+
+### 8.4 O4 原文（逐字节）
+
+T1′（`6c2c5a03079d42ab8ae498767a1394c2`）：
+
+```text
+Database Error in model customers (models\customers.sql)
+  operator does not exist: text = integer
+  LINE 73:         on customers.customer_id = customer_orders.customer_...
+                                            ^
+  HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+  compiled code at C:\Users\29913\codex_space\DataIncidentGym\.dig\lab\runs\6c2c5a03079d42ab8ae498767a1394c2\dbt\target\run\jaffle_shop\models\customers.sql
+```
+
+T2′（`0c20920a14d9439884dc0091c1b004a5`）：
+
+```text
+Database Error in model customers (models\customers.sql)
+  operator does not exist: integer = text
+  LINE 73:         on customers.customer_id = customer_orders.customer_...
+                                            ^
+  HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+  compiled code at C:\Users\29913\codex_space\DataIncidentGym\.dig\lab\runs\0c20920a14d9439884dc0091c1b004a5\dbt\target\run\jaffle_shop\models\customers.sql
+```
+
+### 8.5 与预期的差异
+
+1. **O4 的操作数顺序**：T2′ 的运算符行是 `integer = text`（T1′ 为 `text = integer`）——偏差侧的观测类型
+   决定顺序，属合理差异；截断点、`LINE 73`、点名侧与截断长度（64 字符）完全一致。**不构成 O4 形态不符**。
+2. 其余各项与设计 §4.1 的预期一致，无其他差异。
+
+### 8.6 边界
+
+- 本次授权的后续（切片 4 接线、`certify --admit`、端到端与离线重评）**不在**本报告结论内，各自需要授权与
+  审计。
+- 数据库现为健康基线（fingerprint == F0），无活动运行指针；两次归档保留在 `.dig/lab/runs/`。
