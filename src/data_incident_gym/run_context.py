@@ -366,10 +366,14 @@ def _validate_runtime(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
             if not isinstance(value, str) or _DIGEST_PATTERN.fullmatch(value) is None:
                 _fail("runtime artifact_sha256 摘要无效")
         node_definitions = provenance["node_definitions"]
-        valid_node_ids = set(definitions)
-        if (
-            not isinstance(node_definitions, dict)
-            or not set(node_definitions).issubset(valid_node_ids)
+        # The record covers every compiled node of THIS run (build integrity);
+        # the public definition whitelist only bounds what E2 may read. The two
+        # sets stay independent on purpose — binding the record to the
+        # whitelist made a normal build (or an empty B-variant whitelist) fail
+        # its own validation (audit finding on ``caf8558``).
+        if not isinstance(node_definitions, dict) or any(
+            not isinstance(node_id, str) or not node_id.strip()
+            for node_id in node_definitions
         ):
             _fail("runtime node_definitions 无效")
         for entry in node_definitions.values():

@@ -83,6 +83,20 @@
 `redacted=true`、E2 返回脱敏文本且 `complete=false`，未受影响的兄弟节点仍 `complete=true`）与
 `test_oversized_non_ascii_definitions_stay_within_the_byte_cap`。
 
+## 4c. 实施期审计整改（第二轮）
+
+审计在 `caf8558` 上发现：`_write_runtime_v2` 记录**所有**有编译文本的节点，而 `run_context` 校验却
+要求它们全部属于公开 `definition_nodes` 白名单——普通构建（含未授权公开的编译节点）与 B 变体
+（白名单为空）写出的 runtime 均无法通过自身校验（`runtime node_definitions 无效`，两种情况均复现）。
+
+修复：**两个集合分离**——`node_definitions` 覆盖运行产物的全部编译节点（构建完整性记录），公开白名单
+只约束 E2 的可读范围；校验端只校验记录的键为非空字符串与条目形状。E2 的白名单约束不变（未授权目标
+仍以 `NODE_NOT_ALLOWED` 原子拒绝），文本归属校验也不削弱。新增两条"写入 → 加载"回归：
+`test_the_build_record_may_cover_nodes_outside_the_public_whitelist`（两节点仅授权其一 → runtime 校验通过、
+已授权节点 `complete=true`、未授权节点被拒）与
+`test_an_empty_definition_whitelist_still_produces_a_valid_runtime`（B 变体空白名单 → runtime 校验通过、
+任何节点都被拒）。两条在旧校验端下复现失败、修复后通过。
+
 ## 5. 边界（如实）
 
 - **v2 运行的归档序列化与重载**、**轨迹中的 `target_refusals` 落盘**、**模型可见的列表签名转换**均属

@@ -686,18 +686,20 @@ def _lab(tmp_path: Path):
     return IncidentLab(Settings(_env_file=None), tmp_path)
 
 
-def _v2_spec(*, expectation: list[str]):
+def _v2_spec(*, expectation: list[str], definition: list[str] | None = None):
     payload = json.loads(
         Path("config/scenarios/type_change_payment_amount_drift_b.json").read_text(
             encoding="utf-8"
         )
     )
+    if definition is None:
+        definition = [CUSTOMERS]
     contract = payload["observable_evidence_contract"]
     contract["schema_version"] = "observable_evidence.v2"
     # Expectations must stay within the observable schema relations.
     contract["schema_relations"] = ["raw_customers", "raw_orders"]
     contract["expectation_relations"] = expectation
-    contract["definition_nodes"] = [CUSTOMERS]
+    contract["definition_nodes"] = definition
     from data_incident_gym.scenarios import ScenarioSpec
 
     return ScenarioSpec.model_validate(payload)
@@ -953,3 +955,115 @@ def test_oversized_non_ascii_definitions_stay_within_the_byte_cap(
     assert len(returned.encode("utf-8")) <= MAX_COMPILED_SQL_BYTES
     assert returned == returned.encode("utf-8").decode("utf-8")
     assert returned.endswith("\ufffd") is False
+
+
+# -- audit round 2: the build record and the public whitelist are separate --
+
+
+def _written_run(tmp_path: Path, spec, nodes: dict, parent_map: dict, results: list, files):
+    """Write a run, produce the v2 runtime, and load it back through the
+    validator — the exact write→load path of a real build."""
+
+    from data_incident_gym.config import PROJECT_ROOT, Settings
+    from data_incident_gym.lab import IncidentLab
+
+    run_root, _ = _run_root(
+        tmp_path,
+        nodes=nodes,
+        parent_map=parent_map,
+        results=results,
+        compiled_files=files,
+    )
+    lab = IncidentLab(Settings(_env_file=None), PROJECT_ROOT)
+    lab._write_runtime_v2(
+        run_root,
+        spec,
+        RUN_ID,
+        1,
+        "b" * 64,
+        original_texts=lab._definition_texts(run_root),
+    )
+    runtime = _validate_runtime(
+        json.loads((run_root / "runtime.json").read_text(encoding="utf-8")), RUN_ID
+    )
+    context = ObservableRunContext(
+        RUN_ID, run_root, runtime, SimpleNamespace()  # type: ignore[arg-type]
+    )
+    return run_root, BatchEvidenceTools(RUN_ID, _artifacts(run_root, context))
+
+
+def test_the_build_record_may_cover_nodes_outside_the_public_whitelist(
+    tmp_path: Path,
+) -> None:
+    """Audit reproduction: two compiled nodes, only one granted, used to fail
+    the runtime's own validation."""
+
+    nodes = {
+        CUSTOMERS: {
+            "depends_on": [STG_CUSTOMERS],
+            "manifest_text": _compiled_text(CUSTOMERS),
+            "file": "customers.sql",
+        },
+        STG_CUSTOMERS: {"depends_on": [], "manifest_text": _compiled_text(STG_CUSTOMERS)},
+    }
+    parent_map = {CUSTOMERS: [STG_CUSTOMERS], STG_CUSTOMERS: []}
+    results = [
+        {"unique_id": CUSTOMERS, "status": "error", "compiled_code": _compiled_text(CUSTOMERS)}
+    ]
+    run_root, tools = _written_run(
+        tmp_path,
+        _v2_spec(expectation=[], definition=[CUSTOMERS]),
+        nodes,
+        parent_map,
+        results,
+        {"customers.sql": _compiled_text(CUSTOMERS)},
+    )
+
+    runtime = json.loads((run_root / "runtime.json").read_text(encoding="utf-8"))
+    # The record covers both compiled nodes; the whitelist grants one.
+    assert set(runtime["build_provenance"]["node_definitions"]) == {
+        CUSTOMERS,
+        STG_CUSTOMERS,
+    }
+    assert runtime["observable_nodes"]["definition"] == [CUSTOMERS]
+
+    granted = tools.get_dbt_node_definition(CUSTOMERS)[0].content
+    assert isinstance(granted, DbtNodeDefinitionFact)
+    assert granted.complete is True
+    with pytest.raises(BatchTargetsRefusedError) as error:
+        tools.get_dbt_node_definition(STG_CUSTOMERS)
+    assert error.value.target_refusals == ((STG_CUSTOMERS, "NODE_NOT_ALLOWED"),)
+
+
+def test_an_empty_definition_whitelist_still_produces_a_valid_runtime(
+    tmp_path: Path,
+) -> None:
+    """Audit reproduction: the B-variant shape (nothing granted) used to fail
+    the runtime's own validation."""
+
+    nodes = {
+        CUSTOMERS: {
+            "depends_on": [],
+            "manifest_text": _compiled_text(CUSTOMERS),
+            "file": "customers.sql",
+        }
+    }
+    results = [
+        {"unique_id": CUSTOMERS, "status": "error", "compiled_code": _compiled_text(CUSTOMERS)}
+    ]
+    run_root, tools = _written_run(
+        tmp_path,
+        _v2_spec(expectation=[], definition=[]),
+        nodes,
+        {CUSTOMERS: []},
+        results,
+        {"customers.sql": _compiled_text(CUSTOMERS)},
+    )
+
+    runtime = json.loads((run_root / "runtime.json").read_text(encoding="utf-8"))
+    assert runtime["observable_nodes"]["definition"] == []
+    assert set(runtime["build_provenance"]["node_definitions"]) == {CUSTOMERS}
+
+    with pytest.raises(BatchTargetsRefusedError) as error:
+        tools.get_dbt_node_definition(CUSTOMERS)
+    assert error.value.target_refusals == ((CUSTOMERS, "NODE_NOT_ALLOWED"),)

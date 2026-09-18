@@ -153,8 +153,10 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
 - **文本完整性（实施期审计修正）**：`MAX_COMPILED_SQL_BYTES`（16 KiB）按 **UTF-8 字节**截断且不切断
   多字节字符（字符切片对非 ASCII 文本会返回数倍上限）。构建时在
   `build_provenance.node_definitions` 记录**逐节点**的归档文本摘要与 `redacted` 标记（脱敏是否改写了
-  该文本）；E2 据此判定 `complete` 并校验文本归属，**绝不通过文本内容猜测**。compiled 树（`target/
-  compiled/**`）与 manifest/run_results 内的副本使用**同一套脱敏规则**——否则文件可能保留 JSON 副本
+  该文本）；E2 据此判定 `complete` 并校验文本归属，**绝不通过文本内容猜测**。该记录覆盖**本次运行的
+  全部编译节点**（构建完整性），与公开 `definition_nodes` 白名单**相互独立**——白名单只约束 E2 的
+  可读范围，不得用来裁剪记录（否则普通构建或 B 变体的空白名单会让 runtime 无法通过自身校验）。
+  compiled 树（`target/compiled/**`）与 manifest/run_results 内的副本使用**同一套脱敏规则**——否则文件可能保留 JSON 副本
   已脱敏的秘密，且三个来源会相互矛盾。
 - 正常缺失（节点未执行、无编译产物）→ `known=false` 的明确 UNKNOWN。
 
