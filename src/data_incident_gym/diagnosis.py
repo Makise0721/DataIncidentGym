@@ -21,7 +21,11 @@ from pydantic import (
     model_validator,
 )
 
-from data_incident_gym.evidence import EvidenceRecord
+from data_incident_gym.evidence import (
+    EVIDENCE_BATCH_TOOLS,
+    TARGETS_REFUSED_CODE,
+    EvidenceRecord,
+)
 
 RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 EVIDENCE_ID_PATTERN = r"^ev_[0-9a-f]{64}$"
@@ -164,9 +168,12 @@ class UnresolvedEvidence(BaseModel):
         "INGESTION_WATERMARK",
         "TRANSFORMATION_DEFINITION",
         "PAYMENT_EVENT_IDENTITY",
+        # T13 v2 evidence facts; a v1 contract never declares them.
+        "RELATION_SCHEMA_EXPECTATION",
+        "DBT_NODE_DEFINITION",
     ]
     subject: NonBlankStr
-    reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED"]
+    reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED", "NODE_NOT_ALLOWED"]
 
     @model_validator(mode="after")
     def validate_reason_code(self) -> UnresolvedEvidence:
@@ -308,7 +315,40 @@ class ToolTraceEvent(BaseModel):
         targets = [item.target for item in self.target_refusals]
         if len(targets) != len(set(targets)):
             raise ValueError("target_refusals must not repeat a target")
+        # An event carrying refusal entries must be an atomic batch refusal:
+        # a successful call (or any other code) cannot be a refusal witness.
+        if self.target_refusals:
+            if self.error_code != TARGETS_REFUSED_CODE:
+                raise ValueError(
+                    "target_refusals require the TARGETS_REFUSED call-level code"
+                )
+            if self.evidence_ids:
+                raise ValueError("a refused batch call returns no evidence")
+        # The summary code belongs to the batch surface only, and an atomic
+        # per-target refusal always names at least one refused target.
+        if self.error_code == TARGETS_REFUSED_CODE:
+            if self.tool_name not in EVIDENCE_BATCH_TOOLS:
+                raise ValueError("TARGETS_REFUSED is only valid for batch tools")
+            if not self.target_refusals:
+                raise ValueError("TARGETS_REFUSED requires at least one refused target")
         return self
+
+
+#: Trace argument key carrying a batch call's requested targets. The request is
+#: recorded comma-joined in request order (identifiers and dbt unique ids never
+#: contain commas); an empty request records no key.
+_BATCH_REQUEST_KEYS = {
+    "get_relation_schema_expectation": "relation_names",
+    "get_dbt_node_definition": "node_ids",
+}
+
+
+def _requested_targets(event: ToolTraceEvent) -> tuple[str, ...]:
+    key = _BATCH_REQUEST_KEYS.get(event.tool_name)
+    if key is None:
+        return ()
+    raw = event.arguments.get(key, "")
+    return tuple(part for part in raw.split(",") if part)
 
 
 def refusal_witnessed(
@@ -320,23 +360,28 @@ def refusal_witnessed(
 ) -> bool:
     """Whether the trace witnesses exactly ``(target, code)`` for one tool.
 
-    Two rules, split by tool surface (never mixed for one tool):
+    The rule is chosen by the tool's **frozen protocol identity**
+    (``EVIDENCE_BATCH_TOOLS``), never by whether an event happens to carry
+    refusal entries — a v1 tool can never switch rules through the new field.
 
-    - **v2 batch tools** (any event carries ``target_refusals``): only the
-      per-target entries witness, and the exact ``(target, code)`` pair must
-      appear in exactly one event. The call-level code (``TARGETS_REFUSED``) is
-      a summary and never witnesses anything.
-    - **v1 tools** (no ``target_refusals`` anywhere for that tool): the original
-      rule — the target appears among the call's arguments, the call is refused,
-      and the count of such events is exactly one whose code equals ``code``.
+    - **v2 batch tools**: a witness must be an atomic refusal (call-level
+      ``TARGETS_REFUSED``, no successful evidence), the target must appear in
+      the call's recorded request, and the exact ``(target, code)`` entry must
+      appear in exactly one such event. The call-level code never witnesses.
+    - **v1 tools**: the original rule — the target appears among the call's
+      arguments, the call is refused, and the count of such events is exactly
+      one whose code equals ``code``.
     """
 
     events = tuple(event for event in trace_events if event.tool_name == tool_name)
-    if any(event.target_refusals for event in events):
+    if tool_name in EVIDENCE_BATCH_TOOLS:
         witnesses = tuple(
             event
             for event in events
-            if any(
+            if event.error_code == TARGETS_REFUSED_CODE
+            and not event.evidence_ids
+            and target in _requested_targets(event)
+            and any(
                 item.target == target and item.code == code
                 for item in event.target_refusals
             )

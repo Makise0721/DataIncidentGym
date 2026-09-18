@@ -105,16 +105,21 @@
 - **v1 合同与 v1 工具面不开放 E1/E2**；越界拒绝用真实码：E1 `RELATION_NOT_ALLOWED`，E2 新增
   `NODE_NOT_ALLOWED`（不在图中仍 `NODE_NOT_FOUND`）；批量形态另加调用级 `TARGETS_REFUSED` 与
   `TARGETS_EMPTY`、`BATCH_TOO_LARGE`。
-- **拒绝见证按逐目标 `(target, code)` 精确匹配（关键修订）**：批量调用原子拒绝，权威明细为
-  `target_refusals`（逐目标、有序、去重，允许同一批内不同码）。缺口 `(kind, subject, tool, code)`
-  成立的充要条件是 **`(subject, code)` 精确等于某条 `target_refusals` 条目**；调用级 `TARGETS_REFUSED`
-  与"出现在请求列表里"都不构成见证。
+- **拒绝见证按工具协议身份分流、按逐目标 `(target, code)` 精确匹配（第 5 版关键修订 + 实施期收紧）**：
+  分流依据是**冻结的工具面身份**（`EVIDENCE_BATCH_TOOLS`），**不是**"事件是否恰好带拒绝字段"——v1 工具
+  不得借新字段切换规则。v2 见证要求四条件同时成立：① 调用级 `error_code == TARGETS_REFUSED`；
+  ② 无成功证据（`evidence_ids` 为空）；③ target 出现在该次调用的**实际请求**中；④ `(subject, code)`
+  精确等于某条 `target_refusals` 条目。调用级码与"出现在请求列表里"都不构成见证。
+  事件层不变量（模型校验）：带拒绝条目 ⇒ 调用级码必为 `TARGETS_REFUSED` 且无证据；`TARGETS_REFUSED`
+  只允许出现在批量工具上且至少一条条目。
   例 1：请求 `[可读 A, 禁止 B]` 因 B 被拒 → 只支持 subject=B 的缺口，**绝不支持 A**。
   例 2：同一批中 B 为 `NODE_NOT_ALLOWED`、C 为 `NODE_NOT_FOUND` → 该批只支撑
   `(B, NODE_NOT_ALLOWED)` 与 `(C, NODE_NOT_FOUND)` 两条；**不得**用统一码为 C 证明权限扣留，
   反之亦然。
 - **归档承载**：逐目标明细必须进入归档轨迹（`ToolTraceEvent` 新增可选 `target_refusals`，成功调用为空、
-  调用级 `error_code` 记 `TARGETS_REFUSED`；属 v2 身份）。
+  调用级 `error_code` 记 `TARGETS_REFUSED`；属 v2 身份）。**请求编码冻结**：批量调用的请求写入
+  `arguments` 的固定键（`relation_names` / `node_ids`），按请求顺序逗号连接（标识符与 dbt unique id
+  不含逗号）；空请求不写该键。
 - **匹配规则只对 v2 生效**：certification 的 `_receipt_proved` 与 evaluator 的 `_insufficiency_matches`
   对**带 v2 批量工具的运行**按 `target_refusals` 精确匹配；**v1 收据继续按原规则**（`error_code` 等于
   缺口 reason_code 且 subject 出现在参数值中）校验——旧归档因没有新字段而不失去见证。
@@ -154,6 +159,8 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
 - 新场景用新 case id 与新合同版本（`observable_evidence.v2`）；老场景文件与摘要不动。
 - **v2 联合类型（待裁定点 1，已认可方向）**：v1 独立模型与序列化；验收含旧场景 digest 不变、旧证书可
   加载、六策略身份逐字节不变；`ScenarioSpec` 总 schema 摘要变化如实记录。
+- 诊断面词表同步：`UnresolvedEvidence.evidence_kind` 增加 `RELATION_SCHEMA_EXPECTATION`/`DBT_NODE_DEFINITION`，
+  `reason_code` 增加 `NODE_NOT_ALLOWED`（v1 合同不会声明它们）。
 - 工具面版本 `p1.evidence_tools.v2` = 六工具 + E1/E2 + `NODE_NOT_ALLOWED` / `EVIDENCE_INTEGRITY_ERROR` /
   `TARGETS_REFUSED`（调用级概括）/ `TARGETS_EMPTY` / `BATCH_TOO_LARGE`；**批量语义（原子拒绝、上限 8、
   去重、顺序、计数）与 `ToolTraceEvent.target_refusals` 一并计入 v2 身份**；v1 面逐字节不变。影响面：

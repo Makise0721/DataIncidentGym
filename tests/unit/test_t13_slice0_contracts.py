@@ -27,6 +27,7 @@ from data_incident_gym.diagnosis import (
     refusal_witnessed,
 )
 from data_incident_gym.evaluation import _insufficiency_matches
+from data_incident_gym.evidence import EVIDENCE_BATCH_TOOLS, TARGETS_REFUSED_CODE
 from data_incident_gym.evidence_planner import evidence_planner_policy_identity
 from data_incident_gym.lab import _DEPENDENT_VIEWS
 from data_incident_gym.scenario_certification import _receipt_proved
@@ -42,6 +43,8 @@ from data_incident_gym.scenarios import (
 RUN_ID = "c" * 32
 FINGERPRINT = "d" * 64
 PROFILE_TOOL = "get_relation_data_profile"
+CUSTOMERS = "model.jaffle_shop.customers"
+STG_ORDERS = "model.jaffle_shop.stg_orders"
 
 
 def _type_change(**overrides) -> ColumnTypeMutation:
@@ -134,16 +137,14 @@ def test_v2_contract_defaults_to_no_new_evidence() -> None:
 
     spec = _v2_scenario()
     assert type(spec.observable_evidence_contract) is ObservableEvidenceContractV2
-    assert spec.observable_evidence_contract.definition_nodes == (
-        "model.jaffle_shop.customers",
-    )
+    assert spec.observable_evidence_contract.definition_nodes == (CUSTOMERS,)
 
 
 @pytest.mark.parametrize(
     "overrides",
     (
         {"expectation_relations": ("raw_payments",)},  # not a schema relation
-        {"definition_nodes": ("model.jaffle_shop.customers", "model.jaffle_shop.customers")},
+        {"definition_nodes": (CUSTOMERS, CUSTOMERS)},
         {"definition_nodes": ("  ",)},
         {"schema_relations": ("raw_customers", "raw_customers")},
     ),
@@ -161,17 +162,73 @@ def test_v2_whitelists_are_validated(overrides) -> None:
         ObservableEvidenceContractV2.model_validate(payload)
 
 
+def test_v2_gaps_express_the_designed_e1_e2_evidence() -> None:
+    scenario = _v2_b_scenario()
+    gaps = scenario.observable_evidence_contract.unresolved_gaps
+
+    assert [(gap.gap_kind, gap.subject, gap.tool_name, gap.reason_code) for gap in gaps] == [
+        ("RELATION_SCHEMA_EXPECTATION", "raw_customers", "get_relation_schema_expectation",
+         "RELATION_NOT_ALLOWED"),
+        ("DBT_NODE_DEFINITION", CUSTOMERS, "get_dbt_node_definition", "NODE_NOT_ALLOWED"),
+    ]
+    # The v2 vocabulary cannot be smuggled into a v1 contract.
+    v1_payload = json.loads(
+        Path("config/scenarios/required_null_order_customer_b.json").read_text(encoding="utf-8")
+    )
+    v1_payload["observable_evidence_contract"]["unresolved_gaps"][1] = {
+        "gap_kind": "DBT_NODE_DEFINITION",
+        "subject": CUSTOMERS,
+        "reason_code": "NODE_NOT_ALLOWED",
+        "tool_name": "get_dbt_node_definition",
+    }
+    with pytest.raises(ValidationError):
+        ScenarioSpec.model_validate(v1_payload)
+
+
 def _v2_scenario() -> ScenarioSpec:
     payload = json.loads(
         Path("config/scenarios/required_null_order_customer_a.json").read_text(encoding="utf-8")
     )
     payload["observable_evidence_contract"]["schema_version"] = "observable_evidence.v2"
     payload["observable_evidence_contract"]["expectation_relations"] = ["raw_customers"]
-    payload["observable_evidence_contract"]["definition_nodes"] = ["model.jaffle_shop.customers"]
+    payload["observable_evidence_contract"]["definition_nodes"] = [CUSTOMERS]
     return ScenarioSpec.model_validate(payload)
 
 
-# -- refusal witnesses: v2 per-target entries, v1 rule unchanged -------------
+def _v2_b_scenario() -> ScenarioSpec:
+    """A real v2 contract carrying the design's E1/E2 gaps."""
+
+    payload = json.loads(
+        Path("config/scenarios/type_change_payment_amount_drift_b.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    payload["observable_evidence_contract"] = {
+        "schema_version": "observable_evidence.v2",
+        "schema_relations": ["raw_customers", "raw_orders"],
+        "profile_relations": [],
+        "history_relations": [],
+        "expectation_relations": [],
+        "definition_nodes": [],
+        "unresolved_gaps": [
+            {
+                "gap_kind": "RELATION_SCHEMA_EXPECTATION",
+                "subject": "raw_customers",
+                "reason_code": "RELATION_NOT_ALLOWED",
+                "tool_name": "get_relation_schema_expectation",
+            },
+            {
+                "gap_kind": "DBT_NODE_DEFINITION",
+                "subject": CUSTOMERS,
+                "reason_code": "NODE_NOT_ALLOWED",
+                "tool_name": "get_dbt_node_definition",
+            },
+        ],
+    }
+    return ScenarioSpec.model_validate(payload)
+
+
+# -- refusal witnesses: explicit protocol identity, v1 rule unchanged --------
 
 
 def _event(**overrides) -> ToolTraceEvent:
@@ -188,13 +245,38 @@ def _event(**overrides) -> ToolTraceEvent:
     return ToolTraceEvent.model_validate(payload)
 
 
+def _batch_event(**overrides) -> ToolTraceEvent:
+    payload = {
+        "event_type": "TOOL_CALL",
+        "tool_name": "get_dbt_node_definition",
+        "arguments": {"node_ids": f"{CUSTOMERS},{STG_ORDERS}"},
+        "fingerprint": FINGERPRINT,
+        "evidence_ids": (),
+        "error_code": TARGETS_REFUSED_CODE,
+        "elapsed_ms": 1,
+        "target_refusals": (
+            TargetRefusal(target=CUSTOMERS, code="NODE_NOT_ALLOWED"),
+            TargetRefusal(target=STG_ORDERS, code="NODE_NOT_FOUND"),
+        ),
+    }
+    payload.update(overrides)
+    return ToolTraceEvent.model_validate(payload)
+
+
+def test_the_batch_tool_identity_is_frozen() -> None:
+    assert EVIDENCE_BATCH_TOOLS == (
+        "get_relation_schema_expectation",
+        "get_dbt_node_definition",
+    )
+    assert PROFILE_TOOL not in EVIDENCE_BATCH_TOOLS
+
+
 def test_v1_refusal_rule_is_unchanged() -> None:
     event = _event()
 
     assert refusal_witnessed(
         (event,), tool_name=PROFILE_TOOL, target="raw_orders", code="RELATION_NOT_ALLOWED"
     )
-    # Wrong code, wrong target, no refusal at all.
     assert not refusal_witnessed(
         (event,), tool_name=PROFILE_TOOL, target="raw_orders", code="RELATION_NOT_FOUND"
     )
@@ -213,48 +295,90 @@ def test_v1_refusal_rule_is_unchanged() -> None:
     )
 
 
-def test_v2_batch_refusals_witness_only_their_own_entries() -> None:
-    mixed = _event(
-        error_code="TARGETS_REFUSED",
-        arguments={"relation_names": "raw_customers,raw_orders"},
-        target_refusals=(
-            TargetRefusal(target="raw_customers", code="RELATION_NOT_ALLOWED"),
-            TargetRefusal(target="raw_orders", code="RELATION_NOT_FOUND"),
-        ),
+def test_a_v1_tool_cannot_carry_refusal_entries() -> None:
+    """Audit reproduction: a successful old-tool event with refusal entries used
+    to witness a refusal, because the rule dispatched on field content."""
+
+    with pytest.raises(ValidationError):
+        _event(target_refusals=(TargetRefusal(target="raw_orders", code="RELATION_NOT_ALLOWED"),))
+    with pytest.raises(ValidationError):
+        _event(error_code=TARGETS_REFUSED_CODE)  # v1 tool with the summary code
+
+
+def test_refusal_entries_require_an_atomic_refusal_event() -> None:
+    entry = (TargetRefusal(target=CUSTOMERS, code="NODE_NOT_ALLOWED"),)
+
+    # The call-level code must be the summary code, never None or a real code.
+    with pytest.raises(ValidationError):
+        _batch_event(error_code=None, target_refusals=entry)
+    with pytest.raises(ValidationError):
+        _batch_event(error_code="NODE_NOT_ALLOWED", target_refusals=entry)
+    # A refused batch call returns no evidence.
+    with pytest.raises(ValidationError):
+        _batch_event(target_refusals=entry, evidence_ids=("ev_" + "a" * 64,))
+
+
+def test_a_successful_batch_event_never_witnesses() -> None:
+    success = _batch_event(target_refusals=(), error_code=None)
+
+    assert not refusal_witnessed(
+        (success,), tool_name="get_dbt_node_definition", target=CUSTOMERS, code="NODE_NOT_ALLOWED"
     )
 
+
+def test_v2_witness_requires_the_target_to_be_in_the_recorded_request() -> None:
+    event = _batch_event(
+        target_refusals=(TargetRefusal(target=STG_ORDERS, code="NODE_NOT_ALLOWED"),),
+        arguments={"node_ids": CUSTOMERS},
+    )
+
+    # The refusal entry alone is not enough: the target was never requested.
+    assert not refusal_witnessed(
+        (event,),
+        tool_name="get_dbt_node_definition",
+        target=STG_ORDERS,
+        code="NODE_NOT_ALLOWED",
+    )
+
+
+def test_v2_batch_refusals_witness_only_their_own_entries() -> None:
+    mixed = _batch_event()
+
     assert refusal_witnessed(
-        (mixed,), tool_name=PROFILE_TOOL, target="raw_customers", code="RELATION_NOT_ALLOWED"
+        (mixed,), tool_name="get_dbt_node_definition", target=CUSTOMERS, code="NODE_NOT_ALLOWED"
     )
     assert refusal_witnessed(
-        (mixed,), tool_name=PROFILE_TOOL, target="raw_orders", code="RELATION_NOT_FOUND"
+        (mixed,), tool_name="get_dbt_node_definition", target=STG_ORDERS, code="NODE_NOT_FOUND"
     )
     # Mixed codes never cross over, and the call-level code never witnesses.
     assert not refusal_witnessed(
-        (mixed,), tool_name=PROFILE_TOOL, target="raw_orders", code="RELATION_NOT_ALLOWED"
+        (mixed,), tool_name="get_dbt_node_definition", target=STG_ORDERS, code="NODE_NOT_ALLOWED"
     )
     assert not refusal_witnessed(
-        (mixed,), tool_name=PROFILE_TOOL, target="raw_customers", code="TARGETS_REFUSED"
+        (mixed,), tool_name="get_dbt_node_definition", target=CUSTOMERS,
+        code=TARGETS_REFUSED_CODE
     )
 
 
 def test_v2_mixed_permission_never_witnesses_the_readable_target() -> None:
-    """Request [readable raw_orders, forbidden raw_customers]: the refusal of the
+    """Request [readable stg_orders, forbidden stg_payments]: the refusal of the
     forbidden target must not support a gap about the readable one."""
 
-    mixed = _event(
-        error_code="TARGETS_REFUSED",
-        arguments={"relation_names": "raw_orders,raw_customers"},
+    mixed = _batch_event(
+        arguments={"node_ids": f"{STG_ORDERS},model.jaffle_shop.stg_payments"},
         target_refusals=(
-            TargetRefusal(target="raw_customers", code="RELATION_NOT_ALLOWED"),
+            TargetRefusal(target="model.jaffle_shop.stg_payments", code="NODE_NOT_ALLOWED"),
         ),
     )
 
     assert not refusal_witnessed(
-        (mixed,), tool_name=PROFILE_TOOL, target="raw_orders", code="RELATION_NOT_ALLOWED"
+        (mixed,), tool_name="get_dbt_node_definition", target=STG_ORDERS, code="NODE_NOT_ALLOWED"
     )
     assert refusal_witnessed(
-        (mixed,), tool_name=PROFILE_TOOL, target="raw_customers", code="RELATION_NOT_ALLOWED"
+        (mixed,),
+        tool_name="get_dbt_node_definition",
+        target="model.jaffle_shop.stg_payments",
+        code="NODE_NOT_ALLOWED",
     )
 
 
@@ -304,35 +428,50 @@ def _insufficient_run(
     )
 
 
-def test_both_matchers_accept_v1_and_v2_refusals_for_the_same_gap() -> None:
+def test_both_matchers_keep_the_v1_rule_for_v1_scenarios() -> None:
     scenario = load_scenario_spec("required_null_order_customer_b")
 
     v1_trace = (_event(),)
     assert _receipt_proved(scenario, v1_trace)
     assert _insufficiency_matches(scenario, _insufficient_run(scenario, v1_trace))
 
-    v2_trace = (
+    # A v2 event never satisfies a v1 gap: the rule follows the tool's
+    # protocol identity on both sides of the split.
+    assert not _receipt_proved(scenario, (_batch_event(),))
+
+
+def test_a_real_v2_contract_loads_and_both_matchers_witness_its_gaps() -> None:
+    scenario = _v2_b_scenario()
+
+    trace = (
         _event(
-            error_code="TARGETS_REFUSED",
-            arguments={"relation_names": "raw_orders"},
+            tool_name="get_relation_schema_expectation",
+            arguments={"relation_names": "raw_customers,raw_orders"},
+            error_code=TARGETS_REFUSED_CODE,
             target_refusals=(
-                TargetRefusal(target="raw_orders", code="RELATION_NOT_ALLOWED"),
+                TargetRefusal(target="raw_customers", code="RELATION_NOT_ALLOWED"),
             ),
         ),
+        _batch_event(),
     )
-    assert _receipt_proved(scenario, v2_trace)
-    assert _insufficiency_matches(scenario, _insufficient_run(scenario, v2_trace))
+
+    assert _receipt_proved(scenario, trace)
+    assert _insufficiency_matches(scenario, _insufficient_run(scenario, trace))
 
 
 def test_a_wrong_per_target_code_fails_both_matchers() -> None:
-    scenario = load_scenario_spec("required_null_order_customer_b")
+    scenario = _v2_b_scenario()
 
     wrong = (
         _event(
-            error_code="TARGETS_REFUSED",
-            arguments={"relation_names": "raw_orders"},
-            target_refusals=(TargetRefusal(target="raw_orders", code="RELATION_NOT_FOUND"),),
+            tool_name="get_relation_schema_expectation",
+            arguments={"relation_names": "raw_customers,raw_orders"},
+            error_code=TARGETS_REFUSED_CODE,
+            target_refusals=(
+                TargetRefusal(target="raw_customers", code="RELATION_NOT_FOUND"),
+            ),
         ),
+        _batch_event(),
     )
 
     assert not _receipt_proved(scenario, wrong)

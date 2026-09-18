@@ -3,7 +3,7 @@
 - 日期：2026-09-18。范围：设计 §6 切片 0 的离线部分（发起于设计通过 `c189ba1`）。
 - **未包含**：数据库 dry run（构造的实跑验证）——按审计意见属独立授权范围，本报告只给出离线佐证与
   实跑清单。
-- 验证：`ruff check .`、`git diff --check` 通过；全量单测 **861 passed / 5 skipped**（新增 19 条）。
+- 验证：`ruff check .`、`git diff --check` 通过；全量单测 **868 passed / 5 skipped**（审计整改后 26 条 T13 切片 0 回归）。
 
 ## 1. 目标登记（T1′ 新增、T2′ 复用）
 
@@ -20,15 +20,30 @@
 ## 2. 合同 v2
 
 - `scenarios.py`：`ObservableEvidenceContractV2`（`observable_evidence.v2`）＝ v1 字段 +
-  `expectation_relations`（必须 ⊆ `schema_relations`）、`definition_nodes`（去重、非空），二者**默认空**。
-  `ScenarioSpec.observable_evidence_contract` 改为按 `schema_version` 判别的联合类型。
+  `expectation_relations`（必须 ⊆ `schema_relations`）、`definition_nodes`（去重、非空），二者**默认空**；
+  缺口使用**独立的** `ObservableEvidenceGapV2`（新增 `RELATION_SCHEMA_EXPECTATION`/`DBT_NODE_DEFINITION`
+  两个 kind、`get_relation_schema_expectation`/`get_dbt_node_definition` 两个工具、`NODE_NOT_ALLOWED`
+  拒绝码；v1 模型与校验不动）。`ScenarioSpec.observable_evidence_contract` 为按 `schema_version`
+  判别的联合类型。**诊断面同步**：`UnresolvedEvidence.evidence_kind`/`reason_code` 增加同一批词汇
+  （实施期测试暴露：否则 v2 诊断无法声明设计中的新缺口）；回归确认 v1 合同不能声明 v2 词汇。
 - **v1 序列化逐字节稳定**：回归对全部 22 个场景断言 v1 dump 的键集恰为原五键，且
   `ScenarioSpec.model_validate(dump).digest()` 与原对象相等——旧场景 digest、旧证书绑定不受影响。
 - **如实记录的漂移轴**：`scenario_spec_schema_sha256` 由 `fbf974…dd60` 变为 `4c9821…0a2b`
   （联合类型使总体 JSON schema 变化）。同一次核对确认：`diagnosis_schema_sha256` 不变，
   **v22 的六策略身份仍逐项相等**（新证据没有渗入 v1 工具面）。
 
-## 3. 拒绝见证（逐目标、v1/v2 分流）
+## 3. 拒绝见证（逐目标、v1/v2 分流；2026-09-18 审计整改后收紧）
+
+**审计整改（本轮）**：首版按"事件是否带非空 `target_refusals`"分流，导致成功事件也能证明拒绝
+（复现：旧 profile 工具 + `error_code=None` + 他人拒绝明细 → 见证为真）。现改为：
+
+- 分流依据是**冻结工具身份** `EVIDENCE_BATCH_TOOLS`，v1 工具**不可能**借新字段切换规则；
+- v2 见证四条件：调用级 `error_code == TARGETS_REFUSED` + `evidence_ids` 为空 + target 属于该次
+  **实际请求**（请求按固定键逗号连接记入 trace）+ `(target, code)` 精确命中一条条目；
+- 事件层不变量（模型校验）：带拒绝条目 ⇒ 必为 `TARGETS_REFUSED` 且无证据；`TARGETS_REFUSED` 只允许
+  出现在批量工具且至少一条条目；
+- 测试改用**真实 v2 工具名与真实 v2 合同**（首版用旧 profile 工具模拟 v2，恰好漏掉该边界）。
+
 
 - `diagnosis.py`：新增 `TargetRefusal{target, code}`；`ToolTraceEvent` 新增可选
   `target_refusals`（成功调用为空、拒绝目标不得重复）；调用级码 `TARGETS_REFUSED` 只作概括。

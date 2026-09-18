@@ -168,6 +168,18 @@ _SOURCE_TYPES: dict[EvidenceType, EvidenceSource] = {
     EvidenceType.RELATION_HISTORY: EvidenceSource.POSTGRES_PROFILE_SNAPSHOT,
 }
 
+#: The frozen T13 batch tool surface (``p1.evidence_tools.v2``). Witness rules
+#: dispatch on this identity — never on whether an event happens to carry
+#: refusal entries, so a v1 tool can never switch rules through the new field.
+EVIDENCE_BATCH_TOOLS = (
+    "get_relation_schema_expectation",
+    "get_dbt_node_definition",
+)
+
+#: Call-level summary code of an atomic batch refusal. It never witnesses a
+#: gap: the per-target ``target_refusals`` entries carry the real codes.
+TARGETS_REFUSED_CODE = "TARGETS_REFUSED"
+
 
 class EvidenceRecord(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")

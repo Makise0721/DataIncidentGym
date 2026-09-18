@@ -411,6 +411,53 @@ class ObservableEvidenceGap(BaseModel):
         return self
 
 
+class ObservableEvidenceGapV2(BaseModel):
+    """T13 gap vocabulary: the v1 kinds plus the two v2 evidence facts.
+
+    Kept separate from ``ObservableEvidenceGap`` so v1 contracts and their
+    digests stay byte-identical; only ``observable_evidence.v2`` scenarios use
+    this model.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    gap_kind: Literal[
+        "RELATION_SCHEMA",
+        "RELATION_DATA_PROFILE",
+        "TRANSFORMATION_DEFINITION",
+        "PAYMENT_EVENT_IDENTITY",
+        "RELATION_HISTORY",
+        "INGESTION_WATERMARK",
+        "RELATION_SCHEMA_EXPECTATION",
+        "DBT_NODE_DEFINITION",
+    ]
+    subject: StrictStr
+    reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED", "NODE_NOT_ALLOWED"]
+    tool_name: Literal[
+        "get_relation_schema",
+        "get_relation_data_profile",
+        "get_relation_history",
+        "get_relation_schema_expectation",
+        "get_dbt_node_definition",
+    ] | None
+
+    @model_validator(mode="after")
+    def validate_tool_binding(self) -> Self:
+        expected = {
+            "RELATION_SCHEMA": "get_relation_schema",
+            "RELATION_DATA_PROFILE": "get_relation_data_profile",
+            "TRANSFORMATION_DEFINITION": None,
+            "PAYMENT_EVENT_IDENTITY": None,
+            "RELATION_HISTORY": "get_relation_history",
+            "INGESTION_WATERMARK": None,
+            "RELATION_SCHEMA_EXPECTATION": "get_relation_schema_expectation",
+            "DBT_NODE_DEFINITION": "get_dbt_node_definition",
+        }[self.gap_kind]
+        if self.tool_name != expected:
+            raise ValueError("observable evidence gap/tool mismatch")
+        return self
+
+
 class ObservableEvidenceContract(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -446,7 +493,7 @@ class ObservableEvidenceContractV2(BaseModel):
     schema_relations: tuple[StrictStr, ...]
     profile_relations: tuple[StrictStr, ...]
     history_relations: tuple[StrictStr, ...]
-    unresolved_gaps: tuple[ObservableEvidenceGap, ...]
+    unresolved_gaps: tuple[ObservableEvidenceGapV2, ...]
     expectation_relations: tuple[StrictStr, ...] = ()
     definition_nodes: tuple[StrictStr, ...] = ()
 
