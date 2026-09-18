@@ -11,11 +11,13 @@ from data_incident_gym.artifacts import ARTIFACT_FILENAMES
 from data_incident_gym.benchmark_manifest import (
     CONFIRMABLE_SCENARIO_IDS,
     FORMAL_SCENARIO_IDS,
+    FROZEN_POLICY_STRATEGIES,
     MANIFEST_ID,
     MANIFEST_PATH,
     BenchmarkManifest,
     BenchmarkManifestError,
     ManifestModelConfiguration,
+    _policy_for_strategy,
     build_manifest,
     freeze_manifest,
     generate_cells,
@@ -279,3 +281,25 @@ def test_no_frozen_manifest_file_schedules_the_planner() -> None:
         assert [
             policy["strategy"] for policy in payload["policies"]
         ].count("EVIDENCE_PLANNER") == 0, path.name
+
+
+def test_frozen_v22_policy_surfaces_still_match_the_current_tree() -> None:
+    """T13 audit guard: v2 work must not drift any v1 policy surface.
+
+    Item-by-item comparison against the sealed manifest covers both the policy
+    identity digests and the final-diagnosis schema digest of the six frozen
+    strategies. A shared-schema change (for example widening a diagnosis
+    vocabulary) fails here instead of silently invalidating sealed identities.
+    """
+
+    frozen = json.loads(
+        (PROJECT_ROOT / "config" / "benchmark" / "p1-formal-v22.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    current = [
+        _policy_for_strategy(strategy).model_dump(mode="json")
+        for strategy in FROZEN_POLICY_STRATEGIES
+    ]
+
+    assert current == frozen["policies"]

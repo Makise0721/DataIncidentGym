@@ -3,7 +3,7 @@
 - 日期：2026-09-18。范围：设计 §6 切片 0 的离线部分（发起于设计通过 `c189ba1`）。
 - **未包含**：数据库 dry run（构造的实跑验证）——按审计意见属独立授权范围，本报告只给出离线佐证与
   实跑清单。
-- 验证：`ruff check .`、`git diff --check` 通过；全量单测 **868 passed / 5 skipped**（审计整改后 26 条 T13 切片 0 回归）。
+- 验证：`ruff check .`、`git diff --check` 通过；全量单测 **869 passed / 5 skipped**（T13 切片 0 回归 26 条 + 冻结 manifest 逐项回归 1 条）。
 
 ## 1. 目标登记（T1′ 新增、T2′ 复用）
 
@@ -17,20 +17,25 @@
   （`_apply_mutations` 与 `_restore_mutations`）都会经过它。回归钉住"每个可类型变更的关系都有依赖
   视图映射"。
 
-## 2. 合同 v2
+## 2. 合同 v2（含实施期审计修正：诊断合同 v1/v2 分离）
 
 - `scenarios.py`：`ObservableEvidenceContractV2`（`observable_evidence.v2`）＝ v1 字段 +
   `expectation_relations`（必须 ⊆ `schema_relations`）、`definition_nodes`（去重、非空），二者**默认空**；
   缺口使用**独立的** `ObservableEvidenceGapV2`（新增 `RELATION_SCHEMA_EXPECTATION`/`DBT_NODE_DEFINITION`
   两个 kind、`get_relation_schema_expectation`/`get_dbt_node_definition` 两个工具、`NODE_NOT_ALLOWED`
   拒绝码；v1 模型与校验不动）。`ScenarioSpec.observable_evidence_contract` 为按 `schema_version`
-  判别的联合类型。**诊断面同步**：`UnresolvedEvidence.evidence_kind`/`reason_code` 增加同一批词汇
-  （实施期测试暴露：否则 v2 诊断无法声明设计中的新缺口）；回归确认 v1 合同不能声明 v2 词汇。
+  判别的联合类型。
+- **诊断合同分离（审计 P1 修复）**：v2 词汇**不得**进入共享的 `UnresolvedEvidence`（那会改变
+  `Diagnosis` 的 JSON schema，连带改掉 static/no-tool 的策略身份与六策略的最终诊断 schema 摘要——本轮
+  审计独立复现了这一漂移）。改为独立合同：`UnresolvedEvidenceV2` + `DiagnosisV2`（同形同校验，仅换
+  缺口词表），v1 逐字节不变；封存 manifest 的逐项回归覆盖政策身份与最终诊断 schema 两项。
+  另记：共享类的 docstring 会作为 `description` 进入 schema，说明只能放注释。
 - **v1 序列化逐字节稳定**：回归对全部 22 个场景断言 v1 dump 的键集恰为原五键，且
   `ScenarioSpec.model_validate(dump).digest()` 与原对象相等——旧场景 digest、旧证书绑定不受影响。
-- **如实记录的漂移轴**：`scenario_spec_schema_sha256` 由 `fbf974…dd60` 变为 `4c9821…0a2b`
-  （联合类型使总体 JSON schema 变化）。同一次核对确认：`diagnosis_schema_sha256` 不变，
-  **v22 的六策略身份仍逐项相等**（新证据没有渗入 v1 工具面）。
+- **如实记录的漂移轴**：`scenario_spec_schema_sha256` 由 `fbf974…dd60` 变为 `086af3…99f3`
+  （联合类型使总体 JSON schema 变化，设计已批准）。**审计修正后**：`diagnosis_schema_sha256` 与 v22
+  逐字节相等，六策略 `policy_identity` 与 `final_diagnosis_schema_sha256` 亦逐项相等——由新增回归
+  `test_frozen_v22_policy_surfaces_still_match_the_current_tree` 对封存文件直接比较钉住。
 
 ## 3. 拒绝见证（逐目标、v1/v2 分流；2026-09-18 审计整改后收紧）
 
@@ -45,17 +50,22 @@
 - 测试改用**真实 v2 工具名与真实 v2 合同**（首版用旧 profile 工具模拟 v2，恰好漏掉该边界）。
 
 
-- `diagnosis.py`：新增 `TargetRefusal{target, code}`；`ToolTraceEvent` 新增可选
-  `target_refusals`（成功调用为空、拒绝目标不得重复）；调用级码 `TARGETS_REFUSED` 只作概括。
+**实现口径（整改后）**
+
+- `evidence.py`：冻结 `EVIDENCE_BATCH_TOOLS`（两个 v2 工具名）与调用级码 `TARGETS_REFUSED`；
+- `diagnosis.py`：新增 `TargetRefusal{target, code}`；`ToolTraceEvent` 新增可选 `target_refusals`，
+  并加事件层不变量——带拒绝条目 ⇒ 调用级码必为 `TARGETS_REFUSED` 且 `evidence_ids` 为空；
+  `TARGETS_REFUSED` 只允许出现在批量工具上且至少一条条目（v1 工具携带它会直接构造失败）；
 - 共享判据 `refusal_witnessed(trace, tool_name, target, code)`，**两个归档匹配器**
-  （certification 的 `_receipt_proved`、evaluator 的 `_insufficiency_matches`）都改用它：
-  - v2 批量工具（该工具存在带 `target_refusals` 的事件）：只认逐目标条目，`(target, code)` 必须
-    **精确命中恰好一条**；调用级码永不构成见证；
-  - v1 工具（无该字段）：**原规则逐字保留**——主题出现在调用参数值中、调用被拒，且这类事件恰好一条
-    且其码等于缺口码（"先计数、再比码"的既有语义未被放宽）。
-- 回归（`tests/unit/test_t13_slice0_contracts.py`）：混合权限（请求 `[可读 raw_orders, 禁止 raw_customers]`
-  只支撑被禁的那条）、混合错误码（同批 B/C 两码并存时各自只支撑自己的 `(target, code)`，交叉与
-  调用级码均不成立）、v1 原规则（错码/错目标/未拒/重复调用）、两个匹配器对 v1 与 v2 trace 同判。
+  （certification 的 `_receipt_proved`、evaluator 的 `_insufficiency_matches`）都改用它；
+- v1 工具：**原规则逐字保留**——主题出现在调用参数值中、调用被拒，且这类事件恰好一条且其码等于缺口
+  码（"先计数、再比码"的既有语义未被放宽）；
+- 回归（`tests/unit/test_t13_slice0_contracts.py`）：成功事件不得见证（审计复现）、目标不在实际请求
+  中不得见证、混合权限（请求 `[可读 stg_orders, 禁止 stg_payments]` 只支撑被禁的那条）、混合错误码
+  （交叉与调用级码均不成立）、事件层不变量、v1 原规则（错码/错目标/未拒/重复调用），以及
+  `_receipt_proved` 对**真实 v2 合同**（E1/E2 缺口）的见证与拒绝；
+- **边界（如实说明）**：`_insufficiency_matches` 的 v2 端到端用例在内存中使用独立的 `DiagnosisV2`
+  合同；v2 运行的归档/重载路径随 v2 策略面（切片 4）接入——其共享判据本身已在 v2 条件下单独测试。
 
 ## 4. 离线构造佐证（不是实跑结论）
 

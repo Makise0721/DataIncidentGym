@@ -158,6 +158,13 @@ DiagnosisClaim = Annotated[
 ]
 
 
+# The v1 model-visible gap vocabulary; part of every v1 surface schema.
+# T13's two new facts live in ``UnresolvedEvidenceV2`` instead of here: adding
+# them to this shared model changed ``Diagnosis.model_json_schema()`` and with
+# it the policy identity of several frozen strategies (audit finding on
+# ``da5b9a4``). A docstring on this class would show up as a schema description
+# and drift the same digests, so the note stays a comment. v1 stays
+# byte-identical; v2 surfaces use the separate model.
 class UnresolvedEvidence(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -168,7 +175,36 @@ class UnresolvedEvidence(BaseModel):
         "INGESTION_WATERMARK",
         "TRANSFORMATION_DEFINITION",
         "PAYMENT_EVENT_IDENTITY",
-        # T13 v2 evidence facts; a v1 contract never declares them.
+    ]
+    subject: NonBlankStr
+    reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED"]
+
+    @model_validator(mode="after")
+    def validate_reason_code(self) -> UnresolvedEvidence:
+        if self.evidence_kind in {"INGESTION_WATERMARK", "PAYMENT_EVENT_IDENTITY"} and (
+            self.reason_code != "NOT_OBSERVABLE"
+        ):
+            raise ValueError(f"{self.evidence_kind} requires NOT_OBSERVABLE")
+        return self
+
+
+class UnresolvedEvidenceV2(BaseModel):
+    """The v2 model-visible gap vocabulary (v1 kinds plus the T13 facts).
+
+    Not referenced by ``Diagnosis`` or any v1 surface; it exists so the v2
+    strategy contract (slice 4 of the T13 design) can declare expectation and
+    definition gaps without touching the frozen v1 schemas.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evidence_kind: Literal[
+        "RELATION_SCHEMA",
+        "RELATION_DATA_PROFILE",
+        "RELATION_HISTORY",
+        "INGESTION_WATERMARK",
+        "TRANSFORMATION_DEFINITION",
+        "PAYMENT_EVENT_IDENTITY",
         "RELATION_SCHEMA_EXPECTATION",
         "DBT_NODE_DEFINITION",
     ]
@@ -176,7 +212,7 @@ class UnresolvedEvidence(BaseModel):
     reason_code: Literal["NOT_OBSERVABLE", "RELATION_NOT_ALLOWED", "NODE_NOT_ALLOWED"]
 
     @model_validator(mode="after")
-    def validate_reason_code(self) -> UnresolvedEvidence:
+    def validate_reason_code(self) -> UnresolvedEvidenceV2:
         if self.evidence_kind in {"INGESTION_WATERMARK", "PAYMENT_EVENT_IDENTITY"} and (
             self.reason_code != "NOT_OBSERVABLE"
         ):
@@ -282,6 +318,18 @@ class Diagnosis(BaseModel):
             ):
                 raise ValueError("MODEL_ERROR cannot contain business claims")
         return self
+
+
+class DiagnosisV2(Diagnosis):
+    """The v2 model-visible diagnosis contract (T13; wired in slice 4).
+
+    Same shape, status rules and projection checks as ``Diagnosis`` — only the
+    unresolved-evidence vocabulary is the v2 one. ``Diagnosis`` itself stays
+    byte-identical, so every frozen v1 surface (policy identity, final-diagnosis
+    schema digest) keeps matching the sealed manifests.
+    """
+
+    unresolved_evidence: tuple[UnresolvedEvidenceV2, ...] = ()
 
 
 class TargetRefusal(BaseModel):

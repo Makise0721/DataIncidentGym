@@ -20,10 +20,12 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
+    DiagnosisV2,
     DiagnosticStrategy,
     TargetRefusal,
     ToolTraceEvent,
     UnresolvedEvidence,
+    UnresolvedEvidenceV2,
     refusal_witnessed,
 )
 from data_incident_gym.evaluation import _insufficiency_matches
@@ -389,12 +391,37 @@ def _insufficient_run(
     scenario: ScenarioSpec,
     tool_events: tuple[ToolTraceEvent, ...],
 ) -> DiagnosisRunResult:
-    diagnosis = Diagnosis(
+    """A v1-vocabulary insufficient run; v2 kinds use ``_insufficient_run_v2``."""
+
+    return _run(scenario, tool_events, unresolved_type=UnresolvedEvidence)
+
+
+def _insufficient_run_v2(
+    scenario: ScenarioSpec,
+    tool_events: tuple[ToolTraceEvent, ...],
+) -> DiagnosisRunResult:
+    """The v2 run: its diagnosis uses the separate v2 contract.
+
+    In-memory only — the archived v2 run/reload path arrives with the v2
+    strategy surface (T13 slice 4); the witness predicate itself is shared.
+    """
+
+    return _run(scenario, tool_events, unresolved_type=UnresolvedEvidenceV2)
+
+
+def _run(
+    scenario: ScenarioSpec,
+    tool_events: tuple[ToolTraceEvent, ...],
+    *,
+    unresolved_type,
+) -> DiagnosisRunResult:
+    diagnosis_type = Diagnosis if unresolved_type is UnresolvedEvidence else DiagnosisV2
+    diagnosis = diagnosis_type(
         status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
         run_id=RUN_ID,
         summary="The decisive evidence is not observable.",
         unresolved_evidence=tuple(
-            UnresolvedEvidence(
+            unresolved_type(
                 evidence_kind=gap.gap_kind,
                 subject=gap.subject,
                 reason_code=gap.reason_code,
@@ -456,7 +483,10 @@ def test_a_real_v2_contract_loads_and_both_matchers_witness_its_gaps() -> None:
     )
 
     assert _receipt_proved(scenario, trace)
-    assert _insufficiency_matches(scenario, _insufficient_run(scenario, trace))
+    assert _insufficiency_matches(scenario, _insufficient_run_v2(scenario, trace))
+    # The v2 vocabulary cannot be expressed by the v1 diagnosis contract.
+    with pytest.raises(ValidationError):
+        _insufficient_run(scenario, trace)
 
 
 def test_a_wrong_per_target_code_fails_both_matchers() -> None:
@@ -475,4 +505,4 @@ def test_a_wrong_per_target_code_fails_both_matchers() -> None:
     )
 
     assert not _receipt_proved(scenario, wrong)
-    assert not _insufficiency_matches(scenario, _insufficient_run(scenario, wrong))
+    assert not _insufficiency_matches(scenario, _insufficient_run_v2(scenario, wrong))

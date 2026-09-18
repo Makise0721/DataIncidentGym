@@ -159,8 +159,12 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
 - 新场景用新 case id 与新合同版本（`observable_evidence.v2`）；老场景文件与摘要不动。
 - **v2 联合类型（待裁定点 1，已认可方向）**：v1 独立模型与序列化；验收含旧场景 digest 不变、旧证书可
   加载、六策略身份逐字节不变；`ScenarioSpec` 总 schema 摘要变化如实记录。
-- 诊断面词表同步：`UnresolvedEvidence.evidence_kind` 增加 `RELATION_SCHEMA_EXPECTATION`/`DBT_NODE_DEFINITION`，
-  `reason_code` 增加 `NODE_NOT_ALLOWED`（v1 合同不会声明它们）。
+- **诊断合同 v1/v2 分离（实施期审计修正）**：v2 缺口词汇不得加入共享的 `UnresolvedEvidence`——那会改变
+  `Diagnosis.model_json_schema()`，连带改变 static/no-tool 的策略身份与全部六策略的最终诊断 schema 摘要。
+  v2 拥有独立合同：`UnresolvedEvidenceV2`（增两个 kind 与 `NODE_NOT_ALLOWED`）与 `DiagnosisV2`（同形、
+  同校验，仅换缺口词表）；v1 模型与 schema 逐字节不变，冻结 manifest 的六策略身份与
+  `final_diagnosis_schema_sha256` 以回归逐项钉住。注意：该共享类的**类 docstring 也会进入 schema**，
+  说明只能写在注释里。
 - 工具面版本 `p1.evidence_tools.v2` = 六工具 + E1/E2 + `NODE_NOT_ALLOWED` / `EVIDENCE_INTEGRITY_ERROR` /
   `TARGETS_REFUSED`（调用级概括）/ `TARGETS_EMPTY` / `BATCH_TOO_LARGE`；**批量语义（原子拒绝、上限 8、
   去重、顺序、计数）与 `ToolTraceEvent.target_refusals` 一并计入 v2 身份**；v1 面逐字节不变。影响面：
