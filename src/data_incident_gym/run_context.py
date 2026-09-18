@@ -294,6 +294,18 @@ def _validate_relative_artifact(value: object, expected: str) -> None:
         _fail("运行产物路径越界")
 
 
+def validate_runtime_record(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Validate one run's runtime record (v1 or v2) and return it.
+
+    The single authority for the record's shape: the harness verifier and the
+    evidence reader both go through it, so a run cannot pass one of them and be
+    refused by the other (dry-run finding, 2026-09-18: the verifier still
+    enforced the v1 key set and refused every v2 run).
+    """
+
+    return _validate_runtime(payload, run_id)
+
+
 def _validate_runtime(payload: dict[str, Any], run_id: str) -> dict[str, Any]:
     version = payload.get("schema_version")
     if version == RUNTIME_SCHEMA_VERSION:

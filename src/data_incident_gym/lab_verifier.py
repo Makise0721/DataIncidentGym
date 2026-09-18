@@ -20,6 +20,11 @@ from data_incident_gym.baseline import (
 )
 from data_incident_gym.config import PROJECT_ROOT, Settings
 from data_incident_gym.profiles import ProfileError, ProfileSnapshot, load_profile_snapshot
+from data_incident_gym.run_context import (
+    RUNTIME_V2_SCHEMA_VERSION,
+    RunContextError,
+    validate_runtime_record,
+)
 from data_incident_gym.scenarios import (
     AddNullableColumnMutation,
     ColumnRenameMutation,
@@ -354,6 +359,17 @@ class IncidentVerifier:
     @staticmethod
     def _validate_runtime(run_root: Path, run_id: str) -> dict[str, Any]:
         payload = IncidentVerifier._read_object(run_root / "runtime.json")
+        if payload.get("schema_version") == RUNTIME_V2_SCHEMA_VERSION:
+            # v2 carries the expectation/definition whitelists, the baseline
+            # binding and the build provenance. The shared record validator is
+            # the single authority for that shape — the same one the evidence
+            # reader uses, so a run cannot pass the harness and then be refused
+            # at read time (dry-run finding: this check enforced the v1 key set).
+            try:
+                validate_runtime_record(payload, run_id)
+            except RunContextError as exc:
+                raise _clean(LabVerificationError(f"runtime v2 记录无效：{exc}")) from None
+            return payload
         expected = {
             "schema_version",
             "run_id",

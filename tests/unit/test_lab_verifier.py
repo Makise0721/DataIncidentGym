@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from data_incident_gym.profiles import (
     RelationProfileSnapshot,
     RelationshipViolationFact,
 )
+from data_incident_gym.run_context import EVIDENCE_BASELINE_FILENAME
 from data_incident_gym.scenarios import (
     DeletePaymentRowsMutation,
     deleted_payment_rows,
@@ -587,3 +589,81 @@ def test_orphan_verifier_requires_public_history_for_confirmable_case(tmp_path: 
                 history=False,
             ),
         )
+
+
+# -- dry-run finding: the verifier must accept the v2 run record -------------
+
+
+def _v2_runtime_payload(*, expectation: list[str] | None = None) -> dict[str, object]:
+    return {
+        "schema_version": "p1.runtime.v2",
+        "run_id": RUN_ID,
+        "dbt_exit_code": 1,
+        "artifacts": {
+            "manifest": "dbt/target/manifest.json",
+            "run_results": "dbt/target/run_results.json",
+            "dbt_log": "dbt/logs/dbt.log",
+            "schema": "schema.json",
+            "profile_snapshot": "profile_snapshot.json",
+            "incident_brief": "incident_brief.json",
+        },
+        "observable_relations": {
+            "schema": ["raw_customers", "raw_orders"],
+            "profile": [],
+            "history": [],
+            "expectation": ["raw_customers"] if expectation is None else expectation,
+        },
+        "observable_nodes": {
+            "definition": ["model.jaffle_shop.customers", "model.jaffle_shop.stg_customers"]
+        },
+        "evidence_baseline": {
+            "path": EVIDENCE_BASELINE_FILENAME,
+            "baseline_fingerprint": "e5" + "0" * 62,
+            "sha256": "a" * 64,
+        },
+        "build_provenance": {
+            "dbt_invocation_id": "2fc86c24-abc8-47ec-9111-47979b836e01",
+            "artifact_sha256": {
+                "manifest": "b" * 64,
+                "run_results": "c" * 64,
+                "compiled_tree": "d" * 64,
+            },
+            "node_definitions": {
+                "model.jaffle_shop.customers": {"sha256": "1" * 64, "redacted": False}
+            },
+        },
+        "profile_spec_sha256": "f" * 64,
+    }
+
+
+def _write_runtime(run_root: Path, payload: dict[str, object]) -> None:
+    (run_root / "dbt" / "target").mkdir(parents=True, exist_ok=True)
+    (run_root / "runtime.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_v2_run_record_is_validated_by_the_shared_validator(tmp_path: Path) -> None:
+    """Dry-run reproduction: the verifier enforced the v1 key set and refused
+    every v2 run after its build had already written a valid record."""
+
+    _write_runtime(tmp_path, _v2_runtime_payload())
+
+    payload = IncidentVerifier._validate_runtime(tmp_path, RUN_ID)
+
+    assert payload["schema_version"] == "p1.runtime.v2"
+    assert payload["observable_nodes"]["definition"]
+
+
+def test_a_tampered_v2_run_record_is_refused(tmp_path: Path) -> None:
+    payload = _v2_runtime_payload()
+    payload["build_provenance"]["artifact_sha256"].pop("compiled_tree")  # type: ignore[union-attr]
+    _write_runtime(tmp_path, payload)
+
+    with pytest.raises(LabVerificationError, match="runtime v2 记录无效"):
+        IncidentVerifier._validate_runtime(tmp_path, RUN_ID)
+
+
+def test_a_v2_expectation_outside_the_visible_schema_is_refused(tmp_path: Path) -> None:
+    _write_runtime(tmp_path, _v2_runtime_payload(expectation=["raw_payments"]))
+
+    with pytest.raises(LabVerificationError, match="runtime v2 记录无效"):
+        IncidentVerifier._validate_runtime(tmp_path, RUN_ID)
