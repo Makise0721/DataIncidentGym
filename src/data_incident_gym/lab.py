@@ -71,6 +71,15 @@ _EXPECTED_ARTIFACTS = {
     "profile_snapshot": "profile_snapshot.json",
     "incident_brief": "incident_brief.json",
 }
+#: Staging views that depend on a raw relation. PostgreSQL refuses to change a
+#: column type while a view uses it, so the dependent view is dropped first and
+#: recreated by the next dbt build. Every relation a frozen mutation may type-
+#: change needs its entry here (guarded by a unit test).
+_DEPENDENT_VIEWS = {
+    "raw_customers": "stg_customers",
+    "raw_orders": "stg_orders",
+    "raw_payments": "stg_payments",
+}
 
 
 class LabError(RuntimeError):
@@ -563,10 +572,7 @@ class IncidentLab:
                 raise InvalidIncidentState("存在未授权 mutation")
 
     def _drop_dependency(self, relation: str) -> None:
-        view = {
-            "raw_orders": "stg_orders",
-            "raw_payments": "stg_payments",
-        }.get(relation)
+        view = _DEPENDENT_VIEWS.get(relation)
         if view is None:
             return
         statement = sql.SQL("DROP VIEW IF EXISTS {}.{}").format(

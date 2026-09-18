@@ -136,12 +136,22 @@ class ColumnRenameMutation(BaseModel):
         return self
 
 
+#: Frozen type-change targets: (relation, column) -> (from_type, to_type).
+#: T13 adds ``raw_customers.id`` for the expectation/definition pairs; the two
+#: pre-T13 targets keep their exact semantics.
+_TYPE_CHANGE_TARGETS: dict[tuple[str, str], tuple[str, str]] = {
+    ("raw_payments", "amount"): ("integer", "text"),
+    ("raw_orders", "user_id"): ("integer", "text"),
+    ("raw_customers", "id"): ("integer", "text"),
+}
+
+
 class ColumnTypeMutation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["COLUMN_TYPE_CHANGE"]
-    relation: Literal["raw_payments", "raw_orders"]
-    column: Literal["amount", "user_id"]
+    relation: Literal["raw_payments", "raw_orders", "raw_customers"]
+    column: Literal["amount", "user_id", "id"]
     from_type: Literal["integer", "text"]
     to_type: Literal["integer", "text"]
 
@@ -149,16 +159,9 @@ class ColumnTypeMutation(BaseModel):
     def validate_supported_change(self) -> Self:
         if self.from_type == self.to_type:
             raise ValueError("type mutation must change the type")
-        if (self.relation, self.column) == ("raw_payments", "amount") and (
-            self.from_type,
-            self.to_type,
-        ) != ("integer", "text"):
-            raise ValueError("unsupported payment type mutation")
-        if (self.relation, self.column) == ("raw_orders", "user_id") and (
-            self.from_type,
-            self.to_type,
-        ) != ("integer", "text"):
-            raise ValueError("unsupported order type mutation")
+        expected = _TYPE_CHANGE_TARGETS.get((self.relation, self.column))
+        if expected is None or (self.from_type, self.to_type) != expected:
+            raise ValueError("unsupported type mutation")
         return self
 
 
@@ -427,6 +430,51 @@ class ObservableEvidenceContract(BaseModel):
         return values
 
 
+class ObservableEvidenceContractV2(BaseModel):
+    """T13 contract: v1 plus the two evidence whitelists of the v2 tool surface.
+
+    ``expectation_relations`` gates the baseline-expectation fact and must be a
+    subset of the observable schema relations; ``definition_nodes`` gates the
+    node-definition fact and is intersected with the run's upstream closure at
+    read time. Both default to empty: a v2 scenario that names neither is
+    observably identical to v1 for the new facts.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["observable_evidence.v2"]
+    schema_relations: tuple[StrictStr, ...]
+    profile_relations: tuple[StrictStr, ...]
+    history_relations: tuple[StrictStr, ...]
+    unresolved_gaps: tuple[ObservableEvidenceGap, ...]
+    expectation_relations: tuple[StrictStr, ...] = ()
+    definition_nodes: tuple[StrictStr, ...] = ()
+
+    @field_validator(
+        "schema_relations", "profile_relations", "history_relations", "expectation_relations"
+    )
+    @classmethod
+    def validate_relation_names(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)) or any(
+            _IDENTIFIER_PATTERN.fullmatch(value) is None for value in values
+        ):
+            raise ValueError("relation names must be unique identifiers")
+        return values
+
+    @field_validator("definition_nodes")
+    @classmethod
+    def validate_node_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)) or any(not value.strip() for value in values):
+            raise ValueError("definition nodes must be unique non-blank ids")
+        return values
+
+    @model_validator(mode="after")
+    def validate_whitelists(self) -> Self:
+        if not set(self.expectation_relations).issubset(self.schema_relations):
+            raise ValueError("expectation relations must be observable schema relations")
+        return self
+
+
 class NullableColumnSchemaDriftDistractor(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -468,7 +516,10 @@ class ScenarioSpec(BaseModel):
     ground_truth_or_acceptable_root_causes: tuple[RootCauseCode, ...]
     direct_failure: StrictStr | None
     affected_assets: tuple[StrictStr, ...]
-    observable_evidence_contract: ObservableEvidenceContract
+    observable_evidence_contract: Annotated[
+        ObservableEvidenceContract | ObservableEvidenceContractV2,
+        Field(discriminator="schema_version"),
+    ]
     required_evidence_types: tuple[StrictStr, ...]
     forbidden_leakage: tuple[ForbiddenLeakage, ...]
     distractors: tuple[DistractorSpec, ...]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 
@@ -276,6 +277,15 @@ class Diagnosis(BaseModel):
         return self
 
 
+class TargetRefusal(BaseModel):
+    """One explicitly refused batch target and the backend's real code."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    target: NonBlankStr
+    code: NonBlankStr
+
+
 class ToolTraceEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -286,12 +296,58 @@ class ToolTraceEvent(BaseModel):
     evidence_ids: tuple[EvidenceId, ...]
     error_code: NonBlankStr | None = None
     elapsed_ms: Annotated[StrictInt, Field(ge=0)]
+    #: v2 batch tools only: the per-target refusals of an atomic batch refusal,
+    #: in request order. Empty for v1 calls and for successful calls; the
+    #: call-level ``error_code`` (``TARGETS_REFUSED``) never witnesses a gap.
+    target_refusals: tuple[TargetRefusal, ...] = ()
 
     @model_validator(mode="after")
     def reject_duplicates(self) -> ToolTraceEvent:
         if len(self.evidence_ids) != len(set(self.evidence_ids)):
             raise ValueError("evidence_ids must not contain duplicates")
+        targets = [item.target for item in self.target_refusals]
+        if len(targets) != len(set(targets)):
+            raise ValueError("target_refusals must not repeat a target")
         return self
+
+
+def refusal_witnessed(
+    trace_events: Iterable[ToolTraceEvent],
+    *,
+    tool_name: str,
+    target: str,
+    code: str,
+) -> bool:
+    """Whether the trace witnesses exactly ``(target, code)`` for one tool.
+
+    Two rules, split by tool surface (never mixed for one tool):
+
+    - **v2 batch tools** (any event carries ``target_refusals``): only the
+      per-target entries witness, and the exact ``(target, code)`` pair must
+      appear in exactly one event. The call-level code (``TARGETS_REFUSED``) is
+      a summary and never witnesses anything.
+    - **v1 tools** (no ``target_refusals`` anywhere for that tool): the original
+      rule — the target appears among the call's arguments, the call is refused,
+      and the count of such events is exactly one whose code equals ``code``.
+    """
+
+    events = tuple(event for event in trace_events if event.tool_name == tool_name)
+    if any(event.target_refusals for event in events):
+        witnesses = tuple(
+            event
+            for event in events
+            if any(
+                item.target == target and item.code == code
+                for item in event.target_refusals
+            )
+        )
+        return len(witnesses) == 1
+    witnesses = tuple(
+        event
+        for event in events
+        if event.error_code is not None and target in event.arguments.values()
+    )
+    return len(witnesses) == 1 and witnesses[0].error_code == code
 
 
 class RejectedAssessmentSummary(BaseModel):

@@ -16,6 +16,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisStatus,
     HealthStateClaim,
     ToolTraceEvent,
+    refusal_witnessed,
 )
 from data_incident_gym.diagnostic_kernel import (
     EvidenceGapStatus,
@@ -1037,16 +1038,12 @@ def _insufficiency_matches(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunRe
     for gap in scenario.observable_evidence_contract.unresolved_gaps:
         if gap.tool_name is None:
             continue
-        matching_events = tuple(
-            event
-            for event in trace
-            if event.tool_name == gap.tool_name
-            and event.error_code is not None
-            and gap.subject in event.arguments.values()
-        )
-        if len(matching_events) != 1:
-            return False
-        if matching_events[0].error_code != gap.reason_code:
+        if not refusal_witnessed(
+            trace,
+            tool_name=gap.tool_name,
+            target=gap.subject,
+            code=gap.reason_code,
+        ):
             return False
     return True
 

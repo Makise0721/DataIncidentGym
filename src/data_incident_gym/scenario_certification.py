@@ -39,7 +39,11 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, model_
 
 from data_incident_gym.artifacts import ArtifactWriter
 from data_incident_gym.config import PROJECT_ROOT, Settings
-from data_incident_gym.diagnosis import DiagnosticStrategy, ToolTraceEvent
+from data_incident_gym.diagnosis import (
+    DiagnosticStrategy,
+    ToolTraceEvent,
+    refusal_witnessed,
+)
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.evaluation import DeterministicEvaluator
 from data_incident_gym.evaluation_inputs import load_evaluation_input_bundle
@@ -199,14 +203,12 @@ def _receipt_proved(
     for gap in scenario.observable_evidence_contract.unresolved_gaps:
         if gap.tool_name is None:
             continue
-        matching = tuple(
-            event
-            for event in trace_events
-            if event.tool_name == gap.tool_name
-            and event.error_code is not None
-            and gap.subject in event.arguments.values()
-        )
-        if len(matching) != 1 or matching[0].error_code != gap.reason_code:
+        if not refusal_witnessed(
+            trace_events,
+            tool_name=gap.tool_name,
+            target=gap.subject,
+            code=gap.reason_code,
+        ):
             return False
     return True
 
