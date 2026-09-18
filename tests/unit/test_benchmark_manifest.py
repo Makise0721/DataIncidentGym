@@ -256,3 +256,26 @@ def test_freeze_manifest_rejects_path_that_disagrees_with_id(tmp_path: Path) -> 
 
     with pytest.raises(BenchmarkManifestError):
         freeze_manifest(manifest, wrong, project_root=tmp_path)
+
+
+def test_no_frozen_manifest_file_schedules_the_planner() -> None:
+    """Registering the planner into ``MODEL_STRATEGIES`` must not leak into any
+    frozen schedule: every on-disk manifest's cells and policies stay
+    planner-free until a new identity is approved and frozen.
+
+    Read as raw JSON on purpose — historical files do not (and must not) load
+    against the evolved schema; only their recorded schedule matters here.
+    """
+
+    files = sorted((PROJECT_ROOT / "config" / "benchmark").glob("p1-formal-*.json"))
+    assert files, "frozen manifest files must exist in the repository checkout"
+
+    for path in files:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["manifest_id"] == path.stem
+        assert [
+            cell["strategy"] for cell in payload["cells"]
+        ].count("EVIDENCE_PLANNER") == 0, path.name
+        assert [
+            policy["strategy"] for policy in payload["policies"]
+        ].count("EVIDENCE_PLANNER") == 0, path.name

@@ -7,9 +7,10 @@
   `1f50026` 模型可见面与同源 schema → `81a5b4a` 描述入身份 → `efe3a68` runner 与规划器路径回归 →
   `b25bfb5` 关闭详情与完整义务状态入归档 → `8ba8651` 归档汇总只计被接受的关闭 → 本轮 benchmark 接入
   （`MODEL_STRATEGIES` 注册、决策面委派、工厂路由、runner 构造与客户端生命周期）。
-- 验证：`ruff check .` 通过；`git diff --check` 通过；全量单测 **834 passed / 5 skipped**
+- 验证：`ruff check .` 通过；`git diff --check` 通过；全量单测 **835 passed / 5 skipped**
   （规划器相关 54 项：`test_evidence_planner.py` 42、`test_planner_runner.py` 12；另有
-  `test_diagnostic_agent.py` 与 `test_benchmark_runner.py` 的接线回归）。未调用真实模型，未运行数据库。
+  `test_diagnostic_agent.py`、`test_benchmark_runner.py` 与 `test_benchmark_manifest.py` 的接线
+  回归）。未调用真实模型，未运行数据库。
 
 ## 1. 机制 → 路径 → 断言映射
 
@@ -53,9 +54,16 @@
 - **未做真实测量**：没有真实模型调用，因此没有能力收益、成本或 `pass^k` 数据；本报告只证明软件行为。
 - **排程可见但未被排程**：规划器已进入 `MODEL_STRATEGIES`，benchmark 工厂按策略路由到
   `EvidencePlannerRunner`，`policy_surface_for_strategy` 返回规划器自己的决策面。但它不在
-  `MAIN_STRATEGIES`，也**不在 `FROZEN_POLICY_STRATEGIES`**：所有已冻结 manifest 的排程单元、
-  报告分区与策略面校验保持原样，`verify_manifest` 不受影响。规划器真正进入排程需要新的 manifest
-  身份获批冻结（届时才决定它在排程与报告中的位置），尚未实施。
+  `MAIN_STRATEGIES`，也**不在 `FROZEN_POLICY_STRATEGIES`**；回归逐文件确认落盘 manifest 的
+  cells/policies 均不含规划器（`test_no_frozen_manifest_file_schedules_the_planner`）。规划器真正
+  进入排程需要新的 manifest 身份获批冻结（届时才决定它在排程与报告中的位置），尚未实施。
+- **历史 manifest 与当前源码不整体兼容（既有状态，实测口径）**：本轮实测全部 15 个落盘 manifest，
+  在当前 HEAD 上 `verify_manifest` 均不通过——v1 因 schema 演进（formal model 字面量）载入即失败；
+  v9–v20 连策略面也与当前源码漂移；v21/v22 的六策略面仍与当前源码逐项一致，仅 `result_inputs` 自
+  T02/T03 将 evaluator 升至 `p1.evaluator.v3`（`57960ad`，晚于 v22 冻结、早于 T12）后漂移，且
+  v22 冻结修订（`40c7e82`）上的 evaluator 摘要与其冻结值逐字节吻合。这是 README「正式基准与证据
+  边界」描述的设计内保护（防止把新实现误记为旧批次），与规划器接入无关；历史结果的重算与校验
+  必须在各自冻结修订上执行。
 - **未见变体未物化**：新变体仍是设计里的 dev 扩展回归集方案，需要一次有界的 Docker/PostgreSQL 实跑与单独授权。
 - **T05 回放**：既有 9 条回放未因本轮改动而改变（全量单测含其回归）；规划器路径的机制覆盖见 §1，不代表
   回放库已覆盖规划器。
