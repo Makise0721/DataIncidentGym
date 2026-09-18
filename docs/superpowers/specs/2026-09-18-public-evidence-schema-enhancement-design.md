@@ -99,6 +99,21 @@
 
 **UNKNOWN 永不作为任何方向的证据**；`complete=false` 一律按 UNKNOWN。
 
+**切片 2 审计后的实施期收紧（读器契约，全部 fail-closed；"子图之外不触发 UNKNOWN"仍然成立）**
+
+- **完整消费**：读器实际遍历的每个 SELECT 必须被文档化语法**整体**消费。集合运算（`union`/`intersect`/
+  `except`）、逗号连接、无 `ON` 的连接、`using` 等非文档化条目形态、子句次序或重复违规 → 整体拒绝
+  （`UNSUPPORTED_SELECT`），不允许"保留可识别前缀、丢弃其余"。
+- **作用域按 SQL 语义**：书写别名**取代**关系名——`from raw_orders as raw_customers` 之下限定符
+  `raw_customers` 指向 `raw_orders`，原关系名不再是合法限定符；不支持的别名形态一律 UNKNOWN。
+- **终止条件**：只有公开节点类型判定为 seed/source 的关系可以终止追溯（调用方显式声明）；其余关系
+  缺定义 → UNKNOWN（新固定码 `DEFINITION_MISSING`），不得当作源列。定义与终止声明同时存在时以定义为准。
+- **命中边界**：候选表达式必须在消息中以**自身边界**出现；仅出现在更长引用内部的命中
+  （`customer_id` ⊂ `customers.customer_id`）是另一个表达式，不构成识别。
+- **连接条件形状**：只有"单一等值比较、两侧各为单列引用"支持；非等值（`>`、`<>`）、多条件合取、
+  一侧为表达式 → UNKNOWN。
+- **UNKNOWN 词表新增一条**：`DEFINITION_MISSING`（关系既无定义也不是公开终止源）。
+
 ### 2.3 权限与拒绝见证（本版修订批量语义）
 
 - 合同 v2 新增 `expectation_relations`、`definition_nodes`，**均默认空**；实际可读 = **合同白名单 ∩ 运行约束**
