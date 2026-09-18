@@ -779,3 +779,100 @@ def test_identification_ignores_whitespace_and_comment_differences() -> None:
     assert result.status == "RESOLVED"
     assert _origins(result) == [("analytics.raw_payments", "amount")]
     assert normalize_sql_text("A  B\n C") == "a b c"
+
+
+# -- dry-run round: dbt truncates the failing line it quotes ------------------
+
+#: The failure message of the authorized T13 dry run, byte-exact from
+#: ``.dig/lab/runs/22c98522ca7e46f183a52254084e0f79`` (run_results ``message``).
+#: PostgreSQL cuts the quoted line to 64 characters and marks the cut with
+#: ``...``, so the tail of the join condition never appears in the message.
+REAL_TRUNCATED_MESSAGE = (
+    r"""Database Error in model customers (models\customers.sql)
+  operator does not exist: text = integer
+  LINE 73:         on customers.customer_id = customer_orders.customer_...
+                                            ^
+"""
+    "  HINT:  No operator matches the given name and argument types. "
+    "You might need to add explicit type casts.\n"
+    r"  compiled code at C:\Users\29913\codex_space\DataIncidentGym\.dig\lab\runs"""
+    r"\22c98522ca7e46f183a52254084e0f79\dbt\target\run\jaffle_shop\models\customers.sql"
+)
+
+
+def test_the_real_truncated_message_gives_the_whole_join_condition() -> None:
+    """T1′/T2′ decisive path on the message a real run produces: the condition
+    is identified through its truncated prefix, and **both** origins are mapped
+    (the mapping itself uses the full archived SQL, never the fragment)."""
+
+    result = map_failing_expression(
+        REAL_CUSTOMERS,
+        REAL_TRUNCATED_MESSAGE,
+        upstream={
+            "data_incident_gym.analytics.stg_customers": UpstreamDefinition(REAL_STG_CUSTOMERS),
+            "data_incident_gym.analytics.stg_orders": UpstreamDefinition(REAL_STG_ORDERS),
+        },
+        terminal_relations=REAL_TERMINALS,
+    )
+
+    assert result.status == "RESOLVED"
+    assert result.expression == "customers.customer_id = customer_orders.customer_id"
+    assert _origins(result) == [
+        ("data_incident_gym.analytics.raw_customers", "id"),
+        ("data_incident_gym.analytics.raw_orders", "user_id"),
+    ]
+
+
+def test_a_prefix_without_the_truncation_marker_is_not_a_hit() -> None:
+    """A fragment that merely starts like an expression is not that
+    expression: only a marked cut identifies it."""
+
+    sql = (
+        'with source as (select * from "analytics"."raw_payments"), '
+        "renamed as (select amount / 100 as amount from source) select * from renamed"
+    )
+
+    result = map_failing_expression(
+        sql,
+        "LINE 3:     amount / 1",
+        upstream={},
+        terminal_relations=TERMINALS,
+    )
+
+    assert result.status == "UNKNOWN"
+    assert result.reason == "EXPRESSION_NOT_IDENTIFIED"
+
+
+def test_an_ellipsis_inside_a_literal_is_not_a_truncation_marker() -> None:
+    sql = (
+        'with source as (select * from "analytics"."raw_payments"), '
+        "renamed as (select amount / 100 as amount from source) select * from renamed"
+    )
+
+    result = map_failing_expression(
+        sql,
+        "LINE 3:     amount / 1'...'",
+        upstream={},
+        terminal_relations=TERMINALS,
+    )
+
+    assert result.status == "UNKNOWN"
+    assert result.reason == "EXPRESSION_NOT_IDENTIFIED"
+
+
+def test_a_cut_that_fits_both_conditions_stays_ambiguous() -> None:
+    """Recorded boundary: a shorter cut (``customers.customer_...``) is a
+    genuine prefix of both join conditions, so nothing may be chosen."""
+
+    result = map_failing_expression(
+        REAL_CUSTOMERS,
+        "  LINE 73:         on customers.customer_...",
+        upstream={
+            "data_incident_gym.analytics.stg_customers": UpstreamDefinition(REAL_STG_CUSTOMERS),
+            "data_incident_gym.analytics.stg_orders": UpstreamDefinition(REAL_STG_ORDERS),
+        },
+        terminal_relations=REAL_TERMINALS,
+    )
+
+    assert result.status == "UNKNOWN"
+    assert result.reason == "EXPRESSION_AMBIGUOUS"

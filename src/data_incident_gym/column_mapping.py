@@ -604,10 +604,12 @@ def _single_reference(text: str) -> tuple[str | None, str] | None:
 #: Characters that extend a reference: a hit touching one of them is part of a
 #: longer expression and is therefore not an identification.
 _EXTENDING_CHARACTER = re.compile(r"[A-Za-z0-9_.$]")
+#: How dbt/PostgreSQL mark a failing line they cut to a fixed width.
+_TRUNCATION_MARKER = "..."
 
 
-def _bounded_occurrence(normalized: str, message: str) -> bool:
-    """True when ``normalized`` occurs in ``message`` on its own boundaries.
+def _bounded_spans(normalized: str, message: str) -> list[tuple[int, int]]:
+    """Spans where ``normalized`` occurs in ``message`` on its own boundaries.
 
     A candidate that only occurs *inside* a longer reference is not the
     expression the message names: ``customer_id`` inside
@@ -615,15 +617,44 @@ def _bounded_occurrence(normalized: str, message: str) -> bool:
     map a substring of the failing SQL instead of the failing SQL.
     """
 
+    spans: list[tuple[int, int]] = []
     start = message.find(normalized)
     while start != -1:
         end = start + len(normalized)
         before = message[start - 1] if start > 0 else ""
         after = message[end] if end < len(message) else ""
         if not _EXTENDING_CHARACTER.match(before) and not _EXTENDING_CHARACTER.match(after):
-            return True
+            spans.append((start, end))
         start = message.find(normalized, start + 1)
-    return False
+    return spans
+
+
+def _truncation_spans(normalized: str, message: str) -> list[tuple[int, int]]:
+    """Spans where a candidate appears only as a truncated prefix.
+
+    dbt reports the failing line cut to a fixed width and marked with ``...``,
+    so the tail of an expression never appears in the message (dry-run finding:
+    the real message carries only 64 characters and cuts inside an identifier).
+    A prefix ending exactly at such a marker is that expression — the mapping
+    itself still uses the full SQL text, never the fragment. The marker must end
+    a fragment (followed by whitespace or the end of the message): an ellipsis
+    inside a literal is not a truncation.
+    """
+
+    spans: list[tuple[int, int]] = []
+    index = message.find(_TRUNCATION_MARKER)
+    while index != -1:
+        following = message[index + len(_TRUNCATION_MARKER) :][:1]
+        if following in {"", " "}:
+            for length in range(min(index, len(normalized)), 0, -1):
+                if message[index - length : index] == normalized[:length]:
+                    start = index - length
+                    before = message[start - 1] if start > 0 else ""
+                    if not _EXTENDING_CHARACTER.match(before):
+                        spans.append((start, index))
+                    break
+        index = message.find(_TRUNCATION_MARKER, index + 1)
+    return spans
 
 
 def _tokenize_expression(expression: str) -> list[str] | None:
@@ -1010,31 +1041,39 @@ def map_failing_expression(
     normalized_message = normalize_sql_text(message)
     if not normalized_message:
         return _unknown("EXPRESSION_NOT_IDENTIFIED")
-    matches: list[tuple[str, str, _Select, Mapping[str, str]]] = []
+    matches: list[tuple[str, str, _Select, Mapping[str, str], tuple[int, int]]] = []
     for kind, expression, select, ctes in _candidates(query):
         normalized = normalize_sql_text(expression)
         if not normalized:
             continue
-        if _bounded_occurrence(normalized, normalized_message):
-            matches.append((kind, expression, select, ctes))
+        # The widest span this candidate is named by: its own text, or the
+        # truncated prefix dbt leaves when it cuts the failing line.
+        spans = _bounded_spans(normalized, normalized_message)
+        spans += _truncation_spans(normalized, normalized_message)
+        if spans:
+            widest = max(spans, key=lambda span: span[1] - span[0])
+            matches.append((kind, expression, select, ctes, widest))
     if not matches:
         return _unknown("EXPRESSION_NOT_IDENTIFIED")
-    # A hit that is a substring of another hit is the same expression seen
-    # through a narrower candidate (for example the projection
-    # ``customers.customer_id`` inside the join condition that names it); only
-    # the maximal hits count, and two maximal hits stay ambiguous.
-    normalized_hits = [normalize_sql_text(item[1]) for item in matches]
+    # A hit that lies inside another hit is the same expression seen through a
+    # narrower candidate (the projection ``customers.customer_id`` inside the
+    # join condition that names it, or inside a truncated rendering of it); only
+    # the maximal spans count, and two maximal hits stay ambiguous.
     maximal = [
         item
-        for item, normalized in zip(matches, normalized_hits, strict=True)
+        for item in matches
         if not any(
-            normalized != other and normalized in other for other in normalized_hits
+            other is not item
+            and other[4] != item[4]
+            and other[4][0] <= item[4][0]
+            and item[4][1] <= other[4][1]
+            for other in matches
         )
     ]
     if len(maximal) > 1:
         return _unknown("EXPRESSION_AMBIGUOUS")
 
-    kind, expression, select, ctes = maximal[0]
+    kind, expression, select, ctes, _span = maximal[0]
     expression = _without_alias(expression)
     if kind == "join":
         # Only a single equi-join condition between two column references is a
