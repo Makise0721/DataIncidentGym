@@ -78,3 +78,67 @@ relation_bridge FAILED: AttributeError: 'NoneType' object has no attribute 'stri
 1. 根因与修复方案（§3）的复核；修复本身未重跑任何认证/数据库操作。
 2. 重新认证需**新的授权**（本次授权按"任一 C 项不成立即停"已消耗）；建议新授权沿用本次规格，前置
    HEAD 至少含本次修复提交，其余条款不变。
+
+## 7. 第二次执行（2026-09-19，授权书 round2）
+
+- 执行 HEAD：`469ef047bf57997173e7b5ac6fcd114748f1a9f3`（含身份桥修复）；工作树干净；
+  `pipeline build` fingerprint == F0 逐字相等；未运行 `doctor`。
+- 命令（逐字）：`uv run data-incident-gym certify --case schema_type_change_raw_customer_id_a
+  --case schema_type_change_raw_customer_id_b --case schema_type_change_raw_order_user_id_a
+  --case schema_type_change_raw_order_user_id_b --admit --output artifacts/admissions/t13-pairs.json`
+- stdout（逐字）：
+
+```
+[通过] schema_type_change_raw_customer_id_a failure_classes=-
+[未通过] schema_type_change_raw_customer_id_b failure_classes=ENVIRONMENT
+[通过] schema_type_change_raw_order_user_id_a failure_classes=-
+[未通过] schema_type_change_raw_order_user_id_b failure_classes=ENVIRONMENT
+[准入] schema_type_change_raw_customer_id_a reasons=-
+[拒绝] schema_type_change_raw_customer_id_b reasons=CERTIFICATION_FAILED
+[准入] schema_type_change_raw_order_user_id_a reasons=-
+[拒绝] schema_type_change_raw_order_user_id_b reasons=CERTIFICATION_FAILED
+certified: 2/4
+admitted: 2/4
+report: C:\Users\29913\codex_space\DataIncidentGym\artifacts\admissions\t13-pairs.json
+```
+
+- 四轮 run（按执行顺序）：对 1 A `d8cf6e8bb4d548d8aad34b30583a2da7`、对 1 B
+  `6d02759ab6bd43669baba6b008b5a9e1`、对 2 A `5cc3d793f3e34ec98b33a8e821abeab3`、对 2 B
+  `de0dd4c86ace447e93ebd0516411cf53`。按授权随附 4 次 `eval score`。
+
+### C1–C8 实测
+
+| 编号 | 实测 |
+| --- | --- |
+| C1 | **四轮全部成立**：`p1.runtime.v2`；`dbt_invocation_id` + `artifacts_sha256{manifest,run_results,compiled_tree}` 齐；`node_definitions` = 22 个编译节点、`redacted` 全 false；`evidence_baseline.fingerprint` == F0 |
+| C2 | **按 A/B 分流成立**：两个 A 的 E1 快照含 `raw_customers`/`raw_orders` 且逐关系带 `relation_identity` + `resource_type`（对 dry run 旧归档的直接区别证据）；两个 B 的快照存在、fingerprint == F0、空白名单裁剪后 `relations` = `[]` |
+| C3 | **A 半成立、B 半不成立**：A×2 `certified=True`（CONFIRMED / SOURCE_SCHEMA_COLUMN_TYPE_CHANGED / 资产 = `["model.jaffle_shop.customers"]` 与合同一致 / failure_classes 空）；B×2 `certified=False`，failure_classes = `ENVIRONMENT`，finding = `REFERENCE_RUN_COMPLETED` detail = **`ARTIFACT_WRITE_FAILED`**（非 BUILD_FAILED，升级规则不触发） |
+| C4 | **未达**（B 的诊断在内存中完成后未落盘，无 `unresolved_evidence`/`target_refusals` 归档可核） |
+| C5 | **A 半成立**：两个 A 的 collected 与 cited 均为六类型（`DBT_RUN_RESULTS`、`DBT_NODE_ERROR`、`DBT_LINEAGE`、`RELATION_SCHEMA`、`RELATION_SCHEMA_EXPECTATION`、`DBT_NODE_DEFINITION`）；B×2 未达（无产物） |
+| C6 | **A 半成立**：`tool_call_attempts=8`、`successful=8`、`model_requests=0`（provider=reference-analyst，model=none）；B×2 未达 |
+| C7 | **A 半成立**：两个 A 的 `eval score` 均 PASSED 且 `changed_checks: 无（与原归档评分逐项一致）`；两个 B = `NOT_RE_SCORABLE（ARTIFACT_RUN_MISSING）`，如实记录 |
+| C8 | **成立**：每轮 restore 在 finally 内执行；执行后活库两个变异列均为 integer，只读指纹 == F0 逐字相等 |
+
+### 第二次停机根因（离线复现，未触碰真实 artifacts/）
+
+失败阶段在**评测之后的产物写出**（非 BUILD_FAILED）：`ArtifactWriter._validate_complete_bundle` 把
+写出的 `diagnosis.json` 用**冻结的 v1 `Diagnosis`** 模型重新校验；B 变体的 `DiagnosisV2` 缺口词表
+（`RELATION_SCHEMA_EXPECTATION` / `NODE_NOT_ALLOWED`）在 v1 `Literal` 上必然 ValidationError →
+`ARTIFACT_WRITE_FAILED`，写入器清理临时目录故盘上无痕。这是归档层的 v2 接缝缺失（第三增量报告曾
+断言"序列化同形无碍"——该断言对此重验路径不成立，属执行侧判断错误，如实记录）。离线复现（纯内存
+构造 v2 缺口 payload）：v1 `Diagnosis.model_validate` 拒绝（3 个校验错误）、`DiagnosisV2` 接受；
+A 变体不受影响（其诊断无未决缺口）。
+
+修复（`469ef04` 之后的提交）：`_validate_complete_bundle` 按产生诊断的**实际合同类**
+（`DiagnosisV2`/`Diagnosis`）重验持久化文件；回归
+`test_a_v2_diagnosis_round_trips_through_the_writer` 以含两条 v2 缺口的诊断过完整写入并回读。
+全量 **989 passed / 5 skipped**，ruff、`git diff --check` 干净；修复未执行任何数据库/认证操作。
+
+### 结论与请求裁定
+
+- **认证不成立（B 半边）**：两对必须成对认证；A×2 已认证并准入（内嵌卡片 `certified=True`，tool calls
+  8/8），B×2 因归档层缺陷未完成。本次授权消耗，未重跑。
+- 修复后 B 路径的已知链路（构建 → 诊断 → 评测 → 归档）各环节均已有实测或回归覆盖；是否授权第三次
+  执行（规格沿用，前置 HEAD 含本次修复提交）由审计裁定。若第三次仍在构建后处理阶段停机，升级规则
+  （v2 链路整体审计）继续有效。
+- 两份授权书随本报告一并入库。

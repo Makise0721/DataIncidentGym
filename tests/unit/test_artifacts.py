@@ -21,9 +21,11 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
+    DiagnosisV2,
     DiagnosticStrategy,
     EvidenceGateTraceEvent,
     PolicyIdentity,
+    UnresolvedEvidenceV2,
 )
 from data_incident_gym.evaluation import (
     EvaluationApplicability,
@@ -125,6 +127,44 @@ def _artifact_run() -> ArtifactRun:
 def _git_command(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
     stdout = "1" * 40 + "\n" if argv[-2:] == ["rev-parse", "HEAD"] else ""
     return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+
+def test_a_v2_diagnosis_round_trips_through_the_writer(tmp_path: Path) -> None:
+    """Certification stop, round 2 (2026-09-19): the bundle validator used to
+    re-validate every written diagnosis against the frozen v1 model, refusing
+    a v2 run's own archive. The validator must round-trip into the same
+    contract that produced the diagnosis."""
+
+    base = _diagnosis_run()
+    diagnosis = DiagnosisV2(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="The decisive expectation and definition facts are not granted.",
+        unresolved_evidence=(
+            UnresolvedEvidenceV2(
+                evidence_kind="RELATION_SCHEMA_EXPECTATION",
+                subject="raw_customers",
+                reason_code="RELATION_NOT_ALLOWED",
+            ),
+            UnresolvedEvidenceV2(
+                evidence_kind="DBT_NODE_DEFINITION",
+                subject="model.jaffle_shop.customers",
+                reason_code="NODE_NOT_ALLOWED",
+            ),
+        ),
+        confidence=0.0,
+    )
+    run = _artifact_run().model_copy(
+        update={"diagnosis_run": base.model_copy(update={"diagnosis": diagnosis})}
+    )
+
+    output = ArtifactWriter(tmp_path, run_command=_git_command).write(run)
+
+    persisted = json.loads((output / "diagnosis.json").read_text(encoding="utf-8"))
+    assert DiagnosisV2.model_validate(persisted) == diagnosis
+    assert "RELATION_SCHEMA_EXPECTATION" in (output / "diagnosis.json").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_static_run_writes_exactly_six_files_without_kernel_state(tmp_path: Path) -> None:

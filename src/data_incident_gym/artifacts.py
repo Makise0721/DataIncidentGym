@@ -30,6 +30,7 @@ from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
+    DiagnosisV2,
     DiagnosticStrategy,
     KernelStateTraceEvent,
     PolicyIdentity,
@@ -448,7 +449,17 @@ class ArtifactWriter:
             if line
         )
         evidence = EvidenceArtifact.model_validate(_load_json(texts["evidence.json"]))
-        diagnosis = Diagnosis.model_validate(_load_json(texts["diagnosis.json"]))
+        # The persisted diagnosis must round-trip into the same contract that
+        # produced it: a v2 run's gaps (RELATION_SCHEMA_EXPECTATION /
+        # DBT_NODE_DEFINITION with NODE_NOT_ALLOWED) are outside the frozen v1
+        # vocabulary, so re-validating against ``Diagnosis`` would refuse the
+        # run's own archive (certification stop, round 2).
+        diagnosis_model = (
+            DiagnosisV2
+            if isinstance(run.diagnosis_run.diagnosis, DiagnosisV2)
+            else Diagnosis
+        )
+        diagnosis = diagnosis_model.model_validate(_load_json(texts["diagnosis.json"]))
         evaluation = EvaluationResult.model_validate(_load_json(texts["evaluation.json"]))
         if (
             metadata.incident_case_id != run.incident_case_id
