@@ -1071,7 +1071,13 @@ class IncidentLab:
             if not isinstance(node, dict):
                 continue
             name = node.get("name")
-            identity = relation_identity(node.get("relation_name"))
+            raw_relation = node.get("relation_name")
+            # Test nodes (and any node without a relation) carry no
+            # relation_name: they are absent from the bridge, exactly like the
+            # E2 fact path — never an AttributeError.
+            identity = (
+                relation_identity(raw_relation) if isinstance(raw_relation, str) else None
+            )
             resource_type = node.get("resource_type")
             if (
                 not isinstance(name, str)

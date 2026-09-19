@@ -1379,3 +1379,43 @@ def test_two_nodes_claiming_one_relation_name_are_refused(tmp_path: Path) -> Non
         _lab(tmp_path)._write_evidence_baseline(tmp_path, spec)
 
     assert "关系名在 manifest 中不唯一" in str(error.value)
+
+
+def test_nodes_without_a_relation_are_absent_from_the_bridge(tmp_path: Path) -> None:
+    """Real-manifest case (certification stop, 2026-09-19): dbt test nodes sit
+    in ``nodes`` with ``relation_name`` null. The bridge must skip them like
+    the E2 fact path does — an AttributeError here fails every real v2 build."""
+
+    _write_trusted_baseline(tmp_path)
+    spec = _v2_spec(expectation=["raw_customers"])
+    _run_root(
+        tmp_path,
+        nodes={
+            "seed.jaffle_shop.raw_customers": {
+                "depends_on": [],
+                "manifest_text": None,
+                "resource_type": "seed",
+                "name": "raw_customers",
+                "relation_name": '"data_incident_gym"."analytics"."raw_customers"',
+            },
+            "test.jaffle_shop.unique_raw_customers_id.3744510712": {
+                "depends_on": [],
+                "manifest_text": None,
+                "resource_type": "test",
+                "name": "unique_raw_customers_id",
+                "relation_name": None,
+            },
+        },
+        parent_map={},
+        results=[],
+        compiled_files={},
+    )
+
+    _lab(tmp_path)._write_evidence_baseline(tmp_path, spec)
+
+    payload = json.loads((tmp_path / EVIDENCE_BASELINE_FILENAME).read_text(encoding="utf-8"))
+    entries = {entry["name"]: entry for entry in payload["relations"]}
+    assert entries["raw_customers"]["relation_identity"] == (
+        "data_incident_gym.analytics.raw_customers"
+    )
+    assert entries["raw_customers"]["resource_type"] == "seed"
