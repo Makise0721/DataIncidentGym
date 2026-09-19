@@ -268,3 +268,51 @@ report: C:\Users\29913\codex_space\DataIncidentGym\artifacts\admissions\t13-pair
 - 后续留档（审计裁定，非阻塞）：CLI 裸 `except Exception` 吞错误码（`CERTIFICATION_SETUP_FAILED`
   掩盖 `SCORING_INPUTS_INVALID`）待后续修；5 处认证路径外的 v1 重验点记为已知接缝，待 v2 场景
   进 benchmark 时统一处理。
+
+## 10. p1-formal-v23 manifest 冻结（2026-09-19，授权书 manifest-freeze）
+
+- 前置：HEAD = `bb8d5ca`（T13 收口提交）、工作树干净、全量 991 passed / 5 skipped、ruff 与
+  `git diff --check` 干净；全程离线（未触数据库、未调模型、未运行 doctor）。
+
+### F1 漂移清单复核（冻结前，与 v22 逐项比对）
+
+- `result_inputs_for_project` 现算值 vs v22 记录：漂移**恰好三项**——`evaluator_sha256`
+  （`54b2110e…` → `0579a036…`）、`evaluator_version`（`p1.evaluator.v2` → `p1.evaluator.v3`）、
+  `scenario_spec_schema_sha256`（`fbf97404…` → `086af389…`，v2 合同字段）；`diagnosis_schema_sha256`、
+  `profile_spec_sha256/version` 逐字不变。无第四项漂移。
+- `scenario_catalog` 17 条逐条相等；`policies` 六策略逐个相等；`formal_scenario_ids` 12 条相等；
+  `cells`（归一化 `run_id` 占位符后）106 格逐字相等。
+
+### 提交与命令（逐字）
+
+1. 批准提交：`d901d6031c692c9cc25c5a6a9c85b3d370d55135`
+   `feat: approve p1-formal-v23 diagnostic measurement identity`
+   （`benchmark_manifest.py` 的 `APPROVED_MANIFEST_IDS` 恰一行 + 测试钉值三文件同步；与先例
+   `22d621d` 同构，且按当前测试现状把两处"拒绝下一个未批准身份"前移到 v24——这是与先例 diff 的
+   唯一形式差异，属测试随批准前移的正常演进。）
+2. `uv run data-incident-gym benchmark freeze --manifest-id p1-formal-v23 --implementation-revision
+   d901d6031c692c9cc25c5a6a9c85b3d370d55135 --output config/benchmark/p1-formal-v23.json`
+   stdout（逐字）：
+   `manifest: …\nsha256: 6f7846c694db698d29bc6ce8afab9d9be4ddd537972c2abb7a8e8084304d311f\ncells: 106; model_backed: 94; fixed_rule: 12`
+3. `uv run data-incident-gym benchmark verify --manifest config/benchmark/p1-formal-v23.json`
+   stdout（逐字）：
+   `manifest: …\nsha256: 6f7846c694db698d29bc6ce8afab9d9be4ddd537972c2abb7a8e8084304d311f\nverified: 17 catalog scenarios; 12 formal scenarios; 106 cells; 94 model-backed`
+4. 入库提交：`6229595` `chore: freeze p1-formal-v23 diagnostic measurement manifest`（仅该清单文件）。
+
+### F2–F4 实测
+
+- **F2 成立**：freeze 与 verify 的 stdout 计数一致（cells 106 / model_backed 94 / fixed_rule 12），
+  两次 sha256 相同：`6f7846c694db698d29bc6ce8afab9d9be4ddd537972c2abb7a8e8084304d311f`。
+- **F3 成立**：`formal_scenario_ids` 与 v22 逐字相等（12 条）；目录 17 条逐条相等；六策略逐个相等；
+  T13 四条 case id 不出现在 v23 的任何位置；`cells` 相对 v22 的差异**仅** `run_id` 占位符
+  （106 个唯一新占位符；归一化后与 v22 逐字相等，且 v21→v22 先例呈同一模式——冻结机制为后续测量
+  预分配 run id 的设计行为，非漂移）；`implementation_revision` = 批准提交 SHA；
+  `result_inputs` 漂移恰为 F1 的三项。
+- **F4 成立**：`git diff bb8d5ca..HEAD --stat` = `benchmark_manifest.py`（1 行）+ 两处测试钉值
+  （6/3 行）+ 新清单文件一个；无其他改动；工作树已跟踪文件干净。
+
+### 结论
+
+- **F1–F4 全部成立，冻结成立**：`p1-formal-v23` 把 T13 收口后的实现修订（评测器 v3 + v2 场景模式）
+  钉进正式测量清单，为后续真实模型测量提供绑定基准。T13 全部收口；`benchmark run`（真实模型测量）
+  与 T13 两对进正式赛程均需各自另行授权。
