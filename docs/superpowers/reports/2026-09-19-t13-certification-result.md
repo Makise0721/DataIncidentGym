@@ -216,3 +216,55 @@ ValidationError → `SCORING_INPUTS_INVALID`（`EvaluationInputsError`，`Runtim
   或回归覆盖；第三次执行未见任何新的诊断内容缺陷。
 - 四个 `eval score` 命令按授权执行：对 1 A PASSED（逐项一致）；对 1 B `SCORING_INPUTS_INVALID`
   （旧标记边界，见上）；对 2 无 run_id 存在（循环未达），两条命令无可执行对象。
+
+## 9. 第四次执行（2026-09-19，授权书 round4）——认证成立，T13 收口
+
+- 执行 HEAD：`d00885631e9771a4ba0011b772d1030af89a669b`；工作树干净；`pipeline build`
+  fingerprint == F0 逐字相等；未运行 `doctor`。
+- 命令（逐字）：`uv run data-incident-gym certify --case schema_type_change_raw_customer_id_a
+  --case schema_type_change_raw_customer_id_b --case schema_type_change_raw_order_user_id_a
+  --case schema_type_change_raw_order_user_id_b --admit --output artifacts/admissions/t13-pairs.json
+  --overwrite`
+- stdout（逐字）：
+
+```
+[通过] schema_type_change_raw_customer_id_a failure_classes=-
+[通过] schema_type_change_raw_customer_id_b failure_classes=-
+[通过] schema_type_change_raw_order_user_id_a failure_classes=-
+[通过] schema_type_change_raw_order_user_id_b failure_classes=-
+[准入] schema_type_change_raw_customer_id_a reasons=-
+[准入] schema_type_change_raw_customer_id_b reasons=-
+[准入] schema_type_change_raw_order_user_id_a reasons=-
+[准入] schema_type_change_raw_order_user_id_b reasons=-
+certified: 4/4
+admitted: 4/4
+report: C:\Users\29913\codex_space\DataIncidentGym\artifacts\admissions\t13-pairs.json
+```
+
+- 四个 run（按执行顺序）：对 1 A `b6d134d7dc6a4e549a82cb4818f06e31`、对 1 B
+  `7e2082a14de549348168e812bdc3c638`、对 2 A `977561b3318f4ccf8108d8d3568f2063`、对 2 B
+  `63a33aee180f45d9a6b742a6d895129d`。
+
+### C1–C8 全量实测（全部成立）
+
+| 编号 | 实测 |
+| --- | --- |
+| C1 | 四轮全部成立：`p1.runtime.v2`；`dbt_invocation_id`（04d27e5e / 29faba63 / 52199c53 / e8b37960）+ `artifacts_sha256` 三键齐；`node_definitions` = 22、`redacted` 全 false；`evidence_baseline.fingerprint` == F0 |
+| C2 | A×2 快照含两关系且逐关系带 `relation_identity` + `resource_type`；B×2 快照存在、fingerprint == F0、`relations` = `[]` |
+| C3 | 四条 `certified=True`、`failure_classes` 空、findings 全 satisfied：A×2 `CONFIRMED / SOURCE_SCHEMA_COLUMN_TYPE_CHANGED`、资产 = `["model.jaffle_shop.customers"]`；B×2 `INSUFFICIENT_EVIDENCE` |
+| C4 | 两个 B 逐字核验：`unresolved_evidence` 恰 2 条（同合同）；`trace.jsonl` 恰 2 次批量拒绝、`target_refusals` 共 6 条（E1×2 `RELATION_NOT_ALLOWED`：raw_customers、raw_orders；E2×4 `NODE_NOT_ALLOWED`：customers、stg_customers、stg_orders、stg_payments）；缺口三元组各自精确命中，`TARGETS_REFUSED` 未作见证；B 的 `diagnosis.json` 标记 = `p1.diagnosis.v2` |
+| C5 | A×2 collected = cited = 六类型（含 `DBT_LINEAGE`）；B×2 collected = cited = 四类型（含 `DBT_LINEAGE`，不含被拒的两个 v2 事实） |
+| C6 | A×2 = 8/8 调用、B×2 = 7 调用（5 成功 + 2 拒绝）、四轮 `model_requests = 0` |
+| C7 | 四个 run_id 的 `eval score` 全部 PASSED 且 `changed_checks: 无（与原归档评分逐项一致）`——**B 半边首次可执行且逐项一致** |
+| C8 | 每轮 restore 在 finally 内执行；活库两个变异列 integer、只读指纹 == F0 逐字相等 |
+
+### A 侧跨轮比对与结论
+
+- A×2 与第二/三轮实测逐点一致：结论（CONFIRMED / 同根因 / 同资产）、预算（8/8 调用、0 模型请求）、
+  离线重评（逐项一致）——第三/四轮代码上的复认证通过。
+- 内嵌卡片四条 `solvability.certified` 均为 True（A "tool calls 8/8"、B "tool calls 7/8"）。
+- **结论：两对认证成立、已准入，T13 认证收口**。准入报告 `artifacts/admissions/t13-pairs.json`
+  为单一权威四条目文件。两对自此可计入评估集合；manifest 冻结与真实模型测量仍需各自另行授权。
+- 后续留档（审计裁定，非阻塞）：CLI 裸 `except Exception` 吞错误码（`CERTIFICATION_SETUP_FAILED`
+  掩盖 `SCORING_INPUTS_INVALID`）待后续修；5 处认证路径外的 v1 重验点记为已知接缝，待 v2 场景
+  进 benchmark 时统一处理。
