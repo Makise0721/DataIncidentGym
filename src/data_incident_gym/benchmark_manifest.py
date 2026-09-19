@@ -53,6 +53,15 @@ DEFAULT_FORMAL_PROVIDER = "openai-compatible"
 DEFAULT_FORMAL_MODEL = "mimo-v2.5-pro"
 DEFAULT_FORMAL_BASE_URL = "https://api.xiaomimimo.com/v1"
 
+#: The approved formal model/endpoint pairings (v24 authorization). A
+#: manifest's ``model_configuration`` must name one of these pairs exactly —
+#: an unknown model or a crossed endpoint is refused, and loading an older
+#: manifest keeps working because every historical pair stays in the table.
+FORMAL_MODEL_BASE_URLS = {
+    "mimo-v2.5-pro": "https://api.xiaomimimo.com/v1",
+    "deepseek/deepseek-v4.1-flash": "https://api.commandcode.ai/provider/v1",
+}
+
 # The frozen formal schedule predates later strategies (for example the
 # scenario-certification reference analyst). Enumerating the live enum here
 # would invalidate every sealed manifest, so the schedule names its six
@@ -116,6 +125,7 @@ APPROVED_MANIFEST_IDS = (
     "p1-formal-v21",
     "p1-formal-v22",
     "p1-formal-v23",
+    "p1-formal-v24",
 )
 
 
@@ -197,7 +207,7 @@ class ManifestModelConfiguration(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     provider: Literal["openai-compatible"]
-    model: Literal["mimo-v2.5-pro"]
+    model: Literal["mimo-v2.5-pro", "deepseek/deepseek-v4.1-flash"]
     base_url: StrictStr
     settings_overrides: dict[str, Any] = Field(default_factory=dict)
 
@@ -212,6 +222,15 @@ class ManifestModelConfiguration(BaseModel):
         if value:
             raise ValueError("formal model setting overrides must be empty")
         return value
+
+    @model_validator(mode="after")
+    def validate_pairing(self) -> ManifestModelConfiguration:
+        if FORMAL_MODEL_BASE_URLS.get(self.model) != self.base_url:
+            raise ValueError(
+                "model and base_url must be an approved formal pairing: "
+                + ", ".join(f"{model} -> {url}" for model, url in FORMAL_MODEL_BASE_URLS.items())
+            )
+        return self
 
 
 class ScenarioCatalogEntry(BaseModel):
@@ -548,15 +567,23 @@ def build_manifest(
             "manifest_id must be an approved formal identity: "
             + ", ".join(APPROVED_MANIFEST_IDS)
         )
-    if model_name != DEFAULT_FORMAL_MODEL:
-        raise BenchmarkManifestError("formal model must be mimo-v2.5-pro")
+    if model_name not in FORMAL_MODEL_BASE_URLS:
+        raise BenchmarkManifestError(
+            "formal model must be one of the approved pairings: "
+            + ", ".join(FORMAL_MODEL_BASE_URLS)
+        )
+    if model_base_url != FORMAL_MODEL_BASE_URLS[model_name]:
+        raise BenchmarkManifestError(
+            f"model {model_name} must be frozen with its approved endpoint "
+            f"{FORMAL_MODEL_BASE_URLS[model_name]}"
+        )
     return BenchmarkManifest(
         schema_version=MANIFEST_SCHEMA_VERSION,
         manifest_id=manifest_id,
         implementation_revision=implementation_revision,
         model_configuration=ManifestModelConfiguration(
             provider=DEFAULT_FORMAL_PROVIDER,
-            model=DEFAULT_FORMAL_MODEL,
+            model=model_name,
             base_url=model_base_url,
             settings_overrides={},
         ),
@@ -677,6 +704,7 @@ __all__ = [
     "CONFIRMABLE_SCENARIO_IDS",
     "DEFAULT_FORMAL_BASE_URL",
     "DEFAULT_FORMAL_MODEL",
+    "FORMAL_MODEL_BASE_URLS",
     "FORMAL_SCENARIO_IDS",
     "MANIFEST_ID",
     "MANIFEST_PATH",

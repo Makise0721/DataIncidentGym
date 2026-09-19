@@ -200,7 +200,7 @@ def test_manifest_path_rejects_unversioned_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
         manifest_path_for("p2-formal-v1")
     with pytest.raises(BenchmarkManifestError):
-        manifest_path_for("p1-formal-v24")
+        manifest_path_for("p1-formal-v25")
 
 
 def test_build_manifest_accepts_approved_rerun_identities() -> None:
@@ -227,6 +227,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
         "p1-formal-v21",
         "p1-formal-v22",
         "p1-formal-v23",
+        "p1-formal-v24",
     ):
         manifest = build_manifest(
             "b" * 40,
@@ -241,7 +242,84 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
 
 def test_build_manifest_rejects_unapproved_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
-        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v24")
+        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v25")
+
+
+def test_both_approved_model_pairings_build_the_same_schedule() -> None:
+    """v24 authorization: a second formal model binds through its own endpoint;
+    the schedule, budget, policies and catalog stay model-independent."""
+
+    mimo = build_manifest("b" * 40, manifest_id="p1-formal-v24")
+    deepseek = build_manifest(
+        "b" * 40,
+        manifest_id="p1-formal-v24",
+        model_name="deepseek/deepseek-v4.1-flash",
+        model_base_url="https://api.commandcode.ai/provider/v1",
+    )
+
+    assert mimo.model_configuration.model == "mimo-v2.5-pro"
+    assert deepseek.model_configuration.model == "deepseek/deepseek-v4.1-flash"
+    assert deepseek.model_configuration.base_url == "https://api.commandcode.ai/provider/v1"
+    assert deepseek.cells == mimo.cells
+    assert deepseek.policies == mimo.policies
+    assert deepseek.formal_scenario_ids == mimo.formal_scenario_ids
+    assert deepseek.budget == mimo.budget
+    assert deepseek.scenario_catalog == mimo.scenario_catalog
+
+
+def test_crossed_model_endpoint_pairings_are_refused() -> None:
+    with pytest.raises(BenchmarkManifestError):
+        build_manifest(
+            "b" * 40,
+            manifest_id="p1-formal-v24",
+            model_name="deepseek/deepseek-v4.1-flash",
+            model_base_url="https://api.xiaomimimo.com/v1",
+        )
+    with pytest.raises(BenchmarkManifestError):
+        build_manifest(
+            "b" * 40,
+            manifest_id="p1-formal-v24",
+            model_name="mimo-v2.5-pro",
+            model_base_url="https://api.commandcode.ai/provider/v1",
+        )
+    with pytest.raises(ValidationError):
+        ManifestModelConfiguration(
+            provider="openai-compatible",
+            model="deepseek/deepseek-v4.1-flash",
+            base_url="https://api.xiaomimimo.com/v1",
+        )
+    with pytest.raises(ValidationError):
+        ManifestModelConfiguration(
+            provider="openai-compatible",
+            model="mimo-v2.5-pro",
+            base_url="https://api.commandcode.ai/provider/v1",
+        )
+
+
+def test_unknown_formal_models_are_refused() -> None:
+    with pytest.raises(BenchmarkManifestError):
+        build_manifest(
+            "b" * 40,
+            manifest_id="p1-formal-v24",
+            model_name="gpt-9",
+            model_base_url="https://api.commandcode.ai/provider/v1",
+        )
+    with pytest.raises(ValidationError):
+        ManifestModelConfiguration(
+            provider="openai-compatible",
+            model="gpt-9",
+            base_url="https://api.commandcode.ai/provider/v1",
+        )
+
+
+def test_the_sealed_v23_manifest_still_loads_under_the_pairing_table() -> None:
+    """V1: the pairing table must not tighten the loading rules for manifests
+    frozen before the second model existed."""
+
+    manifest = load_manifest(PROJECT_ROOT / "config" / "benchmark" / "p1-formal-v23.json")
+
+    assert manifest.model_configuration.model == "mimo-v2.5-pro"
+    assert manifest.model_configuration.base_url == "https://api.xiaomimimo.com/v1"
 
 
 def test_freeze_manifest_writes_to_id_derived_path(tmp_path: Path) -> None:

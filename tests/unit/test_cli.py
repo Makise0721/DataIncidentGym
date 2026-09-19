@@ -101,9 +101,87 @@ def test_canonical_manifest_path_accepts_approved_rerun_identities() -> None:
         assert resolved == (PROJECT_ROOT / f"config/benchmark/{manifest_id}.json").resolve()
 
 
+def test_benchmark_freeze_passes_the_selected_model_and_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI must hand the builder the endpoint that belongs to the selected
+    model — selecting DeepSeek while keeping the default endpoint is exactly
+    the crossed pairing the pairing table refuses."""
+
+    captured: dict[str, str] = {}
+
+    def fake_build(
+        revision: str,
+        *,
+        manifest_id: str,
+        model_name: str,
+        model_base_url: str,
+        project_root: object = None,
+    ) -> SimpleNamespace:
+        captured["revision"] = revision
+        captured["manifest_id"] = manifest_id
+        captured["model"] = model_name
+        captured["base_url"] = model_base_url
+        return SimpleNamespace(
+            manifest_id=manifest_id,
+            digest=lambda: "f" * 64,
+            canonical_json=lambda: "{}" + chr(10),
+        )
+
+    monkeypatch.setattr(cli, "build_manifest", fake_build)
+    monkeypatch.setattr(cli, "verify_manifest", lambda manifest, **_: manifest)
+    monkeypatch.setattr(
+        cli,
+        "freeze_manifest",
+        lambda manifest, output, **_: Path("config/benchmark") / f"{manifest.manifest_id}.json",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            "freeze",
+            "--manifest-id",
+            "p1-formal-v24",
+            "--implementation-revision",
+            "b" * 40,
+            "--output",
+            "config/benchmark/p1-formal-v24.json",
+            "--model",
+            "deepseek/deepseek-v4.1-flash",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["model"] == "deepseek/deepseek-v4.1-flash"
+    assert captured["base_url"] == "https://api.commandcode.ai/provider/v1"
+    assert captured["manifest_id"] == "p1-formal-v24"
+
+
+def test_benchmark_freeze_refuses_a_model_outside_the_pairing_table() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            "freeze",
+            "--manifest-id",
+            "p1-formal-v24",
+            "--implementation-revision",
+            "b" * 40,
+            "--output",
+            "config/benchmark/p1-formal-v24.json",
+            "--model",
+            "gpt-9",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "approved pairings" in result.output
+
+
 def test_canonical_manifest_path_rejects_unapproved_name() -> None:
     with pytest.raises(BenchmarkManifestError):
-        _canonical_benchmark_manifest_path(Path("config/benchmark/p1-formal-v24.json"))
+        _canonical_benchmark_manifest_path(Path("config/benchmark/p1-formal-v25.json"))
 
 
 def test_confirmed_manifest_rejects_filename_identity_mismatch(

@@ -11,6 +11,8 @@ from data_incident_gym.baseline import BaselineBuilder, BaselineError
 from data_incident_gym.benchmark_archive import ArchiveError, archive_suite
 from data_incident_gym.benchmark_manifest import (
     APPROVED_MANIFEST_IDS,
+    DEFAULT_FORMAL_MODEL,
+    FORMAL_MODEL_BASE_URLS,
     MANIFEST_ID,
     MANIFEST_PATH,
     BenchmarkManifestError,
@@ -121,6 +123,11 @@ BENCHMARK_ID_OPTION = typer.Option(MANIFEST_ID, "--manifest-id")
 IMPLEMENTATION_REVISION_OPTION = typer.Option(..., "--implementation-revision")
 BENCHMARK_OUTPUT_OPTION = typer.Option(MANIFEST_PATH, "--output")
 BENCHMARK_MANIFEST_OPTION = typer.Option(..., "--manifest")
+BENCHMARK_MODEL_OPTION = typer.Option(
+    DEFAULT_FORMAL_MODEL,
+    "--model",
+    help="冻结绑定的正式模型；必须属于已批准的模型/端点配对表。",
+)
 BENCHMARK_SHA256_OPTION = typer.Option(..., "--confirm-sha256")
 BENCHMARK_STRATEGY_OPTION = typer.Option(
     None,
@@ -569,12 +576,21 @@ def benchmark_freeze(
     manifest_id: str = BENCHMARK_ID_OPTION,
     implementation_revision: str = IMPLEMENTATION_REVISION_OPTION,
     output: Path = BENCHMARK_OUTPUT_OPTION,
+    model: str = BENCHMARK_MODEL_OPTION,
 ) -> None:
     """生成一次性的正式 Manifest；不会发起模型请求。"""
     try:
+        base_url = FORMAL_MODEL_BASE_URLS.get(model)
+        if base_url is None:
+            raise BenchmarkManifestError(
+                "formal model must be one of the approved pairings: "
+                + ", ".join(FORMAL_MODEL_BASE_URLS)
+            )
         manifest = build_manifest(
             implementation_revision,
             manifest_id=manifest_id,
+            model_name=model,
+            model_base_url=base_url,
         )
         verify_manifest(manifest)
         path = freeze_manifest(manifest, output)

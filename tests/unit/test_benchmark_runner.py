@@ -1002,10 +1002,7 @@ def test_runner_materializes_stale_cell_with_passed_doctor_receipt(tmp_path: Pat
 
 
 def test_runner_binds_manifest_model_configuration_to_runtime_settings(tmp_path: Path) -> None:
-    manifest = build_manifest(
-        "2" * 40,
-        model_base_url="https://manifest.example/v1",
-    )
+    manifest = build_manifest("2" * 40)
     diagnostic_settings = DiagnosticSettings(
         _env_file=None,
         model_base_url="https://runtime.example/v1",
@@ -1022,7 +1019,7 @@ def test_runner_binds_manifest_model_configuration_to_runtime_settings(tmp_path:
     evaluation_runner = runner._evaluation_runner_factory()
 
     assert isinstance(evaluation_runner, EvaluationRunner)
-    assert evaluation_runner._diagnostic_settings.model_base_url == "https://manifest.example/v1"
+    assert evaluation_runner._diagnostic_settings.model_base_url == "https://api.xiaomimimo.com/v1"
     assert evaluation_runner._diagnostic_settings.model_name == "mimo-v2.5-pro"
 
 
