@@ -70,6 +70,7 @@ from data_incident_gym.fixed_rule import tool_surface_for_context
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 from data_incident_gym.strategy_adapter import (
     FinalSubmission,
+    FinalSubmissionV2,
     StrategySession,
     builtin_declaration,
     tool_allowlist_for_context,
@@ -98,19 +99,21 @@ def _fingerprint(run_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
 
 
 def _user_prompt(context: ObservableRunContext) -> str:
+    payload = {
+        "run_id": context.run_id,
+        "incident_brief": context.incident_brief.model_dump(mode="json"),
+        "observable_relations": context.runtime.get("observable_relations", {}),
+    }
+    # The v2 node-definition whitelist is part of the model-visible context;
+    # a v1 runtime has no such key and its prompt stays byte-identical.
+    observable_nodes = context.runtime.get("observable_nodes") or {}
+    if observable_nodes:
+        payload["observable_nodes"] = observable_nodes
     return (
         "Investigate the verified run using the public run-bound context below. "
         "Declare every evidence request with `plan_step` before it is executed, close each "
         "obligation with `close_obligation`, and submit with `submit_diagnosis`.\n"
-        + json.dumps(
-            {
-                "run_id": context.run_id,
-                "incident_brief": context.incident_brief.model_dump(mode="json"),
-                "observable_relations": context.runtime.get("observable_relations", {}),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
     )
 
 
@@ -200,10 +203,14 @@ class EvidencePlannerRunner:
     # -- agent -------------------------------------------------------------
 
     def _agent(self, deps: PlannerDeps) -> Agent[PlannerDeps, Any]:
+        # The output tool carries the run's gap vocabulary: a v2 run's model
+        # submits through FinalSubmissionV2, so what it is offered matches what
+        # the session accepts.
+        surface = tool_surface_for_context(self._context)
         agent: Agent[PlannerDeps, Any] = Agent(
             self._model,
             deps_type=PlannerDeps,
-            output_type=planner_output_definition(),
+            output_type=planner_output_definition(surface),
             system_prompt=f"{load_base_prompt()}\n\n{PLANNER_PROMPT}",
             retries={"tools": 1, "output": OUTPUT_RETRY_LIMIT},
         )
@@ -211,8 +218,9 @@ class EvidencePlannerRunner:
 
         @agent.output_validator
         def validate_submission(
-            ctx: RunContext[PlannerDeps], submission: FinalSubmission
-        ) -> FinalSubmission:
+            ctx: RunContext[PlannerDeps],
+            submission: FinalSubmission | FinalSubmissionV2,
+        ) -> FinalSubmission | FinalSubmissionV2:
             """The session judges the submission here, not after the run.
 
             A refusal is a retryable answer: the model gets the code back and may

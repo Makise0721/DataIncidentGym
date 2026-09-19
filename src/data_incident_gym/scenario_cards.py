@@ -44,6 +44,7 @@ from data_incident_gym.scenarios import (
     DeletePaymentRowsMutation,
     DuplicatePaymentRowsMutation,
     NoMutation,
+    ObservableEvidenceContractV2,
     OrphanPaymentRowsMutation,
     ScenarioMutation,
     ScenarioSpec,
@@ -330,12 +331,24 @@ def _fault_mechanism(scenario: ScenarioSpec) -> str:
     return f"{scenario.fault_family.value}: {summaries}"
 
 
+#: The two v2 batch facts: their evidence type when the run must collect it
+#: (the confirmable variant) and their gap-side tool name when the contract
+#: only names them through a refusal (the insufficient variant).
+_V2_BATCH_DECLARATIONS = {
+    "get_relation_schema_expectation": "RELATION_SCHEMA_EXPECTATION",
+    "get_dbt_node_definition": "DBT_NODE_DEFINITION",
+}
+
+
 def _readonly_path(scenario: ScenarioSpec) -> tuple[str, ...]:
     """Read-only tools the reference solution exercises for this scenario.
 
     Restates the certification run's tool path from the public contract: the
     dbt readers follow the required evidence types and the relation readers
-    only appear when the scenario whitelists at least one such relation.
+    only appear when the scenario whitelists at least one such relation. On a
+    v2 contract the two batch facts join the path when the run must collect
+    them (required evidence type) or when the contract names them through a
+    declared refusal gap (the insufficient variant probes them and is refused).
     """
 
     contract = scenario.observable_evidence_contract
@@ -353,11 +366,23 @@ def _readonly_path(scenario: ScenarioSpec) -> tuple[str, ...]:
         "get_relation_data_profile": "RELATION_DATA_PROFILE" in required,
         "get_relation_history": "RELATION_HISTORY" in required,
     }
-    return tuple(
+    path = [
         name
         for name in FIXED_RULE_TOOL_NAMES
         if evidence_declared[name] and relation_declared.get(name, True)
-    )
+    ]
+    if isinstance(contract, ObservableEvidenceContractV2):
+        gap_tools = {
+            gap.tool_name
+            for gap in contract.unresolved_gaps
+            if gap.tool_name is not None
+        }
+        path.extend(
+            tool
+            for tool in _V2_BATCH_DECLARATIONS
+            if _V2_BATCH_DECLARATIONS[tool] in required or tool in gap_tools
+        )
+    return tuple(path)
 
 
 def _legitimate_alternatives(scenario: ScenarioSpec) -> tuple[str, ...]:
@@ -379,11 +404,21 @@ def _decisive_difference(confirmable: ScenarioSpec, insufficient: ScenarioSpec) 
     left = confirmable.observable_evidence_contract
     right = insufficient.observable_evidence_contract
     lost: list[str] = []
-    for kind, left_relations, right_relations in (
+    whitelists: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
         ("schema", left.schema_relations, right.schema_relations),
         ("profile", left.profile_relations, right.profile_relations),
         ("history", left.history_relations, right.history_relations),
+    )
+    if isinstance(left, ObservableEvidenceContractV2) and isinstance(
+        right, ObservableEvidenceContractV2
     ):
+        # The two withheld v2 whitelists are exactly what the insufficient
+        # variant cannot reach; the card names them like any other lost access.
+        whitelists += (
+            ("expectation", left.expectation_relations, right.expectation_relations),
+            ("definition_nodes", left.definition_nodes, right.definition_nodes),
+        )
+    for kind, left_relations, right_relations in whitelists:
         missing = [relation for relation in left_relations if relation not in right_relations]
         if missing:
             lost.append(f"{kind} {','.join(missing)}")

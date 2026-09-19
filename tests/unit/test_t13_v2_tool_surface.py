@@ -100,6 +100,86 @@ def test_the_planner_v2_payload_carries_the_eight_tools() -> None:
     ) != evidence_planner_policy_identity()
 
 
+def test_the_model_visible_list_binds_the_surface_vocabulary() -> None:
+    """The terminal ``submit_diagnosis`` schema is what bounds the gap words a
+    v2 model can declare; the action tools are identical across surfaces."""
+
+    import json
+
+    v1 = planner_controller_payload()
+    v2 = planner_controller_payload(EVIDENCE_TOOLS_V2_VERSION)
+
+    assert v1["model_tools"]["action_tools"] == v2["model_tools"]["action_tools"]
+    v1_schema = json.dumps(v1["model_tools"]["output_tool"]["parameters"])
+    v2_schema = json.dumps(v2["model_tools"]["output_tool"]["parameters"])
+    assert "RELATION_SCHEMA_EXPECTATION" not in v1_schema
+    assert "NODE_NOT_ALLOWED" not in v1_schema
+    assert "RELATION_SCHEMA_EXPECTATION" in v2_schema
+    assert "NODE_NOT_ALLOWED" in v2_schema
+
+
+def test_the_registry_surface_stays_the_frozen_v1_one() -> None:
+    """The registry path (manifests, identity readers) keeps the default v1
+    surface; a v2 run's surface is built per run from its context."""
+
+    from data_incident_gym.evidence_planner import (
+        planner_model_tool_payload,
+        planner_policy_surface,
+    )
+
+    surface = planner_policy_surface()
+    assert surface.policy_identity == evidence_planner_policy_identity()
+    payload = planner_model_tool_payload()
+    assert surface.tool_schema_payload == (
+        [*payload["action_tools"], payload["output_tool"]]
+    )
+
+    v2_surface = planner_policy_surface(EVIDENCE_TOOLS_V2_VERSION)
+    assert v2_surface.policy_identity != surface.policy_identity
+    assert v2_surface.final_diagnosis_schema_sha256 != surface.final_diagnosis_schema_sha256
+
+
+def test_the_v2_user_prompt_names_the_definition_whitelist(tmp_path) -> None:
+    """The model-visible context carries the v2 node whitelist; a v1 runtime's
+    prompt stays byte-identical."""
+
+    from datetime import UTC, datetime
+
+    from data_incident_gym.planner_agent import _user_prompt
+    from data_incident_gym.run_context import IncidentBrief, ObservableRunContext
+
+    def _context(runtime: dict) -> ObservableRunContext:
+        return ObservableRunContext(
+            run_id="d" * 32,
+            artifact_dir=tmp_path,
+            runtime=runtime,
+            incident_brief=IncidentBrief(
+                schema_version="incident_brief.v1",
+                signal_code="DBT_BUILD_FAILED",
+                summary="A model failed.",
+                subjects=("model.jaffle_shop.customers",),
+                logical_observed_at=datetime(2026, 9, 19, tzinfo=UTC),
+                observations=(),
+            ),
+        )
+
+    v1 = _context({"observable_relations": {"schema": ["raw_customers"]}})
+    v2 = _context(
+        {
+            "schema_version": "p1.runtime.v2",
+            "observable_relations": {
+                "schema": ["raw_customers"],
+                "expectation": ["raw_customers"],
+            },
+            "observable_nodes": {"definition": ["model.jaffle_shop.customers"]},
+        }
+    )
+
+    assert "observable_nodes" not in _user_prompt(v1)
+    assert '"observable_nodes"' in _user_prompt(v2)
+    assert "model.jaffle_shop.customers" in _user_prompt(v2)
+
+
 def test_the_obligation_table_follows_the_granted_surface() -> None:
     assert tool_obligations_for_allowlist(PROTOCOL_TOOL_ALLOWLIST) is TOOL_OBLIGATIONS
     assert tool_obligations_for_allowlist(EVIDENCE_V2_TOOL_ALLOWLIST) is V2_TOOL_OBLIGATIONS

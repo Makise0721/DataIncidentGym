@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 
 from data_incident_gym.config import PROJECT_ROOT
-from data_incident_gym.fixed_rule import FIXED_RULE_TOOL_NAMES
+from data_incident_gym.fixed_rule import EVIDENCE_V2_TOOL_NAMES, FIXED_RULE_TOOL_NAMES
 from data_incident_gym.scenario_cards import (
     AB_SCENARIO_PAIRS,
     CARD_SCHEMA_VERSION,
@@ -69,7 +69,12 @@ def test_card_fields_are_present_for_every_catalog_scenario() -> None:
         assert scenario.fault_family.value in card.fault_mechanism
         assert card.budget == SCENARIO_CARD_BUDGET
         assert card.readonly_path
-        assert set(card.readonly_path) <= set(FIXED_RULE_TOOL_NAMES)
+        surface_tools = (
+            EVIDENCE_V2_TOOL_NAMES
+            if scenario.observable_evidence_contract.schema_version == "observable_evidence.v2"
+            else FIXED_RULE_TOOL_NAMES
+        )
+        assert set(card.readonly_path) <= set(surface_tools)
         assert card.ground_truth_forbidden_zone.leakage_codes == tuple(
             item.value for item in scenario.forbidden_leakage
         )
@@ -132,6 +137,38 @@ def test_decisive_difference_names_the_lost_decisive_evidence() -> None:
     assert "RELATION_DATA_PROFILE(raw_payments)/RELATION_NOT_ALLOWED" in (
         card.ab_pair.decisive_difference
     )
+
+
+def test_t13_cards_name_the_batch_tools_and_the_withheld_whitelists() -> None:
+    """The T13 pairs: both variants exercise the two batch facts (granted in A,
+    refused in B), and the decisive difference names the two withheld v2
+    whitelists explicitly."""
+
+    confirmable = build_scenario_card("schema_type_change_raw_customer_id_a")
+    assert confirmable.readonly_path == (
+        "get_dbt_run_results",
+        "get_dbt_node_error",
+        "get_relation_schema",
+        "get_relation_schema_expectation",
+        "get_dbt_node_definition",
+    )
+    insufficient = build_scenario_card("schema_type_change_raw_customer_id_b")
+    assert insufficient.readonly_path == confirmable.readonly_path
+    assert insufficient.ab_pair is not None
+    difference = insufficient.ab_pair.decisive_difference
+    assert "expectation raw_customers,raw_orders" in difference
+    assert (
+        "definition_nodes model.jaffle_shop.customers,"
+        "model.jaffle_shop.stg_customers,model.jaffle_shop.stg_orders" in difference
+    )
+    assert "RELATION_SCHEMA_EXPECTATION(raw_customers)/RELATION_NOT_ALLOWED" in difference
+    assert (
+        "DBT_NODE_DEFINITION(model.jaffle_shop.customers)/NODE_NOT_ALLOWED" in difference
+    )
+    # The mirrored pair states the same surface difference.
+    mirrored = build_scenario_card("schema_type_change_raw_order_user_id_b")
+    assert mirrored.ab_pair is not None
+    assert mirrored.ab_pair.decisive_difference == difference
 
 
 def test_healthy_control_marks_only_the_health_scenarios() -> None:

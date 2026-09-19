@@ -50,7 +50,12 @@ from pydantic_ai import Agent, RunContext, ToolOutput
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.tools import GenerateToolJsonSchema
 
-from data_incident_gym.diagnosis import Diagnosis, DiagnosticStrategy, PolicyIdentity
+from data_incident_gym.diagnosis import (
+    Diagnosis,
+    DiagnosisV2,
+    DiagnosticStrategy,
+    PolicyIdentity,
+)
 from data_incident_gym.diagnostic_agent import (
     BASE_PROMPT,
     BASE_PROMPT_VERSION,
@@ -70,6 +75,7 @@ from data_incident_gym.fixed_rule import (
 )
 from data_incident_gym.strategy_adapter import (
     FinalSubmission,
+    FinalSubmissionV2,
     StrategySession,
     ToolReceipt,
     ToolRequest,
@@ -273,6 +279,25 @@ PLANNER_OUTPUT_TOOL: tuple[str, str, type[BaseModel]] = (
     FinalSubmission,
 )
 
+#: The v2 terminal tool (T13): same call, v2 gap vocabulary — the model on a
+#: v2 run must be able to declare expectation/definition gaps, and the schema
+#: the model is offered is part of the signed model-visible list.
+PLANNER_OUTPUT_TOOL_V2: tuple[str, str, type[BaseModel]] = (
+    "submit_diagnosis",
+    "Submit the final diagnosis through the unified strategy protocol.",
+    FinalSubmissionV2,
+)
+
+
+def _planner_output_tool(
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> tuple[str, str, type[BaseModel]]:
+    """The terminal tool for one evidence-tool surface."""
+
+    return (
+        PLANNER_OUTPUT_TOOL if surface == EVIDENCE_TOOLS_V1_VERSION else PLANNER_OUTPUT_TOOL_V2
+    )
+
 
 @dataclass
 class PlannerDeps:
@@ -364,14 +389,23 @@ def register_planner_tools(agent: Any) -> None:
         return json.dumps(payload, ensure_ascii=False)
 
 
-def planner_output_definition() -> ToolOutput[Any]:
-    """The terminal tool: only a submitted diagnosis ends the run."""
+def planner_output_definition(
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> ToolOutput[Any]:
+    """The terminal tool: only a submitted diagnosis ends the run.
 
-    name, description, model = PLANNER_OUTPUT_TOOL
+    The output model carries the run's gap vocabulary (v1 by default; the v2
+    surface binds ``FinalSubmissionV2``), so what the model is offered matches
+    what the session will accept.
+    """
+
+    name, description, model = _planner_output_tool(surface)
     return ToolOutput(model, name=name, description=description)
 
 
-def planner_model_tool_payload() -> dict[str, Any]:
+def planner_model_tool_payload(
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> dict[str, Any]:
     """The **registered** schemas of the two action tools and the terminal output.
 
     Built by assembling the same agent surface the runner uses (with a throwaway
@@ -382,12 +416,12 @@ def planner_model_tool_payload() -> dict[str, Any]:
     agent: Any = Agent(
         FunctionModel(lambda _messages, _info: None),
         deps_type=PlannerDeps,
-        output_type=planner_output_definition(),
+        output_type=planner_output_definition(surface),
     )
     register_planner_tools(agent)
     # Same reader the audited evidence-tool surface uses (``_tool_schema_payload``).
     tools = agent._function_toolset.tools  # noqa: SLF001
-    output_name, output_description, output_model = PLANNER_OUTPUT_TOOL
+    output_name, output_description, output_model = _planner_output_tool(surface)
     return {
         "action_tools": [
             {
@@ -427,7 +461,7 @@ def planner_controller_payload(
     )
     payload: dict[str, Any] = {
         "protocol_version": PLANNER_PROTOCOL_VERSION,
-        "model_tools": planner_model_tool_payload(),
+        "model_tools": planner_model_tool_payload(surface),
         "tools": {
             tool: {
                 "evidence_kind": spec.evidence_kind,
@@ -483,18 +517,22 @@ def evidence_planner_policy_identity(
     )
 
 
-def planner_policy_surface() -> PolicySurface:
+def planner_policy_surface(
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> PolicySurface:
     """The planner's decision surface for the standard identity path.
 
     ``policy_surface_for_strategy`` delegates here, so manifests, setup-failure
     materialization and any other identity reader see the planner's own tools
     and verdict contract instead of the kernel/static evidence-tool surface.
     The delivered artifact is still a ``Diagnosis``, so its schema digest uses
-    the same canonicalization every other surface carries.
+    the same canonicalization every other surface carries. The default stays
+    the frozen v1 surface; a v2 run's identity is built per run from its
+    context, never through the registry.
     """
 
-    identity = evidence_planner_policy_identity()
-    payload = planner_model_tool_payload()
+    identity = evidence_planner_policy_identity(surface)
+    payload = planner_model_tool_payload(surface)
     return PolicySurface(
         # One flat entry per model-visible tool (two action tools plus the
         # terminal output), so ``tool_names`` readers see the planner's three
@@ -503,7 +541,11 @@ def planner_policy_surface() -> PolicySurface:
         strategy_prompt_version=identity.strategy_prompt_version,
         strategy_prompt_sha256=identity.strategy_prompt_sha256,
         controller_protocol_sha256=identity.controller_protocol_sha256,
-        final_diagnosis_schema_sha256=_sha256_json(Diagnosis.model_json_schema()),
+        final_diagnosis_schema_sha256=_sha256_json(
+            (
+                DiagnosisV2 if surface == EVIDENCE_TOOLS_V2_VERSION else Diagnosis
+            ).model_json_schema()
+        ),
         policy_identity=identity,
     )
 
