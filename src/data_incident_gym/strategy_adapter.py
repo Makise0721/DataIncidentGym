@@ -35,10 +35,12 @@ from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisClaim,
     DiagnosisStatus,
+    DiagnosisV2,
     NonBlankStr,
     RootCauseCode,
     TargetRefusal,
     UnresolvedEvidence,
+    UnresolvedEvidenceV2,
 )
 from data_incident_gym.evidence import (
     EVIDENCE_BATCH_TOOLS,
@@ -262,6 +264,27 @@ class FinalSubmission(BaseModel):
     evidence_ids: tuple[StrictStr, ...] = ()
     claims: tuple[DiagnosisClaim, ...] = ()
     unresolved_evidence: tuple[UnresolvedEvidence, ...] = ()
+    recommended_actions: tuple[NonBlankStr, ...] = ()
+    confidence: Confidence
+
+
+class FinalSubmissionV2(BaseModel):
+    """The v2 terminal answer (T13): same shape, v2 gap vocabulary.
+
+    A v2 surface must be able to declare expectation/definition gaps; the v1
+    model and its schema stay byte-identical. The diagnosis built from this
+    submission is a ``DiagnosisV2``; everything else validates identically.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: DiagnosisStatus
+    summary: NonBlankStr
+    root_cause_code: RootCauseCode | None = None
+    affected_assets: tuple[NonBlankStr, ...] = ()
+    evidence_ids: tuple[StrictStr, ...] = ()
+    claims: tuple[DiagnosisClaim, ...] = ()
+    unresolved_evidence: tuple[UnresolvedEvidenceV2, ...] = ()
     recommended_actions: tuple[NonBlankStr, ...] = ()
     confidence: Confidence
 
@@ -501,7 +524,7 @@ class StrategySession:
     def _deadline_exceeded(self) -> bool:
         return (self._clock() - self._opened_at) > self._budget.timeout_seconds
 
-    def submit(self, submission: FinalSubmission) -> SubmissionReceipt:
+    def submit(self, submission: FinalSubmission | FinalSubmissionV2) -> SubmissionReceipt:
         if self._cancellation is not None:
             return SubmissionReceipt(
                 accepted=False,
@@ -536,7 +559,8 @@ class StrategySession:
                 ),
             )
         try:
-            diagnosis = Diagnosis(
+            diagnosis_type = DiagnosisV2 if isinstance(submission, FinalSubmissionV2) else Diagnosis
+            diagnosis = diagnosis_type(
                 run_id=self._run_id,
                 status=submission.status,
                 summary=submission.summary,
@@ -672,6 +696,14 @@ class ProtocolTools:
     def get_relation_history(self, relation_name: str) -> tuple[EvidenceRecord, ...]:
         return self._call("get_relation_history", {"relation_name": relation_name})
 
+    def get_relation_schema_expectation(self, relation_names: str) -> tuple[EvidenceRecord, ...]:
+        return self._call(
+            "get_relation_schema_expectation", {"relation_names": relation_names}
+        )
+
+    def get_dbt_node_definition(self, node_ids: str) -> tuple[EvidenceRecord, ...]:
+        return self._call("get_dbt_node_definition", {"node_ids": node_ids})
+
 
 __all__ = [
     "BUILTIN_FRAMEWORK",
@@ -682,6 +714,7 @@ __all__ = [
     "tool_allowlist_for_context",
     "CancellationReceipt",
     "FinalSubmission",
+    "FinalSubmissionV2",
     "ProtocolBudget",
     "ProtocolError",
     "ProtocolTools",

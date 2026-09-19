@@ -24,6 +24,7 @@ from data_incident_gym.diagnostic_kernel import (
     KernelStateTraceEvent,
 )
 from data_incident_gym.evidence import (
+    EVIDENCE_BATCH_TOOLS,
     DbtLineageFact,
     DbtNodeErrorFact,
     DbtRunResultsFact,
@@ -40,6 +41,7 @@ from data_incident_gym.scenarios import (
     ColumnTypeMutation,
     DeletePaymentRowsMutation,
     DuplicatePaymentRowsMutation,
+    ObservableEvidenceContractV2,
     OrphanPaymentRowsMutation,
     ScenarioSpec,
     SetFieldNullMutation,
@@ -179,6 +181,16 @@ ALLOWED_DIAGNOSTIC_TOOLS = frozenset(
         "get_relation_history",
     }
 )
+#: The v2 evidence surface adds the two batch facts (T13); a scenario decides
+#: which surface its runs are judged under, so a v1 run can never launder a
+#: batch call through the evaluator.
+ALLOWED_DIAGNOSTIC_TOOLS_V2 = ALLOWED_DIAGNOSTIC_TOOLS | frozenset(EVIDENCE_BATCH_TOOLS)
+
+
+def _allowed_diagnostic_tools(scenario: ScenarioSpec) -> frozenset[str]:
+    if isinstance(scenario.observable_evidence_contract, ObservableEvidenceContractV2):
+        return ALLOWED_DIAGNOSTIC_TOOLS_V2
+    return ALLOWED_DIAGNOSTIC_TOOLS
 TRACE_FORBIDDEN_PATTERN = re.compile(
     r"(?i)(?:password|passwd|secret|token|api[_-]?key|authorization)\s*[:=]"
     r"|\bbearer\s+"
@@ -1154,6 +1166,7 @@ class DeterministicEvaluator:
         diagnosis = diagnosis_run.diagnosis
         records = diagnosis_run.evidence_records
         inventory = {record.evidence_id: record for record in records}
+        allowed_tools = _allowed_diagnostic_tools(scenario)
         cited_ids = tuple(dict.fromkeys(diagnosis.evidence_ids))
         all_claim_ids = tuple(
             evidence_id
@@ -1173,7 +1186,7 @@ class DeterministicEvaluator:
                 {
                     "UNKNOWN_TOOL"
                     for event in trace_events
-                    if event.tool_name not in ALLOWED_DIAGNOSTIC_TOOLS
+                    if event.tool_name not in allowed_tools
                 }
                 | {
                     "TRACE_ARGUMENT_LEAK"
@@ -1291,8 +1304,8 @@ class DeterministicEvaluator:
             ),
             _check(
                 EvaluationCheckCode.TOOL_ALLOWLIST_EXACT,
-                all(event.tool_name in ALLOWED_DIAGNOSTIC_TOOLS for event in trace_events),
-                tuple(sorted(ALLOWED_DIAGNOSTIC_TOOLS)),
+                all(event.tool_name in allowed_tools for event in trace_events),
+                tuple(sorted(allowed_tools)),
                 tuple(sorted({event.tool_name for event in trace_events})),
             ),
             _check(
@@ -1330,6 +1343,7 @@ class DeterministicEvaluator:
 
 __all__ = [
     "ALLOWED_DIAGNOSTIC_TOOLS",
+    "ALLOWED_DIAGNOSTIC_TOOLS_V2",
     "ALL_CLAIM_KINDS",
     "APPLICABLE_CLAIM_KINDS_BY_EXPECTED_STATUS",
     "ClaimSupportVerdict",

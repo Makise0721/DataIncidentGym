@@ -17,11 +17,13 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
+    DiagnosisV2,
     DiagnosticStrategy,
     EvidenceGateTraceEvent,
     HealthStateClaim,
     PolicyIdentity,
     RootCauseClaim,
+    TargetRefusal,
     ToolTraceEvent,
 )
 from data_incident_gym.diagnostic_agent import BASE_PROMPT, BASE_PROMPT_VERSION
@@ -42,6 +44,7 @@ from data_incident_gym.profiles import parse_watermark_value
 from data_incident_gym.run_context import ObservableRunContext, resolve_run_context
 from data_incident_gym.strategy_adapter import (
     FinalSubmission,
+    FinalSubmissionV2,
     StrategySession,
     builtin_declaration,
     tool_allowlist_for_context,
@@ -289,6 +292,7 @@ class FixedRuleRunner:
     ) -> tuple[EvidenceRecord, ...]:
         started_at = monotonic()
         fingerprint = _fingerprint(self._run_id, tool_name, arguments)
+        refusals: tuple[TargetRefusal, ...] = ()
         if len(self._trace) >= FIXED_RULE_TOOL_LIMIT:
             error_code = "TOOL_CALL_LIMIT"
             records: tuple[EvidenceRecord, ...] = ()
@@ -309,9 +313,17 @@ class FixedRuleRunner:
             except EvidenceToolError as error:
                 records = ()
                 error_code = _safe_error_code(error)
+                # v2 batch refusals carry the authoritative per-target detail;
+                # it must reach the archived trace or no gap can ever cite it.
+                # v1 tools never set it, so their events stay byte-identical.
+                refusals = tuple(
+                    TargetRefusal(target=target, code=code)
+                    for target, code in getattr(error, "target_refusals", ())
+                )
             except Exception:
                 records = ()
                 error_code = "EVIDENCE_TOOL_ERROR"
+                refusals = ()
 
         subject = next(iter(arguments.values()), tool_name)
         if error_code is None:
@@ -329,6 +341,7 @@ class FixedRuleRunner:
                 else (),
                 error_code=error_code,
                 elapsed_ms=max(0, int((monotonic() - started_at) * 1000)),
+                target_refusals=refusals,
             )
         )
         return records if error_code is None else ()
@@ -983,8 +996,9 @@ class FixedRuleRunner:
     def _submit_through_session(self, diagnosis: Diagnosis) -> Diagnosis:
         if self._session is None:
             return diagnosis
-        receipt = self._session.submit(
-            FinalSubmission(
+        submission: FinalSubmission | FinalSubmissionV2
+        if isinstance(diagnosis, DiagnosisV2):
+            submission = FinalSubmissionV2(
                 status=diagnosis.status,
                 summary=diagnosis.summary,
                 root_cause_code=diagnosis.root_cause_code,
@@ -995,7 +1009,19 @@ class FixedRuleRunner:
                 recommended_actions=diagnosis.recommended_actions,
                 confidence=diagnosis.confidence,
             )
-        )
+        else:
+            submission = FinalSubmission(
+                status=diagnosis.status,
+                summary=diagnosis.summary,
+                root_cause_code=diagnosis.root_cause_code,
+                affected_assets=diagnosis.affected_assets,
+                evidence_ids=diagnosis.evidence_ids,
+                claims=diagnosis.claims,
+                unresolved_evidence=diagnosis.unresolved_evidence,
+                recommended_actions=diagnosis.recommended_actions,
+                confidence=diagnosis.confidence,
+            )
+        receipt = self._session.submit(submission)
         if not receipt.accepted or receipt.diagnosis is None:
             raise RuntimeError(
                 f"protocol rejected the built-in final submission: {receipt.error}"

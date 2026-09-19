@@ -13,6 +13,13 @@ for build failures, duplicate detection for failing tests, and affected-asset
 expansion to the failed model's accepted downstream lineage. When the decisive
 relation is not readable it fails closed and reports the real refusal receipt
 plus the transformation gap, which is what the insufficient scenarios expect.
+
+On a v2 evidence surface (T13) build failures take the dedicated decision
+branch instead: the failing expression is mapped by the narrow column-mapping
+reader over the E1/E2 facts and the identity bridge, the type-change family is
+confirmed only through the §4.2 sufficiency conditions, and every failing
+condition — missing bridge, reader UNKNOWN, non-unique or unattributable
+deviation — abstains.
 """
 
 from __future__ import annotations
@@ -21,21 +28,26 @@ import hashlib
 import re
 from typing import Any
 
+from data_incident_gym.column_mapping import UpstreamDefinition, map_failing_expression
 from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
     Diagnosis,
     DiagnosisStatus,
+    DiagnosisV2,
     DiagnosticStrategy,
     PolicyIdentity,
     RootCauseClaim,
     ToolTraceEvent,
 )
 from data_incident_gym.evidence import (
+    TARGETS_REFUSED_CODE,
     DbtLineageFact,
+    DbtNodeDefinitionFact,
     DbtNodeErrorFact,
     DbtRunResultsFact,
     RelationDataProfileFact,
     RelationHistoryFact,
+    RelationSchemaExpectationFact,
     RelationSchemaFact,
 )
 from data_incident_gym.fixed_rule import (
@@ -64,6 +76,9 @@ _TYPE_MISMATCH_PATTERN = re.compile(
     r"(?i)(operator does not exist|cannot cast|invalid input syntax|does not exist: \w+)"
 )
 _IDENTIFIER_PATTERN = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+#: Resource types a column-mapping walk may end at (design §2.2: the caller
+#: declares them from public facts — here, the E1 bridge).
+_TERMINAL_RESOURCE_TYPES = frozenset({"seed", "source"})
 
 
 def reference_analyst_policy_identity(
@@ -107,6 +122,70 @@ class ReferenceAnalystRunner(FixedRuleRunner):
 
     def _build_policy_identity(self) -> PolicyIdentity:
         return reference_analyst_policy_identity(tool_surface_for_context(self._context))
+
+    def _insufficient(self, gaps: tuple[tuple[str, str, str], ...]) -> Diagnosis:
+        if not self._context.is_v2:
+            return super()._insufficient(gaps)
+        # A v2 surface owns the wider gap vocabulary (T13 §3): expectation and
+        # definition gaps are declared through the separate v2 contract, and
+        # the v1 model stays byte-identical.
+        unique = tuple(dict.fromkeys(gaps))
+        return DiagnosisV2(
+            status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+            run_id=self._run_id,
+            summary="The public evidence does not establish one decisive explanation.",
+            evidence_ids=tuple(record.evidence_id for record in self._records),
+            unresolved_evidence=tuple(
+                {
+                    "evidence_kind": kind,
+                    "subject": subject,
+                    "reason_code": reason,
+                }
+                for kind, subject, reason in unique
+            ),
+            recommended_actions=("Collect the unavailable decisive evidence.",),
+            confidence=0.0,
+        )
+
+    # ------------------------------------------------------------------
+    # v2 batch helpers
+    # ------------------------------------------------------------------
+
+    def _schema_expectations(
+        self, targets: tuple[str, ...]
+    ) -> tuple[RelationSchemaExpectationFact, ...]:
+        records = self._call(
+            "get_relation_schema_expectation",
+            {"relation_names": ",".join(targets)},
+            lambda: self._tools.get_relation_schema_expectation(",".join(targets)),
+        )
+        return tuple(
+            record.content
+            for record in records
+            if isinstance(record.content, RelationSchemaExpectationFact)
+        )
+
+    def _node_definitions(self, targets: tuple[str, ...]) -> tuple[DbtNodeDefinitionFact, ...]:
+        records = self._call(
+            "get_dbt_node_definition",
+            {"node_ids": ",".join(targets)},
+            lambda: self._tools.get_dbt_node_definition(",".join(targets)),
+        )
+        return tuple(
+            record.content
+            for record in records
+            if isinstance(record.content, DbtNodeDefinitionFact)
+        )
+
+    def _last_refusals(self, tool_name: str) -> tuple[tuple[str, str], ...]:
+        """Per-target detail of this tool's latest atomic refusal, if any."""
+
+        for event in reversed(self._trace):
+            if isinstance(event, ToolTraceEvent) and event.tool_name == tool_name:
+                if event.error_code != TARGETS_REFUSED_CODE:
+                    return ()
+                return tuple((item.target, item.code) for item in event.target_refusals)
+        return ()
 
     # ------------------------------------------------------------------
     # Evidence helpers
@@ -286,6 +365,251 @@ class ReferenceAnalystRunner(FixedRuleRunner):
                 assets.append((affected_model, lineage_id))
         return tuple(assets)
 
+    def _diagnose_failed_build_v2(
+        self,
+        *,
+        failure_node: str,
+        node_error: DbtNodeErrorFact,
+    ) -> Diagnosis:
+        """T13 decision branch (design §4.1/§4.2), v2 surfaces only.
+
+        The type-change family is confirmed only through the column-mapping
+        reader over E1/E2 facts. Reader inputs come from the identity bridge
+        and the archived definitions alone — never from name similarity — and
+        every failing condition abstains: a missing bridge, a reader UNKNOWN,
+        a non-unique deviation and a deviation the failing expression does not
+        read are all ``INSUFFICIENT_EVIDENCE``, never a confirmation.
+        """
+
+        if not _TYPE_MISMATCH_PATTERN.search(node_error.message):
+            # Only the type-error family has a §4.2 confirmation path; a
+            # missing column in particular is never turned into a rename.
+            return self._insufficient(
+                (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+        lineage = self._lineage(failure_node, "upstream")
+        if lineage is None:
+            return self._insufficient(
+                (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+        schema_names = _relation_names(self._context, "schema")
+        schema_set = set(schema_names)
+        seed_set = set(
+            node.name
+            for node in lineage.related_nodes
+            if node.resource_type in _TERMINAL_RESOURCE_TYPES
+        )
+
+        # Request derivation uses public metadata only: the run's own
+        # whitelists, the observable schema relations and the upstream lineage.
+        # An empty v2 whitelist grants nothing, so the derived candidates are
+        # requested once and the real refusal receipts back the fail-closed
+        # gaps; a non-empty whitelist is intersected with the derivation so a
+        # granted-but-uninvolved target cannot poison the atomic batch.
+        expectation_whitelist = self._context.expectation_relations
+        e1_targets = tuple(
+            dict.fromkeys(
+                relation
+                for relation in (expectation_whitelist or schema_names)
+                if relation in schema_set and relation in seed_set
+            )
+        )
+        candidate_nodes = tuple(
+            dict.fromkeys(
+                (
+                    failure_node,
+                    *(
+                        node.node_id
+                        for node in sorted(
+                            (
+                                item
+                                for item in lineage.related_nodes
+                                if item.resource_type == "model"
+                            ),
+                            key=lambda item: (item.distance, item.node_id),
+                        )
+                    ),
+                )
+            )
+        )
+        node_set = set(candidate_nodes)
+        definition_whitelist = self._context.definition_nodes
+        e2_targets = tuple(
+            dict.fromkeys(
+                node for node in (definition_whitelist or candidate_nodes) if node in node_set
+            )
+        )
+        if not e1_targets or not e2_targets:
+            return self._insufficient(
+                (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+
+        schemas: dict[str, RelationSchemaFact] = {}
+        for relation in e1_targets:
+            schema = self._schema(relation)
+            if schema is None:
+                # The refusal receipt is in the trace; name it and stop — the
+                # deviation comparison has no observation to compare against.
+                return self._insufficient(
+                    (
+                        ("RELATION_SCHEMA", relation, "RELATION_NOT_ALLOWED"),
+                        ("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),
+                    )
+                )
+            schemas[relation] = schema
+
+        gaps: list[tuple[str, str, str]] = []
+        expectations = self._schema_expectations(e1_targets)
+        if not expectations:
+            gaps.extend(self._batch_gap("get_relation_schema_expectation", e1_targets))
+        definitions = self._node_definitions(e2_targets)
+        if not definitions:
+            gaps.extend(self._batch_gap("get_dbt_node_definition", e2_targets))
+        if len(gaps) == 2:
+            # Both decisive fact families were refused: the two receipt-backed
+            # gaps name exactly what is missing.
+            return self._insufficient(tuple(gaps))
+        if gaps:
+            gaps.append(("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"))
+            return self._insufficient(tuple(gaps))
+
+        terminals = tuple(
+            fact.relation_identity
+            for fact in expectations
+            if fact.relation_identity is not None
+            and fact.resource_type in _TERMINAL_RESOURCE_TYPES
+        )
+        upstream: dict[str, UpstreamDefinition] = {}
+        for fact in definitions:
+            if fact.compiled_sql is None or fact.relation_identity is None:
+                # Unkeyable without the bridge: the walk refuses through it.
+                continue
+            if fact.relation_identity in upstream:
+                # Two nodes behind one relation identity cannot be told apart;
+                # refuse to choose, mirroring the build-time same-name defense.
+                return self._insufficient(
+                    (
+                        ("DBT_NODE_DEFINITION", fact.node_id, "NOT_OBSERVABLE"),
+                        ("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),
+                    )
+                )
+            upstream[fact.relation_identity] = UpstreamDefinition(
+                fact.compiled_sql, complete=fact.complete
+            )
+
+        failing_definition = next(
+            (fact for fact in definitions if fact.node_id == failure_node), None
+        )
+        if (
+            failing_definition is None
+            or not failing_definition.known
+            or failing_definition.compiled_sql is None
+            or not failing_definition.complete
+        ):
+            # Without the failed node's own complete definition there is no
+            # mapping input at all; a truncated one must never feed the reader.
+            return self._insufficient(
+                (("DBT_NODE_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+        try:
+            mapping = map_failing_expression(
+                failing_definition.compiled_sql,
+                node_error.message,
+                upstream=upstream,
+                terminal_relations=terminals,
+            )
+        except ValueError:
+            # Malformed public identity text is a caller-contract violation,
+            # never a confirmation.
+            return self._insufficient(
+                (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+        if mapping.status != "RESOLVED":
+            # UNKNOWN never counts as evidence in any direction (§2.2).
+            return self._insufficient(
+                (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+        origins = {(reference.relation, reference.column) for reference in mapping.references}
+        if len(origins) != 2:
+            # §4.2 ① presupposes the two-sided failing expression; a projection
+            # hit or a collapsed pair cannot satisfy it.
+            return self._insufficient(
+                (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+
+        expectations_by_identity = {
+            fact.relation_identity: fact
+            for fact in expectations
+            if fact.relation_identity is not None
+        }
+        deviations: list[tuple[str, str]] = []
+        for origin_relation, _origin_column in sorted(origins):
+            fact = expectations_by_identity.get(origin_relation)
+            if fact is None or not fact.known:
+                # The bridge cannot tie this origin to an expectation subject.
+                return self._insufficient(
+                    (
+                        ("RELATION_SCHEMA_EXPECTATION", origin_relation, "NOT_OBSERVABLE"),
+                        ("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),
+                    )
+                )
+            schema = schemas.get(fact.relation_name)
+            if schema is None:
+                return self._insufficient(
+                    (
+                        ("RELATION_SCHEMA", fact.relation_name, "NOT_OBSERVABLE"),
+                        ("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),
+                    )
+                )
+            expected = {column.name: column.expected_data_type for column in fact.columns}
+            observed = {column.name: column.data_type for column in schema.columns}
+            deviations.extend(
+                (fact.relation_identity, column)
+                for column, expected_type in expected.items()
+                if observed.get(column) not in (None, expected_type)
+            )
+        if len(deviations) != 1:
+            # §4.2 ③: the deviation set inside the involved relations must
+            # isolate exactly one column; zero or several cannot decide.
+            return self._insufficient(
+                (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+        if deviations[0] not in origins:
+            # §4.2 ②/④: the only deviation is a column the failing expression
+            # does not read — the attribution fails.
+            return self._insufficient(
+                (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+        return self._confirm_with_evidence(
+            root_cause_code="SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+            assets=self._failed_model_assets(failure_node, node_error, failure_node),
+            summary="A source column type is incompatible with the failed transformation.",
+            action="Restore the source schema contract and rebuild the affected model.",
+        )
+
+    def _batch_gap(
+        self, tool_name: str, targets: tuple[str, ...]
+    ) -> tuple[tuple[str, str, str], ...]:
+        """The gap an atomically refused batch call leaves behind.
+
+        An atomic refusal blocks every requested target alike, and the
+        diagnosis names the first requested target as its representative —
+        public request order, no mutation knowledge, no similarity. Without a
+        refusal detail (e.g. the budget was spent) the gap states the fact
+        family as not observable for the first target.
+        """
+
+        kind = (
+            "RELATION_SCHEMA_EXPECTATION"
+            if tool_name == "get_relation_schema_expectation"
+            else "DBT_NODE_DEFINITION"
+        )
+        refusals = self._last_refusals(tool_name)
+        if refusals:
+            target, code = refusals[0]
+            return ((kind, target, code),)
+        return ((kind, targets[0], "NOT_OBSERVABLE"),)
+
     # ------------------------------------------------------------------
     # Public-evidence rules
     # ------------------------------------------------------------------
@@ -300,6 +624,18 @@ class ReferenceAnalystRunner(FixedRuleRunner):
         if node_error is None:
             return self._insufficient(
                 (("TRANSFORMATION_DEFINITION", failure_node, "NOT_OBSERVABLE"),)
+            )
+        if self._context.is_v2 and not (
+            node_error.resource_type == "test"
+            or self._context.incident_brief.signal_code == "DBT_TEST_FAILED"
+        ):
+            # T13 §4.2: on the v2 surface the build-failure family is decided
+            # by the column-mapping reader over E1/E2 — never by message
+            # tokens or name patterns. The profile-based test path is
+            # explicitly unchanged by T13 and keeps the v1 rules below.
+            return self._diagnose_failed_build_v2(
+                failure_node=failure_node,
+                node_error=node_error,
             )
         lineage = self._lineage(failure_node, "upstream")
         if lineage is None:

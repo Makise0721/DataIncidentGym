@@ -76,6 +76,12 @@ FindingCode = Literal[
 
 FailureClass = Literal["TOOL", "BUDGET", "SCORING", "REFERENCE_IMPLEMENTATION", "ENVIRONMENT"]
 
+#: Call-level refusal codes a designed fail-closed reference run may carry:
+#: the v1 per-relation refusal and the v2 batch summary code. The batch code
+#: only summarises — its per-target detail is judged precisely by the receipt
+#: matrix, never exempted here.
+_EXPECTED_REFUSAL_CODES = frozenset({"RELATION_NOT_ALLOWED", "TARGETS_REFUSED"})
+
 
 class CertificationError(RuntimeError):
     def __init__(self, code: str, *, detail: str | None = None) -> None:
@@ -237,7 +243,7 @@ def _classify_failure(
         return ()
     classes: list[str] = []
     unexpected_errors = tuple(
-        code for code in run.tool_error_codes if code != "RELATION_NOT_ALLOWED"
+        code for code in run.tool_error_codes if code not in _EXPECTED_REFUSAL_CODES
     )
     if unexpected_errors:
         classes.append("TOOL")
@@ -297,10 +303,9 @@ def _build_findings(
     cited_types_ok = required_types.issubset(cited_evidence_types)
     missing_cited_types = sorted(required_types - cited_evidence_types)
     unexpected_errors = tuple(
-        code for code in (event.error_code for event in trace_events) if code is not None
-    )
-    unexpected_errors = tuple(
-        code for code in unexpected_errors if code != "RELATION_NOT_ALLOWED"
+        code
+        for code in (event.error_code for event in trace_events)
+        if code is not None and code not in _EXPECTED_REFUSAL_CODES
     )
     evaluation_passed = evaluation_status == "PASSED"
     findings = (
