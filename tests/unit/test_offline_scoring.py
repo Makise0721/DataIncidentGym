@@ -20,10 +20,12 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
+    DiagnosisV2,
     DiagnosticStrategy,
     KernelStateTraceEvent,
     PolicyIdentity,
     UnresolvedEvidence,
+    UnresolvedEvidenceV2,
 )
 from data_incident_gym.diagnostic_contracts import InvestigationState, KernelFinalStatus
 from data_incident_gym.evaluation import (
@@ -104,6 +106,45 @@ def _static_insufficient_run() -> DiagnosisRunResult:
             ),
         ),
         confidence=0.5,
+    )
+    return DiagnosisRunResult(
+        strategy=strategy,
+        policy_identity=_policy_identity(strategy),
+        diagnosis=diagnosis,
+        evidence_records=(),
+        trace=(
+            DiagnosisTerminalTraceEvent(
+                event_type="DIAGNOSIS_TERMINAL",
+                strategy=strategy,
+                status=diagnosis.status,
+                evidence_inventory=(),
+            ),
+        ),
+        metrics=_metrics(),
+    )
+
+
+def _v2_insufficient_run() -> DiagnosisRunResult:
+    """The T13 B reference run: v2 contract, two representative refusal gaps."""
+
+    strategy = DiagnosticStrategy.STATIC_SKILL
+    diagnosis = DiagnosisV2(
+        status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
+        run_id=RUN_ID,
+        summary="The decisive expectation and definition facts are not granted.",
+        unresolved_evidence=(
+            UnresolvedEvidenceV2(
+                evidence_kind="RELATION_SCHEMA_EXPECTATION",
+                subject="raw_customers",
+                reason_code="RELATION_NOT_ALLOWED",
+            ),
+            UnresolvedEvidenceV2(
+                evidence_kind="DBT_NODE_DEFINITION",
+                subject="model.jaffle_shop.customers",
+                reason_code="NODE_NOT_ALLOWED",
+            ),
+        ),
+        confidence=0.0,
     )
     return DiagnosisRunResult(
         strategy=strategy,
@@ -367,6 +408,36 @@ def _details_only_evaluator(
 # ---------------------------------------------------------------------------
 # T02: frozen inputs, strict loading, classification
 # ---------------------------------------------------------------------------
+
+
+def test_a_v2_diagnosis_round_trips_by_its_contract_marker(tmp_path: Path) -> None:
+    """Certification stop, round 3 (2026-09-19): the scoring-inputs loader
+    revalidated every persisted diagnosis against the frozen v1 model and
+    refused a v2 run's own bundle. The loader must pick the contract class by
+    the diagnosis's own ``schema_version`` marker — never by content."""
+
+    _prepare_project(tmp_path, run=_v2_insufficient_run())
+
+    loaded = load_evaluation_input_bundle(tmp_path, RUN_ID)
+
+    diagnosis = loaded.diagnosis_run.diagnosis
+    assert type(diagnosis) is DiagnosisV2
+    assert {
+        (item.evidence_kind, item.subject, item.reason_code)
+        for item in diagnosis.unresolved_evidence
+    } == {
+        ("RELATION_SCHEMA_EXPECTATION", "raw_customers", "RELATION_NOT_ALLOWED"),
+        ("DBT_NODE_DEFINITION", "model.jaffle_shop.customers", "NODE_NOT_ALLOWED"),
+    }
+
+
+def test_a_v1_diagnosis_keeps_the_frozen_contract(tmp_path: Path) -> None:
+    _prepare_project(tmp_path)
+
+    loaded = load_evaluation_input_bundle(tmp_path, RUN_ID)
+
+    assert type(loaded.diagnosis_run.diagnosis) is Diagnosis
+    assert loaded.diagnosis_run.diagnosis.schema_version == "p1.diagnosis.v1"
 
 
 def test_round_trip_preserves_inputs_and_classifies_re_scorable(tmp_path: Path) -> None:

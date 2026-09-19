@@ -327,8 +327,12 @@ class DiagnosisV2(Diagnosis):
     unresolved-evidence vocabulary is the v2 one. ``Diagnosis`` itself stays
     byte-identical, so every frozen v1 surface (policy identity, final-diagnosis
     schema digest) keeps matching the sealed manifests.
+
+    ``schema_version`` is the contract's own marker: loaders that revalidate a
+    persisted diagnosis pick the class by this field, never by content.
     """
 
+    schema_version: Literal["p1.diagnosis.v2"] = "p1.diagnosis.v2"
     unresolved_evidence: tuple[UnresolvedEvidenceV2, ...] = ()
 
 

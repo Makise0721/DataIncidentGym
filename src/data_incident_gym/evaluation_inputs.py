@@ -44,6 +44,7 @@ from data_incident_gym.diagnosis import (
     KERNEL_STRATEGIES,
     RUN_ID_PATTERN,
     DiagnosisRunResult,
+    DiagnosisV2,
     DiagnosticStrategy,
     KernelStateTraceEvent,
 )
@@ -597,9 +598,33 @@ def _restore_typed_kernel_state(run: DiagnosisRunResult) -> DiagnosisRunResult:
         _error("SCORING_INPUTS_INVALID", detail="kernel state does not match the trace")
 
 
+def _restore_typed_diagnosis(payload: dict[str, Any]) -> dict[str, Any]:
+    """Pick the diagnosis contract by its own ``schema_version`` marker.
+
+    The v2 diagnosis (T13) declares gap kinds outside the frozen v1
+    vocabulary, so revalidating a persisted v2 run's payload against
+    ``Diagnosis`` would refuse the run's own scoring inputs (certification
+    stop, round 3). The marker is the contract's own declaration, never a
+    content guess; anything else keeps the v1 path.
+    """
+
+    diagnosis_payload = payload.get("diagnosis_run", {}).get("diagnosis")
+    if not isinstance(diagnosis_payload, dict):
+        return payload
+    if diagnosis_payload.get("schema_version") != "p1.diagnosis.v2":
+        return payload
+    return {
+        **payload,
+        "diagnosis_run": {
+            **payload["diagnosis_run"],
+            "diagnosis": DiagnosisV2.model_validate(diagnosis_payload),
+        },
+    }
+
+
 def _finalize_bundle(payload: dict[str, Any]) -> EvaluationInputBundle:
     try:
-        bundle = EvaluationInputBundle.model_validate(payload)
+        bundle = EvaluationInputBundle.model_validate(_restore_typed_diagnosis(payload))
     except ValidationError:
         _error("SCORING_INPUTS_INVALID", detail="bundle failed schema validation")
     require_known_evaluator(bundle.original_evaluator)

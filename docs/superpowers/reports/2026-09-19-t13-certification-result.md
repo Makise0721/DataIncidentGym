@@ -142,3 +142,77 @@ A 变体不受影响（其诊断无未决缺口）。
   执行（规格沿用，前置 HEAD 含本次修复提交）由审计裁定。若第三次仍在构建后处理阶段停机，升级规则
   （v2 链路整体审计）继续有效。
 - 两份授权书随本报告一并入库。
+
+## 8. 第三次执行（2026-09-19，授权书 round3）
+
+- 执行 HEAD：`6ede22311f7400fc32658f86227236adc3a67b49`；工作树干净；`pipeline build`
+  fingerprint == F0 逐字相等；未运行 `doctor`。
+- 命令（逐字）：`uv run data-incident-gym certify --case schema_type_change_raw_customer_id_a
+  --case schema_type_change_raw_customer_id_b --case schema_type_change_raw_order_user_id_a
+  --case schema_type_change_raw_order_user_id_b --admit --output artifacts/admissions/t13-pairs.json
+  --overwrite`
+- stdout（逐字）：
+
+```
+认证失败 [CERTIFICATION_SETUP_FAILED]。
+```
+
+- 产生的 run（仅前两个 case，循环在第二对启动前中断）：对 1 A `8602db2917df4670bcd2b5f9b598edc0`、
+  对 1 B `3f65c5e63088497cae33b0b93ddd50e1`——**两轮产物完整落盘**（含 `diagnosis.json`），归档校验
+  修复（`6ede223`）在真实链路上得到验证。
+
+### 关键实测：B 链路首次完整走通，C4 达成
+
+对 1 B 的归档（`3f65c5e6`）逐字核验：
+
+- `diagnosis.json`：`INSUFFICIENT_EVIDENCE`，`unresolved_evidence` **恰 2 条**（与合同精确相等）：
+  `(RELATION_SCHEMA_EXPECTATION, raw_customers, RELATION_NOT_ALLOWED)`、
+  `(DBT_NODE_DEFINITION, model.jaffle_shop.customers, NODE_NOT_ALLOWED)`；
+- `trace.jsonl`：恰好两次批量拒绝，`target_refusals` 共 **6 条逐目标条目**——
+  `get_relation_schema_expectation`（请求 `raw_customers,raw_orders`）→
+  `[(raw_customers, RELATION_NOT_ALLOWED), (raw_orders, RELATION_NOT_ALLOWED)]`；
+  `get_dbt_node_definition`（请求四节点）→ `[(customers, NODE_NOT_ALLOWED), (stg_customers,
+  NODE_NOT_ALLOWED), (stg_orders, NODE_NOT_ALLOWED), (stg_payments, NODE_NOT_ALLOWED)]`；
+  两条缺口三元组各自精确命中其 `(target, code)`，调用级 `TARGETS_REFUSED` 未作任何见证；
+- 预算：`tool_call_attempts=7`（成功 5 + 拒绝 2）、`model_requests=0`；
+- 评测：`evaluation.json` status `PASSED`、failed_check_codes 空。
+
+C1（两 run：v2 记录齐、22 节点、redacted 全 false、baseline==F0）、C2（A 快照带 `relation_identity`；
+B 快照存在、==F0、`relations: []`）、C6（A=8/0、B=7/0）、C7（对 1 A rescore PASSED 逐项一致）、
+C8（只读活库指纹 == F0）同轮实测成立。对 1 A 与第二轮实测逐点一致（结论、8/8、rescore 无差异）。
+
+### 第三次停机根因（认证侧装载器，离线复现）
+
+循环死于**对 1 B 的认证侧后处理**：`certify_scenario` 在评测成功后调用
+`load_evaluation_input_bundle` 重载评分输入，`_finalize_bundle` 的
+`EvaluationInputBundle.model_validate` 再次以 **v1 `Diagnosis`** 重验持久化诊断 → v2 缺口词表
+ValidationError → `SCORING_INPUTS_INVALID`（`EvaluationInputsError`，`RuntimeError` 子类）→
+不被 `certify_scenario` 的 `EvaluationWorkflowError` 捕获 → 直穿 CLI 裸 `except Exception` →
+`CERTIFICATION_SETUP_FAILED`。在真实落盘的 B 评分输入上离线复现
+（`SCORING_INPUTS_INVALID: bundle failed schema validation`），与归档修复（6ede223）相互独立——
+同一条链路上第 4 处 v1 重验点。
+
+修复（本次提交，无数据库操作）：`DiagnosisV2.schema_version` 覆写为 `"p1.diagnosis.v2"`（v2 合同
+自身的显式标记；v1 模型与全部冻结面不动），`_finalize_bundle` 按该标记选择合同类重验——
+**按合同声明分流，非内容猜测**。验证：真实 B payload（带 v2 标记，即下次执行写入的形态）装载为
+`DiagnosisV2`、恰两条缺口、摘要自洽；回归两条（v2 写-读往返 + v1 冻结合约不变）。全量
+**991 passed / 5 skipped**、ruff、`git diff --check` 干净。
+
+**如实边界**：磁盘上第三次执行的 B 评分输入带旧标记（覆写前写入），按新装载器仍不可载——它属于
+已消耗的授权；第四次执行将从内存 v2 对象写出 v2 标记的 bundle，自然绕开。剩余
+`Diagnosis.model_validate` 扫描结果：`benchmark_archive`/`benchmark_report`（benchmark，v1 场景、
+不在 T13 范围）、`diagnostic_agent` 静态技能路径、`evaluation_inputs` 内核状态路径——均属 v1
+作用域，留待整体审计裁定是否统一扫除。
+
+### 结论与请求裁定
+
+- **认证仍未成立**：`certify_catalog` 未返回，无认证条目、无准入文件；两对需成对认证。本次授权
+  消耗，未重跑。
+- 升级规则的裁定请求：本次停机码是 `CERTIFICATION_SETUP_FAILED`（认证侧装载器），按字面不在
+  "BUILD_FAILED / ARTIFACT_WRITE_FAILED" 之列；但按其意图——同一链路（构建 → 桥 → 归档校验 →
+  评分输入装载）已连曝 **4 处** v1 重验/接缝缺陷——执行侧认为逐点修复的收益已尽，**建议直接进入
+  v2 链路整体审计**（含上述 4 处剩余 v1 作用域点的扫除裁定），审计通过后再授权第四次执行。
+  两个 A 变体已连续两轮全绿（结论、预算、离线重评逐点一致），B 链路的全部环节至此均有归档实测
+  或回归覆盖；第三次执行未见任何新的诊断内容缺陷。
+- 四个 `eval score` 命令按授权执行：对 1 A PASSED（逐项一致）；对 1 B `SCORING_INPUTS_INVALID`
+  （旧标记边界，见上）；对 2 无 run_id 存在（循环未达），两条命令无可执行对象。
