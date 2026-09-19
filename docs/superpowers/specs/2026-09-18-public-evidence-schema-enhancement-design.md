@@ -1,11 +1,25 @@
 # T13 设计：可公开验证的 schema / 转换证据增强（候选）
 
-- 日期：2026-09-18。状态：**实施中（第 7 版：错误行截断感知识别纳入读器契约；切片 3/4 边界重排与
-  数据库 dry run 前置授权项见第 6 版修订记录）**。
+- 日期：2026-09-18。状态：**实施中（第 8 版：lineage 升为承重推导步骤，两对合同的必需证据类型按实测
+  修订——认证前最后一次合同修订）**。
 - 依据：改进计划 T13；T12 收口结论；第 2 版（`c2be701`）的审计意见；第 5 版通过设计审查（审查在审计
   对话中完成，仓库内没有独立的审查记录文件，头部状态行的"待审"是当时提交审查时的文字）；切片 0/1/2 的
   各轮实施审计；切片 3 离线部分审计（`b62289d`）的 P2-1 范围偏离意见。
 - 边界：不改 kernel/static 的既有身份与历史结果，不冻结 manifest，不做真实模型测量；T14 跨任务另行。
+
+### 修订记录（第 8 版，切片 4 离线收尾、认证之前）
+
+- **lineage 升为承重推导步骤（审计裁定，选 ②）**：第 7 版 §4.1 的"6 步 + 余量可留给 `get_dbt_lineage`
+  复核闭包"与参考实现已分叉——第三增量落地后发现，参考解的请求推导（白名单 ∩ lineage 候选）在 A/B
+  两个变体上都**依赖** upstream lineage，lineage 不是余量而是承重环节。两对合同的
+  `required_evidence_types` 增加 `DBT_LINEAGE`（四个文件各一行），使合同与卡片对真实路径说实话；
+  加固作用：任何绕过 lineage 推导（如退回名称启发式）的参考路径将因必需证据缺失而无法通过认证。
+  **时间窗口**：两对尚未认证、未进冻结 manifest，这是唯一不使既有证书失效的修订时机。
+- **逐步清单与预算按实测重写（§4.1）**：参考解（确定性，0 模型请求）实测路径 A = 8/8、B = 7 次工具
+  调用；原"6 + 关闭批次 1 + 提交 1 = 8"的**模型回合**算术同步作废——模型驱动策略若复刻该路径必须
+  同回合批处理（如 schema 两条一回合）才能落回 8 模型请求内，报告中不得再以旧算术表述预算条件。
+- 对 1/对 2 的 A 变体必需类型现为六项（含 `DBT_LINEAGE`）、B 变体四项（含 `DBT_LINEAGE`、不含两个
+  v2 事实）；`types_ok`/`cited_types_ok` 与卡片 `readonly_path` 由此自然推出 lineage 步骤。
 
 ### 修订记录（第 7 版，切片 3/4 之间的授权 dry run 之后）
 
@@ -278,14 +292,19 @@ E1 只读该快照并校验摘要，不符 → `EVIDENCE_INTEGRITY_ERROR`；全�
   ⇒ 起源 `raw_orders.user_id`；schema+E1(raw_customers) → `id` 观测 text ≠ 期望 integer（偏差）；
   schema+E1(raw_orders) → `user_id` 观测 integer = 期望（无偏差）⇒ **唯一偏差且被关联到失败表达式** →
   `CONFIRMED` / `SOURCE_SCHEMA_COLUMN_TYPE_CHANGED`。
-- **≤8 次工具调用逐步清单**：
-  1 `get_dbt_run_results`；2 `get_dbt_node_error(customers)`；3 `get_relation_schema(raw_customers)`；
-  4 `get_relation_schema(raw_orders)`；5 `get_relation_schema_expectation([raw_customers, raw_orders])`；
-  6 `get_dbt_node_definition([customers, stg_customers, stg_orders])` ⇒ **6 次**（余 2 次可留给
-  `get_dbt_lineage` 复核闭包）。模型回合：6 + 关闭批次 1 + 提交 1 = 8，正好在 `request_limit=8` 内；可再
-  把 3/4 或 2/5 同回合批处理留出余量。`close_obligation` 不消耗工具预算。
-- 预算约束：工具 8/8、模型请求 8/8、提交重试 2、300 秒，全部在既有预算内，无任何豁免。
-  **条件差异（必须写明）**：v2 的 E1/E2 是批量工具，单次调用信息量高于 v1 的逐目标工具；"仍为 8 次"
+- **≤8 次工具调用逐步清单（第 8 版按参考实现实测重写）**：
+  1 `get_dbt_run_results`；2 `get_dbt_node_error(customers)`；3 `get_dbt_lineage(customers, upstream)`
+  ——**承重推导步骤**：E1/E2 的请求目标 = 公开白名单 ∩ lineage 推导候选（第 7 版把它记为"余量复核"
+  是设计清单滞后于实现，见修订记录）；4 `get_relation_schema(raw_customers)`；
+  5 `get_relation_schema(raw_orders)`；6 `get_relation_schema_expectation([raw_customers, raw_orders])`；
+  7 `get_dbt_node_definition([customers, stg_customers, stg_orders])`；
+  8 `get_dbt_lineage(customers, downstream)`（受影响资产扩展）⇒ **A = 8/8**；
+  B 变体在 6/7 处被原子拒绝后弃答 ⇒ **7 次**（不取 downstream）。
+  模型回合：确定性参考解 0 模型请求；模型驱动策略若复刻该路径，8 次工具调用必须同回合批处理
+  （如 4/5 同回合）并加关闭批次与提交才能落回 `request_limit=8` 内，报告中须如实写明该批处理前提。
+  `close_obligation` 不消耗工具预算。
+- 预算约束：工具调用 A 8/8、B 7/8；模型请求 ≤8、提交重试 2、300 秒，全部在既有预算内，无任何豁免。
+  **条件差异（必须写明）**：v2 的 E1/E2 是批量工具，单次信息量高于 v1 的逐目标工具；"仍在 8 次"
   不表示与 v1 预算条件逐项相同——政策身份与单次信息量都不同（§3）。
 
 - B 变体：同一故障与表面症状；`schema_relations` 保持 `[raw_customers, raw_orders]`（观测仍可读）；

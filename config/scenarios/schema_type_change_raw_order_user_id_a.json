@@ -43,7 +43,7 @@
     "expectation_relations": ["raw_customers", "raw_orders"],
     "definition_nodes": ["model.jaffle_shop.customers", "model.jaffle_shop.stg_customers", "model.jaffle_shop.stg_orders"]
   },
-  "required_evidence_types": ["DBT_RUN_RESULTS", "DBT_NODE_ERROR", "RELATION_SCHEMA", "RELATION_SCHEMA_EXPECTATION", "DBT_NODE_DEFINITION"],
+  "required_evidence_types": ["DBT_RUN_RESULTS", "DBT_NODE_ERROR", "DBT_LINEAGE", "RELATION_SCHEMA", "RELATION_SCHEMA_EXPECTATION", "DBT_NODE_DEFINITION"],
   "forbidden_leakage": ["SCENARIO_SPEC", "GROUND_TRUTH", "VARIANT_ROLE", "ANSWERABILITY", "EXPECTED_STATUS", "PRIVATE_PATH"],
   "distractors": [],
   "expected_status": "CONFIRMED"

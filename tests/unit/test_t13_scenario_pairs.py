@@ -48,6 +48,35 @@ PARTNERS = {
 }
 
 
+#: Required evidence types after the pre-certification revision (design §4.1
+#: v8): the lineage call is load-bearing for the reference request derivation,
+#: so both variants require it — the insufficient variant collects it too.
+A_REQUIRED = (
+    "DBT_RUN_RESULTS",
+    "DBT_NODE_ERROR",
+    "DBT_LINEAGE",
+    "RELATION_SCHEMA",
+    "RELATION_SCHEMA_EXPECTATION",
+    "DBT_NODE_DEFINITION",
+)
+B_REQUIRED = (
+    "DBT_RUN_RESULTS",
+    "DBT_NODE_ERROR",
+    "DBT_LINEAGE",
+    "RELATION_SCHEMA",
+)
+#: The reference tool path every card must restate, derived from the required
+#: types and the observable whitelists.
+CARD_READONLY_PATH = (
+    "get_dbt_run_results",
+    "get_dbt_node_error",
+    "get_relation_schema",
+    "get_dbt_lineage",
+    "get_relation_schema_expectation",
+    "get_dbt_node_definition",
+)
+
+
 def test_the_two_pairs_are_registered_and_paired() -> None:
     assert len(P1_T13_PUBLIC_EVIDENCE_IDS) == 4
     assert PAIR_ONE in AB_SCENARIO_PAIRS
@@ -89,8 +118,7 @@ def test_the_confirmable_variants_name_the_decisive_whitelists(project_root: Pat
         assert scenario.ground_truth_or_acceptable_root_causes == (
             "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
         )
-        required = set(scenario.required_evidence_types)
-        assert {"RELATION_SCHEMA_EXPECTATION", "DBT_NODE_DEFINITION"} <= required
+        assert scenario.required_evidence_types == A_REQUIRED
 
 
 def test_the_insufficient_variants_withhold_exactly_the_two_v2_facts(
@@ -128,8 +156,10 @@ def test_the_insufficient_variants_withhold_exactly_the_two_v2_facts(
         assert scenario.expected_status == "INSUFFICIENT_EVIDENCE"
         assert len(scenario.ground_truth_or_acceptable_root_causes) == 2
         # The refused facts are not required evidence: nothing collected them.
-        required = set(scenario.required_evidence_types)
-        assert not {"RELATION_SCHEMA_EXPECTATION", "DBT_NODE_DEFINITION"} & required
+        # The lineage call is required in B too: the request derivation reads it
+        # and the run collects and cites it before the refused probes.
+        assert scenario.required_evidence_types == B_REQUIRED
+        assert not {"RELATION_SCHEMA_EXPECTATION", "DBT_NODE_DEFINITION"} & set(B_REQUIRED)
 
 
 @pytest.mark.parametrize("pair", [PAIR_ONE, PAIR_TWO])
@@ -173,3 +203,15 @@ def test_the_cards_are_paired_and_uncertified_until_the_dry_run(project_root: Pa
         # No certification run has happened yet: solvability stays undecided.
         assert card.solvability.certified is None
         assert "solvability" in card.completeness_issues()
+
+
+def test_the_four_cards_restate_the_lineage_bearing_reference_path(
+    project_root: Path,
+) -> None:
+    """Final card text, pinned: every variant exercises the lineage step (the
+    request derivation) plus the two batch facts, granted in A and refused in
+    B. `get_dbt_lineage` must derive naturally from the required types."""
+
+    for case_id in P1_T13_PUBLIC_EVIDENCE_IDS:
+        card = build_scenario_card(case_id, project_root=project_root)
+        assert card.readonly_path == CARD_READONLY_PATH, case_id

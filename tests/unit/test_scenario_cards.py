@@ -149,6 +149,7 @@ def test_t13_cards_name_the_batch_tools_and_the_withheld_whitelists() -> None:
         "get_dbt_run_results",
         "get_dbt_node_error",
         "get_relation_schema",
+        "get_dbt_lineage",
         "get_relation_schema_expectation",
         "get_dbt_node_definition",
     )

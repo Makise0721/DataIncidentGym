@@ -46,7 +46,7 @@
     "expectation_relations": [],
     "definition_nodes": []
   },
-  "required_evidence_types": ["DBT_RUN_RESULTS", "DBT_NODE_ERROR", "RELATION_SCHEMA"],
+  "required_evidence_types": ["DBT_RUN_RESULTS", "DBT_NODE_ERROR", "DBT_LINEAGE", "RELATION_SCHEMA"],
   "forbidden_leakage": ["SCENARIO_SPEC", "GROUND_TRUTH", "VARIANT_ROLE", "ANSWERABILITY", "EXPECTED_STATUS", "PRIVATE_PATH"],
   "distractors": [],
   "expected_status": "INSUFFICIENT_EVIDENCE"
