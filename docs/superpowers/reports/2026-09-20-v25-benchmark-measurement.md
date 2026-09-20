@@ -58,15 +58,22 @@ POSTGRES_CONNECTION 失败（doctor.py:622-626），DBT/PROFILE 检查级联失�
 
 ## 4. 现场与边界
 
-- worktree suite root 仅含 `doctor.json`（FAILED 回执）；无 ledger、无 cell、无 subset 标记；
-  再次 preflight 需先清理该回执并获所有者授权（"不换配置复跑"）。
+- worktree suite root 仅含 `doctor.json`（FAILED 回执，**按所有者更正永久保留**）；无 ledger、无 cell、
+  无 subset 标记；后续测量使用 v26 的独立 suite 目录与新回执，下一次预检属另行授权的新尝试。
 - 数据库保持健康基线（F0）；诊断全程只读。
 - 模型侧仅发生目录级 GET（urllib×3 + SDK×1），无 completion 请求，不消耗套餐调用额度。
 
-## 5. 待所有者裁定
+## 5. 裁定与更正（2026-09-20 所有者复核后）
 
-1. **R3（阻塞）**：是否授权修改 doctor 目录探针（改用 SDK/httpx 或设置 UA）→ 新实施修订 → 按本轮
-   先例另冻结 v26（模型、场景、策略、预算、评分合同、排程仍不变）；或给出其他裁定。
-2. **R1**：是否同意将本机 uv 降级至 0.11.24（恢复冻结工具链）。
-3. **R2**：是否同意 preflight/run 时从主工作区 `.env.diagnostic` 进程级 source（不写文件、值不入记录）。
-   三项落实并重新放行后，方可清理 FAILED 回执并执行下一次（仍为一次）preflight。
+**表述更正（两处）**：
+
+1. **v25 的 FAILED 回执保留原样，不清理、不覆盖。** v26 使用独立 suite 目录
+   （`artifacts/benchmarks/p1-formal-v26/`）与新回执；下一次预检属于**另行授权的新尝试**，
+   不存在"清理后重试"的路径。本文 §4 与早先 §5 中"清理该回执"的表述作废，以此处为准。
+2. **`models.list()` 成功只证明目录访问、鉴权有效与模型在列**；不证明 completion 可用、
+   剩余额度充足或目录请求不扣量。这三项应标为**尚未验证**，待获准的 preflight 与测量给出证据。
+
+**所有者裁定（三项修复）**：R3 目录探针改用 OpenAI SDK `models.list()`（同端点/鉴权/网络路径、
+保留超时、禁用自动重试、保留模型在列检查）→ 已实现、审计通过并提交，冻结 v26（见
+[v26 冻结报告](2026-09-20-v26-freeze.md)与 [doctor 改动审计](2026-09-20-doctor-catalog-probe-audit.md)）；
+R1 隔离使用 uv 0.11.24（不降级全机）；R2 dotenv 进程级注入。检出门未修改。
