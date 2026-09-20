@@ -90,6 +90,20 @@ _SUBSET_FILENAME = "subset.json"
 _DOCTOR_FILENAME = "doctor.json"
 _LOCK_FILENAME = ".lock"
 _INTERRUPTED_ARTIFACTS_DIRNAME = "interrupted-artifacts"
+#: Owner-approved pause rule (2026-09-20): once at least 12 model-backed cells
+#: are terminal, at least 10 unpassed cells within the most recent 12 pause the
+#: suite before the next cell starts. A cell is unpassed unless the evaluation
+#: passed and every applicable controller gate passed; fixed-rule cells never
+#: enter the window.
+_ROLLING_WINDOW_SIZE = 12
+_ROLLING_WINDOW_FAILURE_THRESHOLD = 10
+
+BenchmarkStopReason = Literal[
+    "NONE",
+    "RUN_SETUP_ERROR",
+    "ENVIRONMENT_OR_RECOVERY_FAILURE",
+    "ROLLING_WINDOW_UNPASSED_PAUSE",
+]
 
 
 class BenchmarkRunnerError(RuntimeError):
@@ -225,6 +239,21 @@ def is_receipt_acceptable(receipt: BenchmarkDoctorReceipt) -> bool:
     )
 
 
+def rolling_window_stop_due(window: Sequence[bool]) -> bool:
+    """Return whether the owner-approved rolling-window pause rule triggers.
+
+    ``window`` holds one pass boolean per terminal model-backed cell, in
+    completion order; fixed-rule cells never appear in it.
+    """
+
+    if len(window) < _ROLLING_WINDOW_SIZE:
+        return False
+    return (
+        sum(not passed for passed in window[-_ROLLING_WINDOW_SIZE:])
+        >= _ROLLING_WINDOW_FAILURE_THRESHOLD
+    )
+
+
 class BenchmarkRunResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -236,6 +265,7 @@ class BenchmarkRunResult(BaseModel):
     failed_cells: StrictInt
     subset: bool = False
     model_probe_required: bool = True
+    stop_reason: BenchmarkStopReason = "NONE"
     doctor_status: DoctorStatus
     doctor_path: Path
     ledger_path: Path
@@ -695,6 +725,73 @@ class BenchmarkRunner:
         except OSError as exc:
             raise BenchmarkRunnerError("cannot append benchmark ledger") from exc
 
+    def _completed_model_backed_window_pass(self, cell: ManifestCell) -> bool:
+        """Re-read a completed cell's controller gates from its persisted evaluation."""
+
+        artifact_root = self._project_root.resolve(strict=True) / "artifacts"
+        if artifact_root.is_symlink():
+            raise BenchmarkRunnerError("artifacts root must not be a symlink")
+        artifact_dir = artifact_root / cell.run_id
+        if artifact_dir.is_symlink():
+            raise BenchmarkRunnerError("completed cell artifact must not be a symlink")
+        evaluation_path = artifact_dir / "evaluation.json"
+        if evaluation_path.is_symlink() or not evaluation_path.is_file():
+            raise BenchmarkRunnerError(
+                f"completed model-backed cell {cell.run_id} has no readable evaluation"
+            )
+        try:
+            evaluation = EvaluationResult.model_validate(
+                json.loads(
+                    evaluation_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_reject_duplicate_json_keys,
+                )
+            )
+        except (OSError, ValueError) as exc:
+            raise BenchmarkRunnerError(
+                f"completed model-backed cell {cell.run_id} has an invalid evaluation"
+            ) from exc
+        if (
+            evaluation.run_id != cell.run_id
+            or evaluation.incident_case_id != cell.incident_case_id
+            or evaluation.status is not EvaluationStatus.PASSED
+        ):
+            raise BenchmarkRunnerError(
+                f"completed model-backed cell {cell.run_id} evaluation does not match"
+                " the ledger"
+            )
+        return all(check.passed for check in evaluation.controller_checks)
+
+    def _terminal_model_backed_window(self, ledger_path: Path) -> list[bool]:
+        """Rebuild the rolling-window history from the ledger, in completion order."""
+
+        model_backed_cells = {
+            cell.run_id: cell for cell in self._manifest.cells if cell.model_backed
+        }
+        if not model_backed_cells or not ledger_path.exists():
+            return []
+        try:
+            lines = ledger_path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise BenchmarkRunnerError("cannot read benchmark ledger") from exc
+        window: list[bool] = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line, object_pairs_hook=_reject_duplicate_json_keys)
+            except ValueError as exc:
+                raise BenchmarkRunnerError("benchmark ledger is invalid") from exc
+            if not isinstance(raw, dict) or raw.get("state") == "STARTED":
+                continue
+            cell = model_backed_cells.get(raw.get("run_id"))
+            if cell is None:
+                continue
+            if raw.get("state") == "FAILED":
+                window.append(False)
+            else:
+                window.append(self._completed_model_backed_window_pass(cell))
+        return window
+
     def _write_doctor_receipt(
         self,
         path: Path,
@@ -959,10 +1056,10 @@ class BenchmarkRunner:
             self._assert_unstarted_artifacts_absent(ledger)
             self._write_subset_marker(suite_root)
 
+            # Materialize interrupted cells before deciding the pause so a pause
+            # always leaves the ledger fully terminal, never with a cell in flight.
             for cell in cells:
                 previous = ledger.get(cell.run_id)
-                if previous is not None and previous.state in {"COMPLETED", "FAILED"}:
-                    continue
                 if previous is not None and previous.state == "STARTED":
                     self._materialize_interrupted_cell(
                         cell,
@@ -970,6 +1067,17 @@ class BenchmarkRunner:
                         ledger_path=ledger_path,
                         ledger=ledger,
                     )
+
+            window = self._terminal_model_backed_window(ledger_path)
+            window_pause = rolling_window_stop_due(window)
+            stop_reason: BenchmarkStopReason = (
+                "ROLLING_WINDOW_UNPASSED_PAUSE" if window_pause else "NONE"
+            )
+
+            for cell in cells:
+                if window_pause:
+                    break
+                if cell.run_id in ledger:
                     continue
 
                 started_at = _aware_utc(self._clock())
@@ -985,6 +1093,7 @@ class BenchmarkRunner:
                 )
                 self._append_ledger(ledger_path, started)
                 ledger[cell.run_id] = started
+                window_passed = False
                 try:
                     attempt: EvaluationAttemptResult = await self._evaluation_runner_factory().run(
                         cell.incident_case_id,
@@ -995,6 +1104,9 @@ class BenchmarkRunner:
                         "COMPLETED" if attempt.status is EvaluationStatus.PASSED else "FAILED"
                     )
                     reason = None if state == "COMPLETED" else "EVALUATION_FAILED"
+                    window_passed = state == "COMPLETED" and all(
+                        check.passed for check in attempt.evaluation.controller_checks
+                    )
                 except EvaluationWorkflowError as error:
                     self._materialize_setup_error(
                         cell,
@@ -1005,6 +1117,7 @@ class BenchmarkRunner:
                     state = "FAILED"
                     reason = "RUN_SETUP_ERROR"
                     stop_after_cell = True
+                    stop_reason = "RUN_SETUP_ERROR"
                 except Exception:
                     self._materialize_setup_error(
                         cell,
@@ -1014,6 +1127,7 @@ class BenchmarkRunner:
                     state = "FAILED"
                     reason = "RUN_SETUP_ERROR"
                     stop_after_cell = True
+                    stop_reason = "RUN_SETUP_ERROR"
                 else:
                     stop_after_cell = any(
                         check.code
@@ -1025,6 +1139,8 @@ class BenchmarkRunner:
                         and not check.passed
                         for check in attempt.evaluation.checks
                     )
+                    if stop_after_cell:
+                        stop_reason = "ENVIRONMENT_OR_RECOVERY_FAILURE"
                 terminal = BenchmarkLedgerEntry.create(
                     manifest_id=self._manifest.manifest_id,
                     sequence=cell.sequence,
@@ -1038,7 +1154,12 @@ class BenchmarkRunner:
                 )
                 self._append_ledger(ledger_path, terminal)
                 ledger[cell.run_id] = terminal
-                if stop_after_cell:
+                if cell.model_backed:
+                    window.append(window_passed)
+                    window_pause = rolling_window_stop_due(window)
+                    if window_pause and stop_reason == "NONE":
+                        stop_reason = "ROLLING_WINDOW_UNPASSED_PAUSE"
+                if stop_after_cell or window_pause:
                     break
 
             terminal = tuple(entry for entry in ledger.values() if entry.state != "STARTED")
@@ -1056,6 +1177,7 @@ class BenchmarkRunner:
                 terminal_cells=len(terminal),
                 completed_cells=completed,
                 failed_cells=failed,
+                stop_reason=stop_reason,
                 doctor_status=doctor_result.status,
                 doctor_path=doctor_path,
                 ledger_path=ledger_path,
@@ -1071,4 +1193,6 @@ __all__ = [
     "BenchmarkRunResult",
     "BenchmarkRunner",
     "BenchmarkRunnerError",
+    "BenchmarkStopReason",
+    "rolling_window_stop_due",
 ]

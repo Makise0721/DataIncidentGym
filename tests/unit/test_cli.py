@@ -296,6 +296,53 @@ def test_benchmark_preflight_accepts_fixed_rule_scope_without_model_probe(
     assert "started_cells: 0" in result.stdout
 
 
+def test_benchmark_run_prints_stop_reason_for_rolling_window_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = SimpleNamespace(manifest_id="p1-formal-v3")
+    run_result = SimpleNamespace(
+        status="FAILED",
+        terminal_cells=13,
+        total_cells=106,
+        subset=False,
+        model_probe_required=True,
+        stop_reason="ROLLING_WINDOW_UNPASSED_PAUSE",
+        ledger_path=Path("artifacts/benchmarks/p1-formal-v3/ledger.jsonl"),
+    )
+
+    class StubRunner:
+        async def run(self):
+            return run_result
+
+    monkeypatch.setattr(
+        cli,
+        "_confirmed_benchmark_manifest",
+        lambda path, digest: (path, manifest),
+    )
+    monkeypatch.setattr(
+        cli,
+        "create_benchmark_runner",
+        lambda loaded, selector=None: StubRunner(),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            "run",
+            "--manifest",
+            "manifest.json",
+            "--confirm-sha256",
+            "abc",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "status: FAILED" in result.stdout
+    assert "cells: 13/106" in result.stdout
+    assert "stop_reason: ROLLING_WINDOW_UNPASSED_PAUSE" in result.stdout
+
+
 def test_benchmark_report_uses_confirmed_manifest_and_read_only_reporter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

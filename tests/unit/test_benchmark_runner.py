@@ -17,12 +17,15 @@ from data_incident_gym.benchmark_runner import (
     BenchmarkRunner,
     BenchmarkRunnerError,
     is_receipt_acceptable,
+    rolling_window_stop_due,
 )
 from data_incident_gym.config import Settings
 from data_incident_gym.diagnosis import DiagnosticStrategy
 from data_incident_gym.diagnostic_config import DiagnosticSettings
 from data_incident_gym.doctor import DoctorCheckCode, DoctorResult, DoctorRunner, DoctorStatus
 from data_incident_gym.evaluation import (
+    ControllerCheck,
+    ControllerCheckCode,
     EvaluationApplicability,
     EvaluationCheck,
     EvaluationCheckCode,
@@ -293,6 +296,69 @@ class _ScriptedEvaluationRunner:
             evaluation=action,
             artifact_dir=Path("artifacts") / run_id,
         )
+
+
+def _evaluation_with_controller_gate_failure(
+    case_id: str,
+    run_id: str,
+) -> EvaluationResult:
+    return _evaluation(case_id, run_id).model_copy(
+        update={
+            "controller_checks": (
+                ControllerCheck(
+                    code=ControllerCheckCode.KERNEL_STATE_VALID,
+                    passed=False,
+                    expected=("TERMINAL_STATE_MATCHES_RESULT",),
+                    actual=("INVALID",),
+                    reason_code="KERNEL_STATE_VALID_FAILED",
+                ),
+            )
+        }
+    )
+
+
+def _scripted_window_actions(
+    manifest,
+    *,
+    model_backed_evaluation_failures: int,
+    model_backed_controller_failures: int = 0,
+) -> list[object]:
+    actions: list[object] = []
+    evaluation_failures = 0
+    controller_failures = 0
+    for cell in manifest.cells:
+        if not cell.model_backed:
+            actions.append(_evaluation(cell.incident_case_id, cell.run_id))
+        elif evaluation_failures < model_backed_evaluation_failures:
+            actions.append(
+                _evaluation_with_gate_failure(
+                    cell.incident_case_id,
+                    cell.run_id,
+                    EvaluationCheckCode.STATUS_EXACT,
+                )
+            )
+            evaluation_failures += 1
+        elif controller_failures < model_backed_controller_failures:
+            actions.append(
+                _evaluation_with_controller_gate_failure(
+                    cell.incident_case_id,
+                    cell.run_id,
+                )
+            )
+            controller_failures += 1
+        else:
+            actions.append(_evaluation(cell.incident_case_id, cell.run_id))
+    return actions
+
+
+def _write_completed_evaluation_artifact(project_root: Path, cell) -> None:
+    artifact_dir = project_root / "artifacts" / cell.run_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "evaluation.json").write_text(
+        _evaluation(cell.incident_case_id, cell.run_id).model_dump_json(indent=2),
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def _runner(
@@ -659,7 +725,463 @@ def test_runner_stops_after_applicable_environment_failure(tmp_path: Path) -> No
     assert result.status == "FAILED"
     assert result.terminal_cells == 1
     assert result.failed_cells == 1
+    assert result.stop_reason == "ENVIRONMENT_OR_RECOVERY_FAILURE"
     assert len(scripted.calls) == 1
+
+
+def test_rolling_window_helper_threshold_and_recency() -> None:
+    assert rolling_window_stop_due([False] * 11) is False
+    assert rolling_window_stop_due([False] * 10 + [True] * 2) is True
+    assert rolling_window_stop_due([False] * 9 + [True] * 3) is False
+    assert rolling_window_stop_due([True] * 20 + [False] * 10 + [True] * 2) is True
+    assert rolling_window_stop_due([False] * 10 + [True] * 4) is False
+
+
+def test_rolling_window_pauses_before_next_cell_at_ten_of_twelve(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("e" * 40)
+    scripted = _ScriptedEvaluationRunner(
+        _scripted_window_actions(manifest, model_backed_evaluation_failures=10)
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        evaluation_runner_factory=lambda: scripted,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    model_backed = [cell for cell in manifest.cells if cell.model_backed]
+    trigger_position = manifest.cells.index(model_backed[11])
+    assert result.status == "FAILED"
+    assert result.stop_reason == "ROLLING_WINDOW_UNPASSED_PAUSE"
+    assert result.total_cells == 106
+    assert result.terminal_cells == trigger_position + 1
+    assert result.failed_cells == 10
+    assert result.completed_cells == trigger_position + 1 - 10
+    assert len(scripted.calls) == trigger_position + 1
+    ledger_text = (runner._suite_root() / "ledger.jsonl").read_text(encoding="utf-8")
+    assert manifest.cells[trigger_position + 1].run_id not in ledger_text
+
+
+def test_rolling_window_does_not_pause_at_nine_failures(tmp_path: Path) -> None:
+    manifest = build_manifest("f" * 40)
+    scripted = _ScriptedEvaluationRunner(
+        _scripted_window_actions(manifest, model_backed_evaluation_failures=9)
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        evaluation_runner_factory=lambda: scripted,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    assert result.status == "FAILED"
+    assert result.stop_reason == "NONE"
+    assert result.terminal_cells == 106
+    assert result.failed_cells == 9
+    assert len(scripted.calls) == 106
+
+
+def test_rolling_window_counts_completed_cell_with_failed_controller_gate(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("5" * 40)
+    scripted = _ScriptedEvaluationRunner(
+        _scripted_window_actions(
+            manifest,
+            model_backed_evaluation_failures=9,
+            model_backed_controller_failures=1,
+        )
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        evaluation_runner_factory=lambda: scripted,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    model_backed = [cell for cell in manifest.cells if cell.model_backed]
+    trigger_position = manifest.cells.index(model_backed[11])
+    assert result.stop_reason == "ROLLING_WINDOW_UNPASSED_PAUSE"
+    assert result.terminal_cells == trigger_position + 1
+    assert result.failed_cells == 9
+    assert result.completed_cells == trigger_position + 1 - 9
+    assert len(scripted.calls) == trigger_position + 1
+
+
+def _window_precedence_actions(
+    manifest,
+    twelfth_action,
+) -> list[object]:
+    actions: list[object] = []
+    model_backed_index = 0
+    for cell in manifest.cells:
+        if not cell.model_backed:
+            actions.append(_evaluation(cell.incident_case_id, cell.run_id))
+        elif model_backed_index < 9:
+            actions.append(
+                _evaluation_with_gate_failure(
+                    cell.incident_case_id,
+                    cell.run_id,
+                    EvaluationCheckCode.STATUS_EXACT,
+                )
+            )
+            model_backed_index += 1
+        elif model_backed_index < 11:
+            actions.append(_evaluation(cell.incident_case_id, cell.run_id))
+            model_backed_index += 1
+        elif model_backed_index == 11:
+            actions.append(twelfth_action(cell))
+            model_backed_index += 1
+        else:
+            actions.append(_evaluation(cell.incident_case_id, cell.run_id))
+    return actions
+
+
+def test_operational_stop_reason_wins_when_window_triggers_on_same_cell(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("6" * 40)
+    scripted = _ScriptedEvaluationRunner(
+        _window_precedence_actions(
+            manifest,
+            lambda cell: _evaluation_with_gate_failure(
+                cell.incident_case_id,
+                cell.run_id,
+                EvaluationCheckCode.ENVIRONMENT_VERIFIED,
+            ),
+        )
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        evaluation_runner_factory=lambda: scripted,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    model_backed = [cell for cell in manifest.cells if cell.model_backed]
+    stop_position = manifest.cells.index(model_backed[11])
+    assert result.status == "FAILED"
+    assert result.stop_reason == "ENVIRONMENT_OR_RECOVERY_FAILURE"
+    assert result.terminal_cells == stop_position + 1
+    assert result.failed_cells == 10
+    assert len(scripted.calls) == stop_position + 1
+
+
+def test_setup_error_stop_reason_wins_when_window_triggers_on_same_cell(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("7" * 40)
+    scripted = _ScriptedEvaluationRunner(
+        _window_precedence_actions(
+            manifest,
+            lambda cell: EvaluationWorkflowError("BUILD_FAILED", recovery_succeeded=True),
+        )
+    )
+    writer = _FakeWriter()
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        writer=writer,
+        evaluation_runner_factory=lambda: scripted,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    model_backed = [cell for cell in manifest.cells if cell.model_backed]
+    stop_position = manifest.cells.index(model_backed[11])
+    assert result.status == "FAILED"
+    assert result.stop_reason == "RUN_SETUP_ERROR"
+    assert result.terminal_cells == stop_position + 1
+    assert result.failed_cells == 10
+    assert len(scripted.calls) == stop_position + 1
+    assert len(writer.runs) == 1
+
+
+def test_rolling_window_ignores_fixed_rule_cells(tmp_path: Path) -> None:
+    manifest = build_manifest("2" * 40)
+    fixed_rule_cells = [
+        cell for cell in manifest.cells if cell.strategy is DiagnosticStrategy.FIXED_RULE
+    ]
+    scripted = _ScriptedEvaluationRunner(
+        [
+            _evaluation_with_gate_failure(
+                cell.incident_case_id,
+                cell.run_id,
+                EvaluationCheckCode.STATUS_EXACT,
+            )
+            for cell in fixed_rule_cells
+        ]
+    )
+    selector = BenchmarkCellSelector(
+        manifest_id=manifest.manifest_id,
+        strategies=(DiagnosticStrategy.FIXED_RULE,),
+    )
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=[],
+        doctor_calls=[],
+        evaluation_runner_factory=lambda: scripted,
+        cell_selector=selector,
+    )
+
+    asyncio.run(runner.preflight())
+    result = asyncio.run(runner.run())
+
+    assert result.status == "FAILED"
+    assert result.stop_reason == "NONE"
+    assert result.terminal_cells == 12
+    assert result.failed_cells == 12
+    assert len(scripted.calls) == 12
+
+
+def _append_terminal_model_backed_history(
+    runner: BenchmarkRunner,
+    manifest,
+    cells: list,
+    completed_from: int,
+) -> None:
+    lines: list[str] = []
+    for index, cell in enumerate(cells):
+        state = "COMPLETED" if index >= completed_from else "FAILED"
+        started = BenchmarkLedgerEntry.create(
+            manifest_id=manifest.manifest_id,
+            sequence=cell.sequence,
+            run_id=cell.run_id,
+            incident_case_id=cell.incident_case_id,
+            strategy=cell.strategy,
+            state="STARTED",
+            now=NOW,
+            started_at=NOW,
+        )
+        terminal = BenchmarkLedgerEntry.create(
+            manifest_id=manifest.manifest_id,
+            sequence=cell.sequence,
+            run_id=cell.run_id,
+            incident_case_id=cell.incident_case_id,
+            strategy=cell.strategy,
+            state=state,
+            now=NOW,
+            started_at=NOW,
+            reason_code=None if state == "COMPLETED" else "EVALUATION_FAILED",
+        )
+        lines.extend((started.model_dump_json(), terminal.model_dump_json()))
+        if state == "COMPLETED":
+            _write_completed_evaluation_artifact(runner._project_root, cell)
+    (runner._suite_root() / "ledger.jsonl").write_text(
+        "\n".join(lines) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def test_runner_resume_reconstructs_window_and_pauses_without_new_cells(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("3" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=[],
+    )
+    asyncio.run(runner.preflight())
+    history = [cell for cell in manifest.cells if cell.model_backed][:12]
+    _append_terminal_model_backed_history(
+        runner,
+        manifest,
+        history,
+        completed_from=10,
+    )
+
+    result = asyncio.run(runner.run())
+
+    assert result.status == "FAILED"
+    assert result.stop_reason == "ROLLING_WINDOW_UNPASSED_PAUSE"
+    assert result.terminal_cells == 12
+    assert result.completed_cells == 2
+    assert result.failed_cells == 10
+    assert calls == []
+
+
+def test_runner_resume_rejects_completed_cell_without_readable_evaluation(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("4" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=[],
+    )
+    asyncio.run(runner.preflight())
+    history = [cell for cell in manifest.cells if cell.model_backed][:12]
+    _append_terminal_model_backed_history(
+        runner,
+        manifest,
+        history,
+        completed_from=11,
+    )
+    artifact_dir = runner._project_root / "artifacts" / history[11].run_id
+    (artifact_dir / "evaluation.json").unlink()
+    artifact_dir.rmdir()
+
+    with pytest.raises(BenchmarkRunnerError, match="no readable evaluation"):
+        asyncio.run(runner.run())
+
+    assert calls == []
+
+
+def test_runner_resume_materializes_stale_cell_before_rolling_window_pause(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("8" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    writer = _FakeWriter()
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=[],
+        writer=writer,
+    )
+    asyncio.run(runner.preflight())
+    history = [cell for cell in manifest.cells if cell.model_backed][:12]
+    _append_terminal_model_backed_history(
+        runner,
+        manifest,
+        history[:11],
+        completed_from=9,
+    )
+    stale = history[11]
+    stale_started = BenchmarkLedgerEntry.create(
+        manifest_id=manifest.manifest_id,
+        sequence=stale.sequence,
+        run_id=stale.run_id,
+        incident_case_id=stale.incident_case_id,
+        strategy=stale.strategy,
+        state="STARTED",
+        now=NOW,
+        started_at=NOW,
+    )
+    with (runner._suite_root() / "ledger.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(stale_started.model_dump_json() + "\n")
+
+    result = asyncio.run(runner.run())
+
+    assert result.status == "FAILED"
+    assert result.stop_reason == "ROLLING_WINDOW_UNPASSED_PAUSE"
+    assert result.terminal_cells == 12
+    assert result.failed_cells == 10
+    assert calls == []
+    assert writer.runs[0].run_id == stale.run_id
+    ledger_text = (runner._suite_root() / "ledger.jsonl").read_text(encoding="utf-8")
+    stale_entries = [
+        json.loads(line) for line in ledger_text.splitlines()
+        if json.loads(line)["run_id"] == stale.run_id
+    ]
+    assert [entry["state"] for entry in stale_entries] == ["STARTED", "FAILED"]
+    assert stale_entries[1]["reason_code"] == "RUN_SETUP_ERROR"
+
+
+def test_runner_resume_rejects_completed_cell_with_foreign_evaluation(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("9" * 40)
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=[],
+    )
+    asyncio.run(runner.preflight())
+    history = [cell for cell in manifest.cells if cell.model_backed][:12]
+    _append_terminal_model_backed_history(
+        runner,
+        manifest,
+        history,
+        completed_from=10,
+    )
+    other = history[10]
+    target = history[11]
+    artifact_dir = runner._project_root / "artifacts" / target.run_id
+    (artifact_dir / "evaluation.json").write_text(
+        _evaluation(other.incident_case_id, other.run_id).model_dump_json(indent=2),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(BenchmarkRunnerError, match="does not match"):
+        asyncio.run(runner.run())
+
+    assert calls == []
+
+
+def test_runner_resume_rejects_completed_cell_with_corrupt_evaluation(
+    tmp_path: Path,
+) -> None:
+    manifest = build_manifest("a" * 39 + "b")
+    calls: list[tuple[str, DiagnosticStrategy, str]] = []
+    runner = _runner(
+        manifest,
+        tmp_path,
+        doctor_result=_doctor_result(),
+        calls=calls,
+        doctor_calls=[],
+    )
+    asyncio.run(runner.preflight())
+    history = [cell for cell in manifest.cells if cell.model_backed][:12]
+    _append_terminal_model_backed_history(
+        runner,
+        manifest,
+        history,
+        completed_from=10,
+    )
+    artifact_dir = runner._project_root / "artifacts" / history[11].run_id
+    (artifact_dir / "evaluation.json").write_text(
+        "{not json",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(BenchmarkRunnerError, match="invalid evaluation"):
+        asyncio.run(runner.run())
+
+    assert calls == []
 
 
 def test_preflight_runs_doctor_and_writes_receipt_before_execution(tmp_path: Path) -> None:
@@ -833,9 +1355,13 @@ def test_runner_reuses_terminal_ledger_without_retry(tmp_path: Path) -> None:
 
     __import__("asyncio").run(runner.preflight())
     first = __import__("asyncio").run(runner.run())
+    for cell in manifest.cells:
+        if cell.model_backed:
+            _write_completed_evaluation_artifact(runner._project_root, cell)
     second = __import__("asyncio").run(runner.run())
 
     assert first.status == second.status == "COMPLETED"
+    assert second.stop_reason == "NONE"
     assert len(calls) == 106
     assert doctor_calls == ["doctor"]
 

@@ -638,6 +638,7 @@ def benchmark_run(
     typer.echo(f"cells: {result.terminal_cells}/{result.total_cells}")
     typer.echo(f"subset: {result.subset}")
     typer.echo(f"model_probe_required: {result.model_probe_required}")
+    typer.echo(f"stop_reason: {result.stop_reason}")
     typer.echo(f"ledger: {result.ledger_path}")
     if result.status != "COMPLETED":
         raise typer.Exit(code=1)
