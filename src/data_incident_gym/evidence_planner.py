@@ -674,6 +674,10 @@ class PlannerController:
                 "accepted": receipt.accepted,
                 "error_code": None if receipt.error is None else receipt.error.code,
                 "evidence_ids": list(receipt.evidence_ids),
+                # v2 batch refusals must survive into the archived trace: the
+                # gap-receipt witness rule reads them, and dropping them here
+                # made every planner batch refusal unwitnessable.
+                "target_refusals": tuple(receipt.target_refusals),
                 "elapsed_ms": elapsed_ms,
             }
         )

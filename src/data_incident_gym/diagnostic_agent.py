@@ -102,6 +102,7 @@ from data_incident_gym.strategy_adapter import (
     StrategySession,
     builtin_declaration,
 )
+from data_incident_gym.submission_policy import GateRefusal, SubmissionPolicy
 
 BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v18"
@@ -289,6 +290,7 @@ _MODEL_ERROR_REASONS = {
     "MODEL_TOOL_CALL_LIMIT",
     "MODEL_TIMEOUT",
     "MODEL_PROTOCOL_ERROR",
+    "MODEL_OUTPUT_RETRY_EXHAUSTED",
     "MODEL_RUNTIME_ERROR",
 }
 
@@ -482,6 +484,9 @@ class _RunState:
     current_error_type: str | None = None
     current_error_origin: str | None = None
     current_transport: str | None = None
+    #: Harness-side submission gates (D2); None disables them (deterministic
+    #: reference paths and injected-tools test paths keep their behaviour).
+    submission_policy: SubmissionPolicy | None = None
     # Historical retry background: which surfaces had already been asked to
     # retry before the current request. It never by itself names the current
     # failure.
@@ -1233,6 +1238,42 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
             origin="PROVIDER",
             transport=transport,
         )
+
+
+def _submission_gate_refusal(
+    state: _RunState,
+    submission: Any,
+) -> GateRefusal | None:
+    """Run the harness-side submission gates over the candidate submission.
+
+    The registered evidence pool is the strategy's own inventory (kernel state
+    for kernel strategies, the run state otherwise), and the live trace is the
+    state's trace, so the witness rule sees exactly the events it will be
+    judged on.
+    """
+
+    policy = state.submission_policy
+    if policy is None:
+        return None
+    if state.kernel is not None:
+        records = tuple(state.kernel.evidence_records)
+    else:
+        records = tuple(state.evidence_records)
+    return policy.check(submission, records=records, trace=tuple(state.trace))
+
+
+def _is_output_retry_exhaustion(state: _RunState, error: BaseException) -> bool:
+    """Whether the terminal exception is the output-retry budget being spent."""
+
+    if not isinstance(error, UnexpectedModelBehavior):
+        return False
+    if not isinstance(error.__cause__, ToolRetryError):
+        return False
+    return (
+        state.output_retry_limit is not None
+        and state.output_retry_used is not None
+        and state.output_retry_used >= state.output_retry_limit
+    )
 
 
 def _failure_origin(
@@ -2444,6 +2485,7 @@ class DiagnosisRunner:
         context: ObservableRunContext,
         owned_model_client: AsyncOpenAI | None = None,
         session: StrategySession | None = None,
+        submission_policy: SubmissionPolicy | None = None,
     ) -> None:
         self._run_id = run_id
         self._settings = settings
@@ -2455,6 +2497,7 @@ class DiagnosisRunner:
         self._context = context
         self._owned_model_client = owned_model_client
         self._session = session
+        self._submission_policy = submission_policy
         self._budget = DiagnosisBudget()
         surface = policy_surface_for_strategy(strategy, model=model)
         self._tool_schema_payload = surface.tool_schema_payload
@@ -2475,6 +2518,7 @@ class DiagnosisRunner:
         model: Model | None = None,
         tools: EvidenceTools | None = None,
         model_identity: ModelIdentity | None = None,
+        submission_policy: SubmissionPolicy | None = None,
     ) -> DiagnosisRunner:
         if isinstance(strategy, Path):
             project_root = strategy
@@ -2527,6 +2571,7 @@ class DiagnosisRunner:
             context=context,
             owned_model_client=owned_model_client,
             session=session,
+            submission_policy=submission_policy,
         )
 
     @property
@@ -2689,6 +2734,17 @@ class DiagnosisRunner:
                         _kernel_retry_message(error.code, detail=error.detail)
                     ) from None
                 current.outcome = outcome
+                refusal = _submission_gate_refusal(current, decision)
+                if refusal is not None:
+                    current.kernel_rejection_attempt = None
+                    current.trace.append(
+                        EvidenceGateTraceEvent(
+                            event_type="EVIDENCE_GATE",
+                            reason_code=refusal.code,
+                            accepted=False,
+                        )
+                    )
+                    raise ModelRetry(f"{refusal.code}: {refusal.message}") from None
                 current.trace.append(
                     EvidenceGateTraceEvent(
                         event_type="EVIDENCE_GATE",
@@ -2727,6 +2783,16 @@ class DiagnosisRunner:
                     origin="OUTPUT_VALIDATION",
                 )
                 raise ModelRetry("DIAGNOSIS_EVIDENCE_ID_UNKNOWN")
+            refusal = _submission_gate_refusal(current, output)
+            if refusal is not None:
+                current.trace.append(
+                    EvidenceGateTraceEvent(
+                        event_type="EVIDENCE_GATE",
+                        reason_code=refusal.code,
+                        accepted=False,
+                    )
+                )
+                raise ModelRetry(f"{refusal.code}: {refusal.message}") from None
             current.static_diagnosis = Diagnosis.model_validate(output.model_dump(mode="json"))
             current.trace.append(
                 EvidenceGateTraceEvent(
@@ -2957,6 +3023,7 @@ class DiagnosisRunner:
             context=self._context,
             adapter=None,  # type: ignore[arg-type]
             kernel=kernel,
+            submission_policy=self._submission_policy,
         )
         if kernel is not None:
             state.adapter = _KernelPolicyAdapter(state)
@@ -2997,6 +3064,13 @@ class DiagnosisRunner:
             ValueError,
             TypeError,
         ) as error:
+            if _is_output_retry_exhaustion(state, error):
+                # Constraint 2: the output-retry budget is spent after gate
+                # refusals; the terminal must be defined and visible rather
+                # than a silent acceptance.
+                _record_protocol_failure(state, error)
+                state.append_protocol_trace()
+                return self._model_error_result(state, "MODEL_OUTPUT_RETRY_EXHAUSTED")
             _record_protocol_failure(state, error)
             state.append_protocol_trace()
             return self._model_error_result(state, "MODEL_PROTOCOL_ERROR")

@@ -78,6 +78,7 @@ from data_incident_gym.strategy_adapter import (
     builtin_declaration,
     tool_allowlist_for_context,
 )
+from data_incident_gym.submission_policy import SubmissionPolicy
 
 PLANNER_STRATEGY = DiagnosticStrategy.EVIDENCE_PLANNER
 
@@ -132,10 +133,12 @@ class EvidencePlannerRunner:
         model: Model | None,
         model_identity: ModelIdentity,
         owned_model_client: AsyncOpenAI | None = None,
+        submission_policy: SubmissionPolicy | None = None,
     ) -> None:
         self._run_id = run_id
         self._context = context
         self._session = session
+        self._submission_policy = submission_policy
         self._controller = PlannerController(session)
         self._model = model
         self._model_identity = model_identity
@@ -156,6 +159,7 @@ class EvidencePlannerRunner:
         model_identity: ModelIdentity | None = None,
         backend: Any | None = None,
         session: StrategySession | None = None,
+        submission_policy: SubmissionPolicy | None = None,
     ) -> EvidencePlannerRunner:
         """Build a planner run; ``backend``/``session`` are for deterministic tests.
 
@@ -199,6 +203,7 @@ class EvidencePlannerRunner:
             run_id=run_id,
             context=context,
             session=session,
+            submission_policy=submission_policy,
             model=model,
             model_identity=model_identity,
             owned_model_client=owned_model_client,
@@ -233,6 +238,16 @@ class EvidencePlannerRunner:
             """
 
             del ctx
+            refusal = None
+            policy = self._submission_policy
+            if policy is not None:
+                refusal = policy.check(
+                    submission,
+                    records=self._session.registered_evidence(),
+                    trace=self._tool_trace_events(),
+                )
+            if refusal is not None:
+                raise ModelRetry(f"{refusal.code}: {refusal.message}")
             receipt = self._session.submit(submission)
             if receipt.accepted and receipt.diagnosis is not None:
                 self._accepted = receipt.diagnosis
@@ -317,6 +332,23 @@ class EvidencePlannerRunner:
         )
         return self._result(diagnosis, started_at, started, deps, usage)
 
+    def _tool_trace_events(self) -> tuple[ToolTraceEvent, ...]:
+        """The live tool trace, shared by the gate and the archived result."""
+
+        return tuple(
+            ToolTraceEvent(
+                event_type="TOOL_CALL",
+                tool_name=step["tool_name"],
+                arguments=dict(step["arguments"]),
+                fingerprint=_fingerprint(self._run_id, step["tool_name"], step["arguments"]),
+                evidence_ids=tuple(step["evidence_ids"]),
+                error_code=step["error_code"],
+                target_refusals=tuple(step.get("target_refusals", ())),
+                elapsed_ms=step["elapsed_ms"],
+            )
+            for step in self._controller.step_records()
+        )
+
     def _result(
         self,
         diagnosis: Diagnosis,
@@ -327,18 +359,7 @@ class EvidencePlannerRunner:
     ) -> DiagnosisRunResult:
         del started_at
         records: tuple[EvidenceRecord, ...] = self._session.registered_evidence()
-        trace: list[Any] = [
-            ToolTraceEvent(
-                event_type="TOOL_CALL",
-                tool_name=step["tool_name"],
-                arguments=dict(step["arguments"]),
-                fingerprint=_fingerprint(self._run_id, step["tool_name"], step["arguments"]),
-                evidence_ids=tuple(step["evidence_ids"]),
-                error_code=step["error_code"],
-                elapsed_ms=step["elapsed_ms"],
-            )
-            for step in self._controller.step_records()
-        ]
+        trace: list[Any] = list(self._tool_trace_events())
         plan_snapshot = self._controller.snapshot()
         trace.extend(_plan_events(deps))
         trace.append(

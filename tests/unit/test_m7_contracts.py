@@ -747,7 +747,7 @@ def test_static_artifact_writer_persists_exact_six_files_without_kernel_state(
 
 
 @pytest.mark.asyncio
-async def test_runner_freezes_diagnosis_before_loading_private_facts(
+async def test_runner_loads_private_scenario_early_for_submission_gates(
     tmp_path: Path,
 ) -> None:
     calls: list[str] = []
@@ -781,7 +781,11 @@ async def test_runner_freezes_diagnosis_before_loading_private_facts(
             calls.append("diagnosis.run")
             return _static_model_error()
 
-    def diagnosis_factory(_run_id: str, _strategy: DiagnosticStrategy) -> FakeDiagnosis:
+    def diagnosis_factory(
+        _run_id: str,
+        _strategy: DiagnosticStrategy,
+        _policy: object | None = None,
+    ) -> FakeDiagnosis:
         calls.append("diagnosis.create")
         return FakeDiagnosis()
 
@@ -833,14 +837,18 @@ async def test_runner_freezes_diagnosis_before_loading_private_facts(
 
     assert result.run_id == RUN_ID
     assert (tmp_path / ".dig" / "scoring-inputs" / RUN_ID).is_dir()
+    # D2 submission gates (spec 2026-09-20-submission-gates-implementation-spec
+    # §3) need the private contract during the diagnosis run, so the scenario
+    # loads once, early, and is reused for evaluation. The model plane still
+    # receives only the public context; the policy object stays harness-side.
     assert calls == [
         "lab.reset",
         "lab.prepare",
         "lab.build",
+        "scenario.load_private",
         "diagnosis.create",
         "diagnosis.run",
         "lab.restore",
-        "scenario.load_private",
         "verification.load_private",
         "evaluate.frozen_result",
         "artifact.write",

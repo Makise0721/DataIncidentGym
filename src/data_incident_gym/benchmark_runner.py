@@ -519,7 +519,9 @@ class BenchmarkRunner:
             def diagnosis_factory(
                 run_id: str,
                 strategy: DiagnosticStrategy,
+                submission_policy: object | None = None,
             ) -> DiagnosisRunner | FixedRuleRunner | EvidencePlannerRunner:
+                # The deterministic reference path never carries the gates.
                 if strategy is DiagnosticStrategy.FIXED_RULE:
                     return FixedRuleRunner.for_run(
                         run_id,
@@ -531,12 +533,14 @@ class BenchmarkRunner:
                         run_id,
                         diagnostic_settings,
                         project_root,
+                        submission_policy=submission_policy,
                     )
                 return DiagnosisRunner.for_run(
                     run_id,
                     diagnostic_settings,
                     strategy,
                     project_root,
+                    submission_policy=submission_policy,
                 )
 
             return EvaluationRunner(

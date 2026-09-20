@@ -42,6 +42,7 @@ from data_incident_gym.evaluation_inputs import (
 from data_incident_gym.lab import IncidentLab, ScenarioRun
 from data_incident_gym.lab_verifier import ScenarioVerification
 from data_incident_gym.scenarios import ScenarioSpec, load_scenario_spec
+from data_incident_gym.submission_policy import SubmissionPolicy
 
 
 class EvaluationWorkflowError(RuntimeError):
@@ -109,7 +110,9 @@ def _failed_evaluation(
 
 ScenarioLoader = Callable[[str], ScenarioSpec]
 VerificationLoader = Callable[[str], ScenarioVerification]
-DiagnosisFactory = Callable[[str, DiagnosticStrategy], DiagnosisRunner]
+DiagnosisFactory = Callable[
+    [str, DiagnosticStrategy, "SubmissionPolicy | None"], DiagnosisRunner
+]
 Evaluator = Callable[..., EvaluationResult]
 
 
@@ -158,12 +161,14 @@ class EvaluationRunner:
         def diagnosis_factory(
             run_id: str,
             strategy: DiagnosticStrategy,
+            submission_policy: SubmissionPolicy | None = None,
         ) -> DiagnosisRunner:
             return DiagnosisRunner.for_run(
                 run_id,
                 diagnostic_settings,
                 strategy,
                 project_root,
+                submission_policy=submission_policy,
             )
 
         return cls(
@@ -210,7 +215,24 @@ class EvaluationRunner:
                 else self._lab.build(incident_case_id)
             )
             stage = "DIAGNOSIS_SETUP"
-            diagnosis_runner = self._diagnosis_factory(scenario_run.run_id, strategy)
+            # Early private-scenario load for the harness-side submission gates
+            # (D2). A load failure leaves the gates disabled; the existing
+            # SCENARIO_LOAD_FAILED path below still decides the evaluation
+            # outcome exactly as before.
+            try:
+                early_scenario: ScenarioSpec | None = self._private_scenario_loader(
+                    incident_case_id
+                )
+            except Exception:
+                early_scenario = None
+            submission_policy = (
+                SubmissionPolicy(early_scenario)
+                if early_scenario is not None
+                else None
+            )
+            diagnosis_runner = self._diagnosis_factory(
+                scenario_run.run_id, strategy, submission_policy
+            )
             stage = "DIAGNOSIS"
             diagnosis_run = await diagnosis_runner.diagnose()
         except Exception:
@@ -254,7 +276,11 @@ class EvaluationRunner:
         scenario: ScenarioSpec | None = None
         verification: ScenarioVerification | None = None
         try:
-            scenario = self._private_scenario_loader(incident_case_id)
+            scenario = (
+                early_scenario
+                if early_scenario is not None
+                else self._private_scenario_loader(incident_case_id)
+            )
         except Exception:
             evaluation = _failed_evaluation(
                 incident_case_id,

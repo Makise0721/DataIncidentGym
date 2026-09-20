@@ -1595,7 +1595,9 @@ def test_benchmark_factory_routes_the_planner_strategy(tmp_path: Path) -> None:
             run_id: str,
             settings: DiagnosticSettings,
             project_root: Path,
+            submission_policy: object | None = None,
         ) -> _StubPlannerRunner:
+            _ = submission_policy
             routed.append((run_id, project_root, settings))
             return cls()
 

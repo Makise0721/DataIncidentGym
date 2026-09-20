@@ -916,7 +916,7 @@ def test_runner_service_chain_writes_attachment_then_rescores(tmp_path: Path) ->
     runner = EvaluationRunner(
         lab=FakeLab(),
         diagnostic_settings=SimpleNamespace(model_base_url="http://127.0.0.1:11434/v1"),
-        diagnosis_factory=lambda run_id, strategy: FakeDiagnosis(),
+        diagnosis_factory=lambda run_id, strategy, _policy=None: FakeDiagnosis(),
         private_scenario_loader=lambda case_id: scenario,
         private_verification_loader=lambda run_id: verification,
         evaluator=DeterministicEvaluator.evaluate,

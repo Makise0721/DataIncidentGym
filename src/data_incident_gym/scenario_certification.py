@@ -184,7 +184,12 @@ def reference_evaluation_runner(
     lab = IncidentLab(lab_settings, project_root)
     reference_settings = diagnostic_settings or DiagnosticSettings(_env_file=None)
 
-    def diagnosis_factory(run_id: str, strategy: DiagnosticStrategy) -> ReferenceAnalystRunner:
+    def diagnosis_factory(
+        run_id: str,
+        strategy: DiagnosticStrategy,
+        submission_policy: object | None = None,
+    ) -> ReferenceAnalystRunner:
+        _ = submission_policy  # reference analyst stays gate-free
         if strategy is not DiagnosticStrategy.REFERENCE_ANALYST:
             raise CertificationError("REFERENCE_STRATEGY_REQUIRED", detail=strategy.value)
         return ReferenceAnalystRunner.for_run(run_id, reference_settings, project_root)
