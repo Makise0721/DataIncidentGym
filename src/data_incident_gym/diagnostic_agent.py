@@ -12,7 +12,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Annotated, Any, Literal, Protocol
 
-from openai import AsyncOpenAI
+from openai import APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, Field, StrictStr, ValidationError
 from pydantic_ai import Agent, ModelRetry, RunContext, RunUsage, ToolOutput, UsageLimits
 from pydantic_ai.exceptions import (
@@ -481,6 +481,7 @@ class _RunState:
     current_response_shape: tuple[tuple[ModelCallShape, ...], str] | None = None
     current_error_type: str | None = None
     current_error_origin: str | None = None
+    current_transport: str | None = None
     # Historical retry background: which surfaces had already been asked to
     # retry before the current request. It never by itself names the current
     # failure.
@@ -602,10 +603,12 @@ class _RunState:
         error_reason: tuple[str, ...] = (),
         error_type: str | None = None,
         origin: str | None = None,
+        transport: str | None = None,
     ) -> None:
         self.protocol_failure = (category, stage, tool_name, error_loc, error_kind, error_reason)
         self.current_error_type = error_type
         self.current_error_origin = origin
+        self.current_transport = transport
 
     def append_protocol_trace(self, *, output_retry_used: int | None = None) -> None:
         if self.protocol_trace_recorded or self.protocol_failure is None:
@@ -632,6 +635,7 @@ class _RunState:
                 error_type=self.current_error_type,
                 error_origin=self.current_error_origin,
                 retry_prompt_targets=self.retry_prompt_targets,
+                transport_diagnostic=self.current_transport,
             )
         )
         self.protocol_trace_recorded = True
@@ -1104,6 +1108,36 @@ def _error_type_label(error: BaseException) -> str:
     return "OTHER"
 
 
+def _transport_diagnostic(error: BaseException) -> str | None:
+    """Classify a provider-origin failure into a sanitized transport kind.
+
+    Mirrors the doctor probe's taxonomy so both surfaces attribute failures
+    identically: only fixed kinds and an integer HTTP status are recorded;
+    exception text, headers and response bodies never reach the trace.
+    pydantic-ai wraps some model errors in ``UnexpectedModelBehavior``, so the
+    lookup walks the ``__cause__`` chain (bounded) before giving up. Returns
+    None for failures that are not transport-classifiable (output or argument
+    validation), leaving the trace field unset.
+    """
+
+    current: BaseException | None = error
+    for _ in range(4):
+        if current is None:
+            break
+        if isinstance(current, (TimeoutError, APITimeoutError)):
+            return "transport=TIMEOUT"
+        if isinstance(current, ModelAPIError):
+            # pydantic-ai surfaces transport failures as ModelAPIError without
+            # a status; ModelHTTPError subclasses carry one and map to
+            # HTTP_<status>.
+            status = getattr(current, "status_code", None)
+            if type(status) is int and 100 <= status <= 599:
+                return f"transport=HTTP_{status}"
+            return "transport=CONNECTION_ERROR"
+        current = current.__cause__
+    return None
+
+
 def _retry_prompt_targets(
     messages: Sequence[ModelMessage],
     parameters: ModelRequestParameters,
@@ -1147,6 +1181,7 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
 
     observation = state.last_observation
     error_type = _error_type_label(error)
+    transport = _transport_diagnostic(error)
     origin = _failure_origin(state, observation)
     if isinstance(error, (ModelAPIError, IncompleteToolCall)):
         state.set_protocol_failure(
@@ -1155,6 +1190,7 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
             tool_name=None,
             error_type=error_type,
             origin="PROVIDER",
+            transport=transport,
         )
     elif isinstance(error, (UnexpectedModelBehavior, ToolRetryError, ValueError, TypeError)):
         if observation is not None and observation[1]:
@@ -1195,6 +1231,7 @@ def _record_protocol_failure(state: _RunState, error: BaseException) -> None:
             tool_name=None,
             error_type=error_type,
             origin="PROVIDER",
+            transport=transport,
         )
 
 

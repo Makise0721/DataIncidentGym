@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -554,6 +554,136 @@ def _protocol_event(result) -> object:
         (event for event in result.trace if getattr(event, "event_type", None) == "MODEL_PROTOCOL"),
         None,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory, expected_transport",
+    [
+        (lambda: ModelHTTPError(429, "DO_NOT_LEAK", {"secret": "x"}), "transport=HTTP_429"),
+        (lambda: ModelHTTPError(500, "DO_NOT_LEAK", None), "transport=HTTP_500"),
+    ],
+)
+async def test_provider_failure_records_sanitized_transport_diagnostic(
+    tmp_path: Path,
+    error_factory,
+    expected_transport: str,
+) -> None:
+    def fail(_messages: object, _info: AgentInfo) -> ModelResponse:
+        raise error_factory()
+
+    result = await _static_runner(tmp_path, FunctionModel(fail)).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event is not None
+    assert event.category == "PROVIDER_PROTOCOL_FAILURE"
+    assert event.stage == "PROVIDER_RESPONSE"
+    assert event.error_type == "MODEL_API_ERROR"
+    assert event.transport_diagnostic == expected_transport
+    dumped = result.model_dump_json()
+    assert "DO_NOT_LEAK" not in dumped
+    assert "secret" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_connection_error_through_real_sdk_records_transport_diagnostic(
+    tmp_path: Path,
+) -> None:
+    """A real transport failure propagates as ModelAPIError and classifies.
+
+    This exercises the production propagation path: pydantic-ai's OpenAI model
+    layer wraps connection errors into ModelAPIError, which the agent graph
+    re-raises as the terminating exception (the same shape the v29 archives
+    recorded as MODEL_API_ERROR)."""
+
+    import httpx2
+    from openai import AsyncOpenAI
+    from pydantic_ai.models import override_allow_model_requests
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    def handler(request):
+        raise httpx2.ConnectError("DO_NOT_LEAK", request=request)
+
+    async def exercise():
+        _write_public_run(tmp_path)
+        async with (
+            httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http,
+            AsyncOpenAI(
+                api_key="DO_NOT_LEAK",
+                base_url="https://example.invalid/v1",
+                http_client=http,
+                max_retries=0,
+            ) as client,
+        ):
+            runner = DiagnosisRunner.for_run(
+                RUN_ID,
+                _settings(),
+                DiagnosticStrategy.STATIC_SKILL,
+                tmp_path,
+                model=OpenAIChatModel(
+                    "test", provider=OpenAIProvider(openai_client=client)
+                ),
+                tools=SimpleNamespace(),
+                model_identity=ModelIdentity("openai-compatible", "test"),
+            )
+            with override_allow_model_requests(True):
+                return await runner.diagnose()
+
+    result = await exercise()
+
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    event = _protocol_event(result)
+    assert event is not None
+    assert event.category == "PROVIDER_PROTOCOL_FAILURE"
+    assert event.error_type == "MODEL_API_ERROR"
+    assert event.transport_diagnostic == "transport=CONNECTION_ERROR"
+    assert "DO_NOT_LEAK" not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_output_validation_failure_carries_no_transport_diagnostic(
+    tmp_path: Path,
+) -> None:
+    def return_bad(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    _invalid_static_payload(missing_summary=True),
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    result = await _static_runner(tmp_path, FunctionModel(return_bad)).diagnose()
+
+    event = _protocol_event(result)
+    assert event is not None
+    assert event.category == "OUTPUT_SCHEMA_REJECTED"
+    assert event.transport_diagnostic is None
+
+
+def test_protocol_trace_event_reads_legacy_payloads_without_transport() -> None:
+    from data_incident_gym.diagnosis import ModelProtocolTraceEvent
+
+    legacy = {
+        "event_type": "MODEL_PROTOCOL",
+        "stage": "PROVIDER_RESPONSE",
+        "tool_name": None,
+        "category": "PROVIDER_PROTOCOL_FAILURE",
+        "error_type": "MODEL_API_ERROR",
+        "error_origin": "PROVIDER",
+    }
+    event = ModelProtocolTraceEvent.model_validate(legacy)
+    assert event.transport_diagnostic is None
+
+    with_transport = ModelProtocolTraceEvent.model_validate(
+        {**legacy, "transport_diagnostic": "transport=HTTP_429"}
+    )
+    assert with_transport.transport_diagnostic == "transport=HTTP_429"
+    assert "transport_diagnostic" in with_transport.model_dump_json()
 
 
 @pytest.mark.asyncio

@@ -589,6 +589,16 @@ class ModelProtocolTraceEvent(BaseModel):
         "UNKNOWN",
     ] | None = None
     retry_prompt_targets: tuple[StrictStr, ...] = ()
+    # Sanitized transport classification for provider-origin failures, using
+    # the doctor probe's fixed category vocabulary but its own `transport=`
+    # key: `transport={TIMEOUT|CONNECTION_ERROR|HTTP_<status>|ERROR}`. Only
+    # fixed kinds, integer statuses and counters; never exception text,
+    # headers, response bodies or credentials. The TIMEOUT arm is defensive —
+    # the runner's own TimeoutError catch (MODEL_TIMEOUT) precedes the
+    # protocol path. None for validation/protocol failures that are not
+    # transport-classifiable and for events recorded before this field
+    # existed.
+    transport_diagnostic: StrictStr | None = None
 
 
 class DiagnosisTerminalTraceEvent(BaseModel):
