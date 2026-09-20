@@ -29,6 +29,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisStatus,
     DiagnosticStrategy,
+    ToolTraceEvent,
     refusal_witnessed,
 )
 from data_incident_gym.evaluation import (
@@ -427,10 +428,11 @@ def _axis3(
     )
     missing = tuple(sorted(set(expected) - set(actual)))
     extra = tuple(sorted(set(actual) - set(expected)))
+    # The witness rule consumes ToolTraceEvent instances (event_type
+    # "TOOL_CALL"); filtering by a wrong literal once silently emptied this
+    # tuple and made every tool gap look unwitnessed.
     trace_events = tuple(
-        event
-        for event in diagnosis_run.trace
-        if getattr(event, "event_type", None) == "TOOL_TRACE"
+        event for event in diagnosis_run.trace if isinstance(event, ToolTraceEvent)
     )
     unwitnessed = tuple(
         sorted(

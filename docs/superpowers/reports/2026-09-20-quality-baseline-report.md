@@ -17,6 +17,12 @@
 | P1-3 历史摘要归因错误 | 实现**有测试的历史序列化兼容**：遗留包（trace 事件无 M23 字段）的摘要按"剥除该默认字段后的 canonical JSON"复算并与**原始记录摘要**比对；保留原摘要；真实不匹配与新字段包一律报错；复刻 loader 的 v2 诊断还原与 kernel_state 类型还原及还原后摘要稳定性检查 | v29 seq 7/10 与 v30 seq 1/4 四个包严格等价加载成功且记录摘要保持原值；篡改遗留包 → `legacy diagnosis digest mismatch`；新字段包错摘要 → 报错。**撤回**此前"写入缺损/宽松读取"与"v30 两 bundle 未归档"两项错误结论 |
 | P1-4 逐格映射错误 | 报告全表由 `render_markdown(batches)` 从结构化结果生成，以 batch/run_id/sequence 绑定；渲染有对应性测试 | v30 STATUS_ERROR 逐格为 **10、14、18**（wrong_abstention），与复核一致；此前的第 12 格标注与后续错配作废 |
 
+**撤回与更正（2026-09-20，I1/I2 spec 的独立审计发现）**：`_axis3` 的 trace 过滤曾误用
+`event_type == "TOOL_TRACE"`（真实字面量为 `TOOL_CALL`），过滤恒为空并使未见证判定恒为 False；
+修复后正确语义：v30 未见证为 **1（seq 15）**，seq 12 实际有真实收据（原"2（12/15）"作废）；
+v29 未见证 0 不变。该缺陷由 I1/I2 实施 spec 的独立审计发现，分析器与本节已同步修复/更正；
+其余数字不受影响（31/31 重算、类别分布、其余轴计数均不变）。
+
 合同分离（按复核 §合同处理）：分析器输出同时包含**完整性清单**（CORRUPT / NOT_EXECUTED 显式列示）
 与**验证通过的质量基线**；CORRUPT 剔除不用于制造"看似完整"的基线。本两批 CORRUPT = 0。
 
@@ -76,7 +82,7 @@
 轴聚合（按格/按类型/按 claim/按缺口，见 spec §3 单位定义）：v29 采集缺陷
 RELATION_HISTORY×1、RELATION_SCHEMA×2、DBT_LINEAGE×1；引用缺陷 ×2；缺口缺陷 3 格
 （missing 1 / extra 4 / 未见证 0）。v30 采集缺陷 RELATION_DATA_PROFILE×1、RELATION_HISTORY×1、
-DBT_LINEAGE×3；引用缺陷 ×1；缺口缺陷 5 格（missing 3 / extra 5 / 未见证 2）。
+DBT_LINEAGE×3；引用缺陷 ×1；缺口缺陷 5 格（missing 3 / extra 5 / 未见证 **1，seq 15**）。
 按 run 的重叠矩阵与逐格明细见 §2（重叠组合含 100/010/001/101/110 等，单格可同时有采集与
 缺口缺陷）。
 
