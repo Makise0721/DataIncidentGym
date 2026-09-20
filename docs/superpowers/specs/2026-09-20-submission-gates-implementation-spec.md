@@ -1,73 +1,88 @@
-# I1/I2 提交门实施 spec（草案 v1，待审计）
+# I1/I2 提交门实施 spec（v2，按独立审计修订；含待裁决 Fork）
 
-- 日期：2026-09-20。依据：所有者选定 I1+I2（[回归方案](2026-09-20-strategy-regression-proposal.md) §2）。
-  本 spec 细化拒绝码集、预算/重试语义、数据缝与回归语料；审计通过后实施。
-- 边界（所有者既定）：本轮不改评分、不改归档、不重跑、不联网、不动冻结清单；私有合同只在
-  harness 侧执行与离线核对，模型可见面永远只有固定拒绝码与通用措辞。
+- 日期：2026-09-20。依据：所有者选定 I1+I2；v1 经独立审计 **FAIL**（两 BLOCKER、三 MAJOR），
+  本 v2 逐项修订。**实施前仍需所有者裁决 §2 的可重试性 Fork。**
+- 边界（所有者既定）：不改评分、不改归档、不重跑、不联网、不动冻结清单；私有合同只在
+  harness 侧执行与离线核对；模型可见面只有固定拒绝码与通用措辞。
 
-## 1. 门语义（提交级，session.submit 内、EVIDENCE_NOT_REGISTERED 之后、Diagnosis 构造之前）
+## 1. 门语义（按审计重述）
 
-**I1 `CLAIM_SUPPORT_REQUIRED`（可重试）**：对每条"适用"claim（适用性 = evaluator 的
+**I1（拒绝码 `CLAIM_SUPPORT_REQUIRED`）**：对每条适用 claim（适用性 =
 `APPLICABLE_CLAIM_KINDS_BY_EXPECTED_STATUS[scenario.expected_status]`），要求
-`claim_supported_by_records(scenario, claim, 已引用且已登记的证据, all_records=全部已登记证据)` 为真。
-任一适用 claim 不被支撑 → 拒绝；detail 为通用措辞（"cite evidence returned by tool calls that
-supports each claim"），不揭示私有期望。INSUFFICIENT_EVIDENCE 合同下适用集为空 → 空洞通过
-（与 evaluator 一致）。
+**复刻 evaluator 的完整判定**：claim 的每个 evidence_id 都可解析到已登记证据（`len(resolved) ==
+len(claim.evidence_ids)`），且 `claim_supported_by_records(scenario, claim, resolved,
+all_records=全部已登记证据)` 为真。INSUFFICIENT_EVIDENCE 适用集为空 → 空洞通过（与 evaluator
+一致）。detail 为正向通用指引（"cite evidence returned by tool calls that supports each claim"），
+不含私有数据。
 
-**I2 `GAP_RECEIPT_REQUIRED`（可重试）**：对每个已声明缺口三元组
-`(evidence_kind, subject, reason_code)`，若场景合同 `unresolved_gaps` 以同一三元组给出
-`tool_name`，则要求运行 trace 中 `refusal_witnessed(tool_name, subject, reason_code)` 为真
-（复用 evaluator 同一规则与同一 trace 事件源）。无真实拒绝收据 → 拒绝；detail 通用措辞
-（"probe the tool to record the refusal, or drop the unsupported gap claim"）。
-合同未关联工具的三元组、以及不匹配合同三元组的自报缺口不在本门范围（属 I3 的选择判断）。
+**I2（拒绝码 `GAP_RECEIPT_REQUIRED`）**：对每个**已声明**缺口三元组，若场景合同
+`unresolved_gaps` 以同一三元组给出 `tool_name`，要求运行 trace（**runner 注入，见 §2**）中
+`refusal_witnessed(tool_name, subject, reason_code)` 为真。detail 只给正向指引
+（"probe the tool to record the refusal for this gap"），不出现"删除缺口"字样（避免诱导模型删掉
+真实合同缺口）。合同未关联工具的三元组、不匹配合同三元组的自报缺口不在范围（属 I3）。
 
-**预算/重试语义**：两门拒绝均消耗一次输出重试预算（`_output_retries_used += 1`），语义与现有
-`EVIDENCE_NOT_REGISTERED`/`SUBMISSION_INVALID` 一致；预算耗尽 → 既有 `OUTPUT_RETRY_EXHAUSTED`。
-拒绝不改变工具预算、模型请求预算、时限；不泄露私有数据（拒绝码与措辞为固定串，经断言测试）。
+**精度定理（v1 结论保留，前提补齐）**：任何 evaluator PASSED 的提交必然通过两门。前提：
+(a) `EVIDENCE_NOT_REGISTERED` 先行（已存在）；(b) I1 采用上述完整判定；(c) I2 用 runner trace；
+(d) CONFIRMED/NO_INCIDENT 通过路径均以"claim 自身引用"过 evaluator 支撑规则（代码已证），
+INSUFFICIENT_EVIDENCE 通过要求缺口集合精确相等且全部合同工具缺口有收据（代码已证）。
+**覆盖缺口**：31 格语料无 NO_INCIDENT 终态，该分支只有代码级证明，须补合成测试。
 
-**精确性定理（回归验证）**：任何 evaluator 判定 PASSED 的提交必然通过两门——CONFIRMED 通过蕴含
-claim 支撑成立；INSUFFICIENT_EVIDENCE 通过蕴含缺口集合精确相等且合同工具缺口全部有真实收据。
-门因此**不可能拒绝本会通过的提交**；语料回归以 8 个 PASSED 格 + 4 个反事实变体全接受来钉住。
+**期望拒绝集（语料实测，v2 更正）**：
+- I1 = {v29 seq 9, 13；v30 seq 9}（v1 一致；均 CONFIRMED、唯一失败检查
+  `CLAIM_EVIDENCE_COMPATIBLE`）。
+- I2 = **{v30 seq 8}**（v1 的 10 格为错误集合：其中 9 格在归档 runner trace 中有真实收据；
+  且 v1 沿用了分析器的死过滤 bug——`quality_baseline._axis3` 曾用
+  `event_type == "TOOL_TRACE"` 过滤，真实字面量为 `TOOL_CALL`，导致 `refusal_witnessed` 恒假。
+  该缺陷已独立发现并修复（提交 `600da53`），基线报告未见证数同步更正为 v30 seq 15 一例）。
+- **回归断言**：拒绝集与上述集合逐格相等；8 个 PASSED 格全部接受；4 个反事实变体全部接受
+  （变体 13 按所有者完整配方重建：补已采 schema 与根因引用，**并断言其 evaluator PASSED**——
+  审计实测仅补根因引用不足使其 PASSED）。
 
-## 2. 数据缝与接线
+## 2. 可重试性 Fork（**待所有者裁决**）
 
-私有 scenario 目前在诊断阶段不可得（evaluation runner 在诊断完成后才加载）。因此：
+独立审计实证：kernel/static 的提交点在 run 结束后（`_result → _submit_through_session`），
+若门在 `session.submit` 拒绝，异常走 fail-closed 兜底 → **MODEL_ERROR、空 trace、证据被清空**；
+模型拿不到任何反馈，拒绝码也不出现在归档 trace（planner 路径例外：它在输出 validator 内提交并
+`ModelRetry`，天然可重试——但 planner 不在冻结清单）。
 
-- 新增 `submission_policy.py`：`SubmissionPolicy(scenario)`，`check(submission, registered,
-  tool_trace) -> ProtocolError | None`（含 I1+I2 两段，I1 在前）。
-- `StrategySession` 新增可选 `submission_policy`（默认 None，向后兼容）：submit 内调用
-  `policy.check(submission, self._registered, self._live_trace)`。
-- **trace 来源**：会话在工具门面调用点累积**与 runner 同构的 ToolTraceEvent**（复用同一构造
-  路径/规则，不另写见证规则）；若门面数据不足，则由 runner 注入 trace provider 闭包
-  （for_run 建立可变盒，diagnose 内填充）。实现取其一，审计确认其同构性。
-- **接线清单（等价性）**：evaluation_runner 在诊断前额外加载一次 scenario 用于构造 policy
-  （加载失败 → policy=None，门关闭，既有 SCENARIO_LOAD_FAILED 评估路径不变），经
-  diagnosis_factory → `DiagnosisRunner.for_run(..., submission_policy_factory=...)`、
-  `EvidencePlannerRunner` 同参数；`mcp_server` 路径同样加载 scenario 并安装同一 policy
-  （M18 进程内/MCP 等价性：外部策略进程不得绕过两门）；`fixed_rule` 确定性参考解不设门（None）。
-- **身份**：本变更改变 controller 行为 → 下一身份冻结时须升 `controller_protocol_version` 并
-  绑定载荷（审计时复核）；本轮不动任何冻结清单，不重冻。
+- **D1｜submit 级门（v1 设计）**：实现最小；但语料 4 个应触发格（3 个 STATIC + 1 个 KERNEL）
+  会被转为 MODEL_ERROR 终态，**摧毁诊断证据**，真实验证指标"拒绝码出现率"不可观测。
+- **D2｜回合内门（推荐）**：把门校验上移到模型输出回合的 validator（kernel 已有 rejection
+  机制与重试提示可挂载；static 需要在终局提交流程加同类 validator 钩子）。真正可重试（消耗输出
+  重试预算与模型请求）、证据保留、拒绝码可观测；代价：改动输出校验路径，范围更大。
+- 门语义（§1）在两种方案下一致，差异只在触发点与终态后果。
 
-## 3. 离线回归（语料重放，零模型调用）
+## 3. 数据缝与接线（按审计唯一化）
 
-- **语料**：两批 31 个终态格的评分包 + 4 个反事实变体（按所有者表格以构造器重建：8 主体改
-  stg_orders；9/13 绑定根因引用；12 删除两个多报缺口；记录来源与变换，不改原归档）。
-- **期望拒绝集（语料实测，写入回归脚本为数据而非假设）**：
-  I1 = {v29 seq 9, 13；v30 seq 9}（均 CONFIRMED、引用不足）；
-  I2 = {v29 seq 3, 8, 11, 12；v30 seq 3, 7, 8, 11, 16}（已声明缺口匹配合同工具三元组且
-  无真实收据）。**更正**：回归方案中"I2 期望 2 例"系分析器 missing 过滤计数，作为提交门语义
-  应取上述 10 例；以本实测为准。
-- **精确性要求**：8 个 PASSED 格与 4 个变体**全部接受**；拒绝集与上述集合逐格相等；篡改样本
-  （如伪造收据、错主体）被拒；重复运行确定性（同一输入同输出）。
-- 私有合同只在回归脚本内核对；脚本不入库（本地验收），入库的是合成测试。
+- **trace 源唯一化**：不得由会话累积（kernel-prep 拒绝不经过工具门面、码表不同构，语料反例
+  v30 seq 3 会被误拒）。采用 **runner 注入**：`for_run` 建立可变盒，`_diagnose_once` 建
+  `_RunState` 后填入 `state.trace`（live list）；提交/校验发生在 `_result` 之后（D1）或输出
+  validator 内（D2），届时 trace 已完整。planner 用 `controller.step_records()`；**既有缺口须
+  一并修复**：planner 归档 trace 未复制 `target_refusals`（v2 batch 拒绝无法见证）。
+- **scenario 加载**：evaluation_runner 将现有加载点**提前一次并缓存复用**（不重复 I/O）；
+  加载失败仍只走既有 `SCENARIO_LOAD_FAILED` 评估路径、不中断诊断；缓存对象同时供
+  `_write_scoring_inputs` 使用（同一实例，避免漂移）。
+- **接线清单（完整）**：`benchmark_runner.for_project` 自建工厂（**测量路径，必须覆盖**）、
+  `evaluation_runner.for_project` 默认工厂、`scenario_certification.reference_evaluation_runner`、
+  `cli.py` 直调、测试工厂与集成测试；Harness 侧外部策略会话（`strategy_bridge` /
+  `examples/isolation_acceptance.py`）必须装同一门（**MCP 侧更正**：`mcp_server.main` 拿不到
+  case id，门应由持有会话的 harness 桥安装；装门后该示例的固定期望与 3 次提交/2 次预算序列
+  需重核）。`fixed_rule` 确定性参考解不设门（None）。
+- **身份面（下一冻结/发布时一并处置，本轮不动）**：`STRATEGY_PROTOCOL_VERSION` 与
+  `controller_protocol_version` 载荷、requirements.md M17/M18 文本、协议 spec §4 拒绝词汇、
+  `isolation_acceptance` 的固定码断言。
+- **残余信息通道**：门的接受/拒绝本身构成有限 oracle（预算 2 次/run 有界）；记录为已接受边界。
 
-## 4. 测试（入库合成夹具）
+## 4. 测试与回归
 
-`CLAIM_SUPPORT_REQUIRED`/`GAP_RECEIPT_REQUIRED` 的触发与通过、重试计数与耗尽语义、拒绝码与
-措辞不含私有数据（断言）、I1 对 INSUFFICIENT_EVIDENCE 的空洞通过、I2 对无工具三元组的放行、
-门在 EVIDENCE_NOT_REGISTERED 之后的顺序、`submission_policy=None` 的既有行为不变。
+- 合成测试：两门触发/通过与拒绝码、I1 的"引用全部可解析"判定、I1 对 INSUFFICIENT_EVIDENCE
+  空洞通过、I2 对无工具三元组放行、NO_INCIDENT 分支（补语料覆盖缺口）、重试计数（D2 下含
+  耗尽语义）、拒绝码与措辞不含私有数据（含 planner 的 ModelRetry 路径）、`policy=None`
+  既有行为零改动。
+- 离线回归：31 格语料 + 4 变体重放；断言见 §1；确定性重复运行；私有合同只在脚本内核对
+  （脚本不入库，入库的是合成测试）。
+- 实现完成后按既有流程独立审计、提交；随后按验收阶梯第 2/3 步另行授权真实验证与测量。
 
 ## 5. 明确不做
 
-不改提示词（I3 另行）、不改 evaluator/评分、不改归档、不重冻、不做真实验证与测量（阶梯第
-2/3 步待另行授权）。
+不改提示词（I3 另行）、不改 evaluator/评分、不改归档、不重冻、不做真实验证与测量。
