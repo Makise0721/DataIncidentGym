@@ -37,6 +37,8 @@
 
 > M22 修订（2026-09-20 依据所有者对 p1-formal-v27 预检归因的裁定批准）：目录模型 ID 安全正则由小写限定 `^[a-z0-9][a-z0-9._:/-]{0,127}$` 放宽为**允许 ASCII 大写** `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`——长度与其余字符限制不变，不做大小写归一，绑定模型名仍按原始 ID 精确匹配（大小写不同视为不存在）。背景：第三方目录合法包含大写厂商前缀 ID（26/71），旧正则会以无关条目阻断目标模型预检（v26/v27 失败与该缺陷一致）。控制字符、超长（>128）、非字符串 id、响应结构错误仍拒绝。不加重试、不放宽超时、不改请求上界；本修订不修改评测、预算、checkout 门与既有冻结 manifest。
 
+> M23 修订（2026-09-20 依据所有者对 v29 部分结果的离线分析与裁定批准——"先保持暂停，优先补模型执行路径的脱敏传输诊断"）：`ModelProtocolTraceEvent`（run 结果层 trace，不在冻结 `Diagnosis` schema 内，经实证无 result_inputs 漂移）新增**可选** `transport_diagnostic` 字段：仅 provider 起源的协议失败（`PROVIDER_PROTOCOL_FAILURE`/`PROVIDER_RESPONSE`）由终止异常分类记录 `transport={TIMEOUT|CONNECTION_ERROR|HTTP_<status>|ERROR}`（沿 `__cause__` 链有界遍历；pydantic-ai 把传输错误包装为 `ModelAPIError`，其 `ModelHTTPError` 子类带 status 映射 `HTTP_<status>`）；TIMEOUT 臂为防御性（runner 自身 TimeoutError 先行截获为 MODEL_TIMEOUT）；UsageLimitExceeded 既有独立映射不变。硬约束沿 M21：只记固定 kind、整数状态与计数，绝无异常正文、响应文本、鉴权头或密钥；不加重试、不改预算 8/8/2/300、不改提示与工具 schema、不改判定与 checkout 门。字段加性可选，历史归档双向可解析；v29 暂停结果原样保留，失败格不重跑。EvidencePlanner 不共享该 trace 机制，属已知范围边界。传输诊断解决 provider 错误可归因性后，方可考虑独立授权的有界真实验证与新身份测量。
+
 > 当前约束：本文件定义 P0 基本原型及后续阶段边界；实施计划批准前不开始实现。
 
 ## 1. 产品摘要
