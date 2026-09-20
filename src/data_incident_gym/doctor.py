@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import platform
 import re
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import StrEnum
@@ -14,7 +13,6 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from tempfile import TemporaryDirectory
 from typing import Any, Literal, Self
-from urllib.request import Request, urlopen
 
 import psycopg
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, model_validator
@@ -35,14 +33,13 @@ from data_incident_gym.profiles import (
 
 RunCommand = Callable[..., CompletedProcess[str]]
 DatabaseConnect = Callable[..., Any]
-UrlOpen = Callable[..., AbstractContextManager[Any]]
+ModelsList = Callable[[], Awaitable[Iterable[Any]]]
 TemporaryDirectoryFactory = Callable[[], AbstractContextManager[str]]
 
 _EXPECTED_PYTHON = "3.12.10"
 _EXPECTED_UV = "0.11.24"
 _COMMAND_TIMEOUT_SECONDS = 30
 _URL_TIMEOUT_SECONDS = 5
-_MAX_RESPONSE_BYTES = 1024 * 1024
 _VERSION_PATTERN = re.compile(r"^\d+(?:\.\d+){2,}$")
 _SAFE_MODEL_NAME = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,127}$")
 _DIAGNOSTIC_DATABASE_ENV_KEYS = (
@@ -157,7 +154,7 @@ class DoctorRunner:
         *,
         run_command: RunCommand,
         db_connect: DatabaseConnect,
-        url_open: UrlOpen,
+        models_list: ModelsList,
         model: Model,
         temporary_directory: TemporaryDirectoryFactory,
     ) -> None:
@@ -165,7 +162,7 @@ class DoctorRunner:
         self._project_root = project_root
         self._run_command = run_command
         self._db_connect = db_connect
-        self._url_open = url_open
+        self._models_list = models_list
         self._model = model
         self._temporary_directory = temporary_directory
 
@@ -186,7 +183,9 @@ class DoctorRunner:
             project_root,
             run_command=subprocess.run,
             db_connect=psycopg.connect,
-            url_open=urlopen,
+            models_list=lambda: provider.client.models.list(
+                timeout=_URL_TIMEOUT_SECONDS
+            ),
             model=model,
             temporary_directory=TemporaryDirectory,
         )
@@ -518,34 +517,28 @@ class DoctorRunner:
         )
         return spec_check, snapshot_check, read_only_check, bounds_check
 
-    def _endpoint_check(self) -> tuple[DoctorCheck, bool, set[str]]:
-        endpoint = self._diagnostic_settings.model_base_url.rstrip("/") + "/models"
+    async def _endpoint_check(self) -> tuple[DoctorCheck, bool, set[str]]:
+        """Probe the catalog through the same SDK client the model traffic uses.
+
+        The endpoint's WAF rejects non-SDK client signatures, so the catalog
+        probe must ride the provider client (same base URL, auth, and HTTP
+        stack, no automatic retries) instead of a bare urllib request.
+        """
+
         try:
-            request = Request(
-                endpoint,
-                headers={
-                    "api-key": self._diagnostic_settings.model_api_key.get_secret_value(),
-                },
-            )
-            with self._url_open(request, timeout=_URL_TIMEOUT_SECONDS) as response:
-                body = response.read(_MAX_RESPONSE_BYTES + 1)
-            if len(body) > _MAX_RESPONSE_BYTES:
-                raise ValueError("response too large")
-            payload = json.loads(body.decode("utf-8"))
-            data = payload.get("data") if isinstance(payload, dict) else None
-            if not isinstance(data, list):
+            page = await self._models_list()
+            entries = getattr(page, "data", None)
+            if not isinstance(entries, list):
                 raise ValueError("invalid models response")
-            if any(
-                not isinstance(item, dict)
-                or type(item.get("id")) is not str
-                or _SAFE_MODEL_NAME.fullmatch(item["id"]) is None
-                for item in data
-            ):
-                raise ValueError("invalid model entry")
-            model_ids = {
-                item["id"]
-                for item in data
-            }
+            model_ids = set()
+            for item in entries:
+                model_id = getattr(item, "id", None)
+                if (
+                    not isinstance(model_id, str)
+                    or _SAFE_MODEL_NAME.fullmatch(model_id) is None
+                ):
+                    raise ValueError("invalid model entry")
+                model_ids.add(model_id)
         except Exception:
             return self._check(DoctorCheckCode.MODEL_ENDPOINT, False, "UNAVAILABLE"), False, set()
         return self._check(DoctorCheckCode.MODEL_ENDPOINT, True, "REACHABLE"), True, model_ids
@@ -636,7 +629,7 @@ class DoctorRunner:
         )
         checks.append(dbt_check)
         checks.extend(self._profile_checks(postgres_check.passed))
-        endpoint_check, endpoint_ok, model_ids = self._endpoint_check()
+        endpoint_check, endpoint_ok, model_ids = await self._endpoint_check()
         checks.append(endpoint_check)
         model_check = self._model_present_check(endpoint_ok, model_ids)
         checks.append(model_check)
