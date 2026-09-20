@@ -487,6 +487,9 @@ class _RunState:
     #: Harness-side submission gates (D2); None disables them (deterministic
     #: reference paths and injected-tools test paths keep their behaviour).
     submission_policy: SubmissionPolicy | None = None
+    #: Whether the LAST validator refusal came from a submission gate; the
+    #: output-retry-exhaustion terminal only renames gate-caused exhaustion.
+    last_refusal_was_gate: bool = False
     # Historical retry background: which surfaces had already been asked to
     # retry before the current request. It never by itself names the current
     # failure.
@@ -1267,7 +1270,12 @@ def _is_output_retry_exhaustion(state: _RunState, error: BaseException) -> bool:
 
     if not isinstance(error, UnexpectedModelBehavior):
         return False
-    if not isinstance(error.__cause__, ToolRetryError):
+    # The exhausted output-retry path surfaces the last validator refusal as
+    # the cause (``ModelRetry`` for tool outputs, ``ToolRetryError`` for plain
+    # outputs), with the validator's own counters at the budget.
+    if not isinstance(error.__cause__, (ModelRetry, ToolRetryError)):
+        return False
+    if not state.last_refusal_was_gate:
         return False
     return (
         state.output_retry_limit is not None
@@ -2670,6 +2678,7 @@ class DiagnosisRunner:
         @agent.output_validator
         def validate_output(ctx: RunContext[_RunState], output: Any) -> Any:
             current = ctx.deps
+            current.last_refusal_was_gate = False
             # Output-validation retries consumed so far, from the validator's own
             # counter. It is None when a round never reaches this validator, and
             # it is not a total of every SDK retry the request may have made.
@@ -2736,6 +2745,7 @@ class DiagnosisRunner:
                 current.outcome = outcome
                 refusal = _submission_gate_refusal(current, decision)
                 if refusal is not None:
+                    current.last_refusal_was_gate = True
                     current.kernel_rejection_attempt = None
                     current.trace.append(
                         EvidenceGateTraceEvent(
@@ -2785,6 +2795,7 @@ class DiagnosisRunner:
                 raise ModelRetry("DIAGNOSIS_EVIDENCE_ID_UNKNOWN")
             refusal = _submission_gate_refusal(current, output)
             if refusal is not None:
+                current.last_refusal_was_gate = True
                 current.trace.append(
                     EvidenceGateTraceEvent(
                         event_type="EVIDENCE_GATE",

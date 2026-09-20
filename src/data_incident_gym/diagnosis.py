@@ -226,6 +226,9 @@ _MODEL_ERROR_CODES = {
     "MODEL_TOOL_CALL_LIMIT",
     "MODEL_TIMEOUT",
     "MODEL_PROTOCOL_ERROR",
+    # D2 submission gates: the output-retry budget was spent after gate
+    # refusals; the terminal must name the cause instead of a silent accept.
+    "MODEL_OUTPUT_RETRY_EXHAUSTED",
     "MODEL_RUNTIME_ERROR",
     "RUN_SETUP_ERROR",
 }

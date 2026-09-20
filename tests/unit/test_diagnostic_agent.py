@@ -1008,3 +1008,99 @@ def test_settings_model_uses_the_verified_thinking_gateway_profile(tmp_path, str
         assert runner._owned_model_client.max_retries == 0
     finally:
         asyncio.run(runner._owned_model_client.close())
+
+# --- D2 submission-gate wiring ----------------------------------------------
+
+
+class _AlwaysRefusePolicy:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def check(self, submission, records, trace):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        from data_incident_gym.submission_policy import GateRefusal
+
+        return GateRefusal(code="GATE_TEST_REFUSAL", message="gate test refusal")
+
+
+class _RaisingPolicy:
+    def check(self, submission, records, trace):  # type: ignore[no-untyped-def]
+        raise RuntimeError("gate exploded")
+
+
+def _final_submission_responder() -> object:
+    def respond(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        payload = _invalid_static_payload(missing_summary=False)
+        payload["unresolved_evidence"] = [
+            {
+                "evidence_kind": "RELATION_SCHEMA",
+                "subject": "raw_orders",
+                "reason_code": "NOT_OBSERVABLE",
+            }
+        ]
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    payload,
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    return FunctionModel(respond)
+
+
+def _static_runner_with_policy(tmp_path: Path, policy: object) -> DiagnosisRunner:
+    _write_public_run(tmp_path)
+    return DiagnosisRunner.for_run(
+        RUN_ID,
+        _settings(),
+        DiagnosticStrategy.STATIC_SKILL,
+        tmp_path,
+        model=_final_submission_responder(),
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+        submission_policy=policy,
+    )
+
+
+def test_gate_refusal_is_retryable_then_exhausts_to_a_visible_terminal(
+    tmp_path: Path,
+) -> None:
+    policy = _AlwaysRefusePolicy()
+    runner = _static_runner_with_policy(tmp_path, policy)
+
+    result = asyncio.run(runner.diagnose())
+
+    # Constraint 2: the refusal never silently accepts; the exhausted terminal
+    # is defined and visible.
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    assert result.diagnosis.summary == "MODEL_OUTPUT_RETRY_EXHAUSTED"
+    assert policy.calls >= 1
+    refusals = [
+        event
+        for event in result.trace
+        if getattr(event, "event_type", None) == "EVIDENCE_GATE"
+        and getattr(event, "reason_code", None) == "GATE_TEST_REFUSAL"
+        and not event.accepted
+    ]
+    assert len(refusals) == policy.calls
+
+
+def test_gate_acceptance_leaves_the_run_unchanged(tmp_path: Path) -> None:
+    runner = _static_runner_with_policy(tmp_path, None)
+
+    result = asyncio.run(runner.diagnose())
+
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+
+
+def test_validator_exception_fails_closed(tmp_path: Path) -> None:
+    runner = _static_runner_with_policy(tmp_path, _RaisingPolicy())
+
+    result = asyncio.run(runner.diagnose())
+
+    # Constraint 1: a broken gate must never let the submission through.
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    assert result.diagnosis.summary == "MODEL_RUNTIME_ERROR"
