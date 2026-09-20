@@ -1,21 +1,24 @@
 """Offline diagnostic-quality baseline over archived benchmark cells (spec v2).
 
 Read-only analysis per ``docs/superpowers/specs/2026-09-20-offline-diagnostic-
-quality-baseline-spec.md``: verify scoring identity, recompute each archived
-cell with the frozen evaluator, then classify cells and grade the three
-quality axes (collection completeness, per-claim citation binding,
-insufficiency-gap declaration). Private scenario contracts are used inside
-this analyzer only; nothing here feeds model context, changes scores, or
-rewrites artifacts.
+quality-baseline-spec.md``: every terminal cell passes the same strict
+identity, binding and frozen-evaluator recomputation checks before
+classification; RUN_ERROR is a business category, never a verification
+exemption. Private scenario contracts are used inside this analyzer only;
+nothing here feeds model context, changes scores, or rewrites artifacts.
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
 
 from data_incident_gym.benchmark_manifest import (
     BenchmarkManifest,
@@ -25,6 +28,7 @@ from data_incident_gym.benchmark_manifest import (
 from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisStatus,
+    DiagnosticStrategy,
     refusal_witnessed,
 )
 from data_incident_gym.evaluation import (
@@ -34,9 +38,21 @@ from data_incident_gym.evaluation import (
     claim_supported_by_records,
 )
 from data_incident_gym.evaluation_inputs import (
-    load_evaluation_input_bundle,
+    ARTIFACT_FILENAMES,
+    SCORING_INPUTS_SCHEMA_VERSION,
+    ArtifactDigest,
+    EvaluationInputBundle,
+    EvaluationInputsError,
+    EvaluatorIdentity,
+    RecoveryProof,
+    VerificationPayload,
+    _payload_digest,
+    _restore_typed_diagnosis,
+    _restore_typed_kernel_state,
+    require_known_evaluator,
     verification_from_payload,
 )
+from data_incident_gym.scenarios import ScenarioSpec
 
 
 class QualityBaselineError(RuntimeError):
@@ -45,6 +61,7 @@ class QualityBaselineError(RuntimeError):
 
 _TERMINAL_STATES = {"COMPLETED", "FAILED"}
 _RECOVERY_HEALTHY = "HEALTHY"
+_TRANSPORT_FIELD = "transport_diagnostic"
 
 
 @dataclass
@@ -79,7 +96,9 @@ class Axis2Result:
 
     @property
     def has_defect(self) -> bool:
-        return any(v.outcome != "supported" for v in self.verdicts if v.outcome != "not_applicable")
+        return any(
+            v.outcome != "supported" for v in self.verdicts if v.outcome != "not_applicable"
+        )
 
 
 @dataclass
@@ -112,11 +131,144 @@ class CellAnalysis:
     axis1: Axis1Result | None = None
     axis2: Axis2Result | None = None
     axis3: Axis3Result | None = None
+    transport: str | None = None
     detail: str | None = None
 
 
-def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+def _canonical_json(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _strip_transport_field(payload: Any) -> None:
+    """Remove the M23-added default field from an in-memory payload copy."""
+
+    if isinstance(payload, dict):
+        payload.pop(_TRANSPORT_FIELD, None)
+        for value in payload.values():
+            _strip_transport_field(value)
+    elif isinstance(payload, list):
+        for value in payload:
+            _strip_transport_field(value)
+
+
+def _payload_is_legacy(payload: dict[str, Any]) -> bool:
+    """A payload is legacy when no trace event carries the M23-added field."""
+
+    trace = (payload.get("diagnosis_run") or {}).get("trace", [])
+    return not any(
+        isinstance(event, dict) and _TRANSPORT_FIELD in event
+        for event in trace
+        if isinstance(event, dict)
+    )
+
+
+def _load_bundle_for_analysis(payload: dict[str, Any]) -> EvaluationInputBundle:
+    """Strictly validate a bundle, with tested pre-M23 digest compatibility.
+
+    Legacy payloads (trace events without ``transport_diagnostic``) record
+    their diagnosis digest over a serialization that predates the field: the
+    digest is canonical JSON of the run with the default field absent, while a
+    re-serialized parsed model now always carries
+    ``"transport_diagnostic": null``. For such payloads the diagnosis digest
+    is recomputed over the field-stripped serialization — the exact reverse of
+    what re-serialization added — and compared against the ORIGINAL recorded
+    digest, which is preserved on the returned instance. The full loader flow
+    (v2 diagnosis restoration, kernel-state typing, digest stability across
+    restoration) is replicated; genuine mismatches and new-field payloads
+    still raise; old bundles are never modified.
+    """
+
+    restored = _restore_typed_diagnosis(copy.deepcopy(payload))
+    legacy = False
+    try:
+        bundle = EvaluationInputBundle.model_validate(restored)
+    except ValidationError as exc:
+        if "diagnosis digest does not match" not in str(exc):
+            raise
+        if not _payload_is_legacy(restored):
+            raise
+        # Legacy path: re-validate the diagnosis run from a serialization with
+        # the M23 default field stripped, and recompute the digest exactly the
+        # way the pre-M23 writer did.
+        legacy = True
+        run_payload = copy.deepcopy(restored["diagnosis_run"])
+        _strip_transport_field(run_payload)
+        diagnosis_run = DiagnosisRunResult.model_validate(run_payload)
+        legacy_digest = hashlib.sha256(
+            _canonical_json(run_payload).encode("utf-8")
+        ).hexdigest()
+        if legacy_digest != restored["diagnosis_run_digest"]:
+            raise QualityBaselineError(
+                "legacy diagnosis digest mismatch after transport-field normalization"
+            ) from None
+    else:
+        diagnosis_run = bundle.diagnosis_run
+
+    scenario = ScenarioSpec.model_validate(restored["scenario"])
+    verification = VerificationPayload.model_validate(restored["verification"])
+    recovery = RecoveryProof.model_validate(restored["recovery"])
+    evaluator = EvaluatorIdentity.model_validate(restored["original_evaluator"])
+    require_known_evaluator(evaluator)
+    artifact_digests = tuple(
+        ArtifactDigest.model_validate(item) for item in restored["artifact_digests"]
+    )
+    bundle = EvaluationInputBundle.model_construct(
+        schema_version=restored.get(
+            "schema_version", SCORING_INPUTS_SCHEMA_VERSION
+        ),
+        run_id=restored["run_id"],
+        incident_case_id=restored["incident_case_id"],
+        strategy=DiagnosticStrategy(restored["strategy"]),
+        scenario=scenario,
+        scenario_digest=restored["scenario_digest"],
+        verification=verification,
+        verification_digest=restored["verification_digest"],
+        diagnosis_run=diagnosis_run,
+        # The ORIGINAL recorded digest is kept as evidence on the instance; the
+        # legacy-computed value above was only used to verify it.
+        diagnosis_run_digest=restored["diagnosis_run_digest"],
+        recovery=recovery,
+        original_evaluator=evaluator,
+        artifact_digests=artifact_digests,
+    )
+    if bundle.diagnosis_run.diagnosis.run_id != bundle.run_id:
+        raise QualityBaselineError("bundle run_id does not match the diagnosis run")
+    if bundle.diagnosis_run.strategy is not bundle.strategy:
+        raise QualityBaselineError("bundle strategy does not match the diagnosis run")
+    if bundle.verification.run_id != bundle.run_id:
+        raise QualityBaselineError("bundle verification run_id mismatch")
+    if bundle.verification.incident_case_id != bundle.incident_case_id:
+        raise QualityBaselineError("bundle verification case mismatch")
+    if bundle.scenario.incident_case_id != bundle.incident_case_id:
+        raise QualityBaselineError("bundle scenario case mismatch")
+    if bundle.recovery.incident_case_id != bundle.incident_case_id:
+        raise QualityBaselineError("bundle recovery case mismatch")
+    if bundle.scenario_digest != bundle.scenario.digest():
+        raise QualityBaselineError("bundle scenario digest mismatch")
+    if bundle.verification_digest != _payload_digest(bundle.verification):
+        raise QualityBaselineError("bundle verification digest mismatch")
+    names = tuple(item.name for item in bundle.artifact_digests)
+    if len(names) != len(set(names)) or set(names) != set(ARTIFACT_FILENAMES):
+        raise QualityBaselineError("bundle artifact digests must cover the six files")
+    restored_run = _restore_typed_kernel_state(diagnosis_run)
+    if restored_run is not diagnosis_run:
+        # Same invariant the strict loader enforces: kernel-state typing must
+        # not change the recorded digest (legacy mode compares the stripped
+        # serialization, which is what the recorded digest was computed over).
+        if legacy:
+            check_payload = restored_run.model_dump(mode="json")
+            _strip_transport_field(check_payload)
+            restored_digest = hashlib.sha256(
+                _canonical_json(check_payload).encode("utf-8")
+            ).hexdigest()
+        else:
+            restored_digest = restored_run.digest()
+        if restored_digest != restored["diagnosis_run_digest"]:
+            raise QualityBaselineError(
+                "diagnosis digest changed after kernel-state restoration"
+            )
+        bundle = bundle.model_copy(update={"diagnosis_run": restored_run})
+    return bundle
 
 
 def verify_scoring_identity(manifest: BenchmarkManifest, project_root: Path) -> None:
@@ -141,13 +293,51 @@ def verify_scoring_identity(manifest: BenchmarkManifest, project_root: Path) -> 
         )
 
 
+def _read_strict_ledger(
+    manifest: BenchmarkManifest,
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reject duplicate/conflicting terminals and terminals without STARTED.
+
+    Ledger integrity is a batch-level precondition: a run may start at most
+    once and reach at most one terminal state, and every terminal entry must
+    have its STARTED predecessor.
+    """
+
+    seen: dict[str, dict[str, Any]] = {}
+    terminals: list[dict[str, Any]] = []
+    for entry in entries:
+        state = entry.get("state")
+        run_id = entry.get("run_id")
+        if state not in {"STARTED", *_TERMINAL_STATES}:
+            raise QualityBaselineError(f"unknown ledger state {state!r} for run {run_id}")
+        prior = seen.get(run_id)
+        if state == "STARTED":
+            if prior is not None:
+                raise QualityBaselineError(f"duplicate STARTED entry for run {run_id}")
+            seen[run_id] = entry
+        else:
+            if prior is None:
+                raise QualityBaselineError(
+                    f"terminal ledger entry without STARTED for run {run_id}"
+                )
+            if prior.get("state") in _TERMINAL_STATES:
+                raise QualityBaselineError(f"duplicate terminal entry for run {run_id}")
+            seen[run_id] = entry
+            terminals.append(entry)
+    for cell in manifest.cells:
+        if cell.run_id in seen and seen[cell.run_id].get("manifest_id") != manifest.manifest_id:
+            raise QualityBaselineError(
+                f"ledger manifest_id does not match the batch manifest for run {cell.run_id}"
+            )
+    return terminals
+
+
 def _verify_cell_binding(
     manifest: BenchmarkManifest,
     ledger_entry: dict[str, Any],
     metadata: dict[str, Any],
 ) -> None:
-    if ledger_entry.get("manifest_id") != manifest.manifest_id:
-        raise QualityBaselineError("ledger manifest_id does not match the batch manifest")
     cell = next(
         (item for item in manifest.cells if item.run_id == ledger_entry.get("run_id")),
         None,
@@ -264,37 +454,24 @@ def _axis3(
     )
 
 
-def _lenient_transport_summary(project_root: Path, run_id: str) -> str:
-    """Read provider-failure attribution from a scoring-inputs bundle leniently.
-
-    MODEL_ERROR cells' bundles can fail strict schema validation (a known
-    writer-side seam); this read is for attribution reporting only and never
-    feeds the axis computation.
-    """
-
-    path = (
-        project_root / ".dig" / "scoring-inputs" / run_id / "evaluation_inputs.json"
-    )
-    if not path.is_file():
-        return "no scoring-inputs bundle archived"
-    try:
-        payload = _load_json(path)
-    except ValueError as exc:
-        return f"scoring-inputs bundle unreadable: {str(exc)[:80]}"
-    trace = (payload.get("diagnosis_run") or {}).get("trace", [])
+def _run_transport_summary(diagnosis_run: DiagnosisRunResult) -> str | None:
     events = [
         event
-        for event in trace
-        if isinstance(event, dict) and event.get("event_type") == "MODEL_PROTOCOL"
+        for event in diagnosis_run.trace
+        if getattr(event, "event_type", None) == "MODEL_PROTOCOL"
     ]
     if not events:
-        return "no provider protocol failure recorded"
+        return None
     return "; ".join(
-        f"provider_failure(err={event.get('error_type')},"
-        f"request_index={event.get('model_request_index')},"
-        f"transport={event.get('transport_diagnostic')})"
+        f"provider_failure(err={event.error_type},"
+        f"request_index={event.model_request_index},"
+        f"transport={event.transport_diagnostic})"
         for event in events
     )
+
+
+def _load_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _load_terminal_cells(
@@ -310,8 +487,9 @@ def _load_terminal_cells(
         for line in ledger_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    started = {entry["run_id"] for entry in entries if entry.get("state") == "STARTED"}
-    terminal_ids = {entry["run_id"] for entry in entries if entry.get("state") in _TERMINAL_STATES}
+    terminals = _read_strict_ledger(manifest, entries)
+    started = {entry.get("run_id") for entry in entries if entry.get("state") == "STARTED"}
+    terminal_ids = {entry.get("run_id") for entry in terminals}
     cells: list[CellAnalysis] = []
     for cell in manifest.cells:
         if cell.run_id not in started:
@@ -337,31 +515,9 @@ def _load_terminal_cells(
                     detail="ledger has STARTED without a terminal entry",
                 )
             )
-    terminal = [entry for entry in entries if entry.get("state") in _TERMINAL_STATES]
-    for entry in terminal:
+    for entry in terminals:
         run_id = entry["run_id"]
         artifact_dir = project_root / "artifacts" / run_id
-        try:
-            metadata = _load_json(artifact_dir / "metadata.json")
-            diagnosis_payload = _load_json(artifact_dir / "diagnosis.json")
-            diagnosis_status = diagnosis_payload.get("status")
-            archived = EvaluationResult.model_validate(
-                _load_json(artifact_dir / "evaluation.json")
-            )
-            _verify_cell_binding(manifest, entry, metadata)
-        except (OSError, ValueError, KeyError) as exc:
-            cells.append(
-                CellAnalysis(
-                    batch=manifest.manifest_id,
-                    sequence=entry["sequence"],
-                    run_id=run_id,
-                    incident_case_id=entry.get("incident_case_id", ""),
-                    strategy=entry.get("strategy", ""),
-                    category="CORRUPT",
-                    detail=str(exc)[:200],
-                )
-            )
-            continue
         base = dict(
             batch=manifest.manifest_id,
             sequence=entry["sequence"],
@@ -369,19 +525,22 @@ def _load_terminal_cells(
             incident_case_id=entry["incident_case_id"],
             strategy=entry["strategy"],
         )
-        if diagnosis_status == DiagnosisStatus.MODEL_ERROR.value:
-            # MODEL_ERROR cells predate or lack valid scoring-input bundles (a
-            # known writer-side seam); their transport attribution is read
-            # leniently from the raw bundle JSON instead.
-            transport = _lenient_transport_summary(project_root, run_id)
-            cells.append(CellAnalysis(**base, category="RUN_ERROR", detail=transport))
-            continue
         try:
-            bundle = load_evaluation_input_bundle(project_root, run_id)
-            scenario_digest_matches = bundle.scenario_digest == _catalog_digest(
-                manifest, entry["incident_case_id"]
+            metadata = _load_json(artifact_dir / "metadata.json")
+            diagnosis_payload = _load_json(artifact_dir / "diagnosis.json")
+            archived = EvaluationResult.model_validate(
+                _load_json(artifact_dir / "evaluation.json")
             )
-        except (OSError, ValueError, KeyError, QualityBaselineError) as exc:
+            _verify_cell_binding(manifest, entry, metadata)
+            bundle_payload = _load_json(
+                project_root
+                / ".dig"
+                / "scoring-inputs"
+                / run_id
+                / "evaluation_inputs.json"
+            )
+            bundle = _load_bundle_for_analysis(bundle_payload)
+        except (OSError, ValueError, KeyError, EvaluationInputsError, QualityBaselineError) as exc:
             cells.append(
                 CellAnalysis(
                     **base,
@@ -390,7 +549,19 @@ def _load_terminal_cells(
                 )
             )
             continue
-        if not scenario_digest_matches:
+        # Plane binding: the archived diagnosis must be exactly the diagnosis
+        # inside the verified scoring bundle, so a swapped or tampered
+        # diagnosis.json can never dodge verification via a business category.
+        if diagnosis_payload != bundle.diagnosis_run.diagnosis.model_dump(mode="json"):
+            cells.append(
+                CellAnalysis(
+                    **base,
+                    category="CORRUPT",
+                    detail="archived diagnosis does not match the scoring bundle",
+                )
+            )
+            continue
+        if bundle.scenario_digest != _catalog_digest(manifest, entry["incident_case_id"]):
             cells.append(
                 CellAnalysis(
                     **base,
@@ -414,15 +585,14 @@ def _load_terminal_cells(
         diagnosis = bundle.diagnosis_run.diagnosis
         expected_status = bundle.scenario.expected_status
         actual_status = diagnosis.status.value
-        base = dict(
-            batch=manifest.manifest_id,
-            sequence=entry["sequence"],
-            run_id=run_id,
-            incident_case_id=entry["incident_case_id"],
-            strategy=entry["strategy"],
-        )
         if diagnosis.status is DiagnosisStatus.MODEL_ERROR:
-            cells.append(CellAnalysis(**base, category="RUN_ERROR"))
+            cells.append(
+                CellAnalysis(
+                    **base,
+                    category="RUN_ERROR",
+                    transport=_run_transport_summary(bundle.diagnosis_run),
+                )
+            )
             continue
         if recomputed.status.value == "PASSED":
             cells.append(CellAnalysis(**base, category="PASSED"))
@@ -528,6 +698,54 @@ def overlap_matrix(cells: list[CellAnalysis]) -> dict[str, int]:
     return dict(sorted(matrix.items()))
 
 
+def render_markdown(batches: dict[str, list[CellAnalysis]]) -> str:
+    """Render per-cell tables and aggregates from the structured results."""
+
+    lines: list[str] = []
+    scenario_names: dict[str, dict[int, str]] = {}
+    for batch, cells in batches.items():
+        lines.append(f"## {batch}")
+        lines.append("")
+        lines.append(
+            "| seq | scenario | strategy | category | direction | axis1 | axis2 | axis3 |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+        scenario_names[batch] = {}
+        for cell in cells:
+            if cell.category == "NOT_EXECUTED":
+                continue
+            axis1 = (
+                "+".join((*cell.axis1.not_collected, *cell.axis1.collected_uncited))
+                if cell.axis1 is not None and cell.axis1.has_defect
+                else ""
+            )
+            axis2 = (
+                "+".join(
+                    v.outcome
+                    for v in cell.axis2.verdicts
+                    if v.outcome not in {"supported", "not_applicable"}
+                )
+                if cell.axis2 is not None and cell.axis2.has_defect
+                else ""
+            )
+            axis3 = (
+                "missing:"
+                + ",".join("/".join(gap) for gap in cell.axis3.missing)
+                + " extra:"
+                + ",".join("/".join(gap) for gap in cell.axis3.extra)
+                + " unwitnessed:"
+                + ",".join("/".join(gap) for gap in cell.axis3.unwitnessed_receipts)
+                if cell.axis3 is not None and cell.axis3.has_defect
+                else ""
+            )
+            lines.append(
+                f"| {cell.sequence} | {cell.incident_case_id} | {cell.strategy} "
+                f"| {cell.category} | {cell.status_direction or ''} | {axis1} | {axis2} | {axis3} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
 __all__ = [
     "Axis1Result",
     "Axis2ClaimVerdict",
@@ -540,5 +758,6 @@ __all__ = [
     "axis2_defect_outcomes",
     "axis3_defect_counts",
     "overlap_matrix",
+    "render_markdown",
     "verify_scoring_identity",
 ]
