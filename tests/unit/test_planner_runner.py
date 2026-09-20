@@ -499,3 +499,17 @@ def test_a_refused_close_does_not_count_as_closed_after_reload(
     assert summary["satisfied"] == 2
     assert summary["revoked"] == 0
     assert summary["open"] == 2
+
+
+def test_planner_settings_model_uses_the_verified_thinking_gateway_profile(project_root):
+    runner = EvidencePlannerRunner.for_run(
+        RUN_ID, DiagnosticSettings(
+            _env_file=None, model_name='deepseek/deepseek-v4.1-flash',
+            model_base_url='https://api.commandcode.ai/provider/v1',
+        ), project_root, backend=_PlannerTools(),
+    )
+    try:
+        assert runner._model.profile['openai_supports_tool_choice_required'] is False
+        assert runner._owned_model_client.max_retries == 0
+    finally:
+        asyncio.run(runner._owned_model_client.close())

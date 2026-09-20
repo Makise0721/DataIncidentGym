@@ -19,12 +19,21 @@ import psycopg
 from openai import APIConnectionError, APITimeoutError
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, model_validator
 from pydantic_ai import Agent, ModelRetry, RunContext, UsageLimits
+from pydantic_ai.exceptions import (
+    ModelAPIError,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
+)
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.usage import RunUsage
 
 from data_incident_gym.config import PROJECT_ROOT
-from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.diagnostic_config import (
+    DiagnosticSettings,
+    openai_compatibility_kwargs,
+)
 from data_incident_gym.profiles import (
     AggregateSnapshotReader,
     ProfileError,
@@ -207,6 +216,39 @@ def _catalog_diagnostic(
     )
 
 
+def _probe_diagnostic(
+    exc: Exception,
+    *,
+    elapsed_ms: int,
+    usage: RunUsage,
+    state: ProbeState,
+    validator_rejections: int,
+) -> str:
+    """Only emit fixed categories and counters, never exception or response text."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(exc, (TimeoutError, APITimeoutError)):
+        kind = "TIMEOUT"
+    elif isinstance(exc, APIConnectionError):
+        kind = "CONNECTION_ERROR"
+    elif type(status) is int and 100 <= status <= 599:
+        kind = f"HTTP_{status}"
+    elif isinstance(exc, ModelAPIError):
+        # Transport-level failure surfaced by pydantic-ai (no HTTP status);
+        # ModelHTTPError subclasses carry a status and are classified above.
+        kind = "CONNECTION_ERROR"
+    elif isinstance(exc, UsageLimitExceeded):
+        kind = "USAGE_LIMIT"
+    elif isinstance(exc, UnexpectedModelBehavior):
+        kind = "UNEXPECTED_MODEL_BEHAVIOR"
+    else:
+        kind = "ERROR"
+    return (
+        f"stage=model_probe;kind={kind};timeout_ms=60000;elapsed_ms={elapsed_ms};"
+        f"model_requests={usage.requests};tool_called={int(state.tool_called)};"
+        f"validator_rejections={validator_rejections}"
+    )
+
+
 class DoctorRunner:
     def __init__(
         self,
@@ -238,7 +280,10 @@ class DoctorRunner:
             api_key=diagnostic_settings.model_api_key.get_secret_value(),
         )
         provider.client.max_retries = 0
-        model = OpenAIChatModel(diagnostic_settings.model_name, provider=provider)
+        model = OpenAIChatModel(
+            diagnostic_settings.model_name, provider=provider,
+            **openai_compatibility_kwargs(diagnostic_settings),
+        )
         return cls(
             diagnostic_settings,
             project_root,
@@ -644,6 +689,10 @@ class DoctorRunner:
             )
 
         state = ProbeState()
+        usage = RunUsage()
+        validator_rejections = 0
+        started = time.monotonic()
+        diagnostic = None
         agent = Agent(
             self._model,
             deps_type=ProbeState,
@@ -659,7 +708,9 @@ class DoctorRunner:
         def require_real_tool_call(
             ctx: RunContext[ProbeState], output: DoctorProbeOutput
         ) -> DoctorProbeOutput:
+            nonlocal validator_rejections
             if not ctx.deps.tool_called or output.tool_value != "DOCTOR_TOOL_OK":
+                validator_rejections += 1
                 raise ModelRetry("DOCTOR_TOOL_REQUIRED")
             return output
 
@@ -669,16 +720,25 @@ class DoctorRunner:
                 result = await agent.run(
                     "Call read_probe_value and return its value in DoctorProbeOutput.",
                     deps=state,
+                    usage=usage,
                     usage_limits=UsageLimits(request_limit=2, tool_calls_limit=1),
                     retries={"output": 1},
                 )
             passed = state.tool_called and result.output.tool_value == "DOCTOR_TOOL_OK"
-        except Exception:
+        except Exception as exc:
+            diagnostic = _probe_diagnostic(
+                exc,
+                elapsed_ms=int((time.monotonic() - started) * 1000),
+                usage=usage,
+                state=state,
+                validator_rejections=validator_rejections,
+            )
             passed = False
         return self._check(
             DoctorCheckCode.MODEL_TOOL_STRUCTURED_OUTPUT,
             passed,
             "TOOL_CALLED" if passed else "UNAVAILABLE",
+            diagnostic=diagnostic,
         )
 
     async def run(self) -> DoctorResult:

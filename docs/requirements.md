@@ -32,6 +32,9 @@
 
 > M21 修订（2026-09-20 依据所有者对 p1-formal-v26 预检失败的诊断性裁定批准）：doctor 目录探针（`models.list`，经 SDK provider 客户端同路径）失败时在 `DoctorCheck` 新增**可选** `diagnostic` 字段，记录确定性脱敏摘要——`stage=catalog_list;kind={TIMEOUT|CONNECTION_ERROR|HTTP_<status>|MALFORMED:<stage>|ERROR};exc=<异常类名>;timeout_ms;elapsed_ms`。硬约束：不得记录异常消息、响应正文、鉴权头或任何密钥材料（按构造排除，仅插值类名、整数状态与计时）；不加重试、不放宽 5 秒超时、不改请求次数上界；通过检查与其他检查一律无该字段。该字段为加性可选，回执 schema 版本保持 `p1.benchmark_doctor.v3`，历史回执（无该字段）仍可解析；kind=ERROR 仅作未知异常（生产中 SDK 已包装为前三类）的兜底，仍脱敏并保留类名。模型工具调用能力（结构化输出探针）仍未验证，直至获准的预检通过。本修订不修改评测、预算、checkout 门与既有冻结 manifest。
 
+> M21 故障修复补充（2026-09-20，所有者要求解决 v28 结构化探针失败，并逐次批准三次有界独立探针）：失败诊断延伸到 `MODEL_TOOL_STRUCTURED_OUTPUT`，只记录固定 kind（TIMEOUT / CONNECTION_ERROR / HTTP_<status> / USAGE_LIMIT / UNEXPECTED_MODEL_BEHAVIOR / ERROR）、60 秒上限、耗时、SDK 用量计数、工具执行布尔值和输出验证器拒绝次数，不记录异常正文或模型响应。SDK `model_requests` 是用量计数，HTTP 失败时可为 0，不等于没有发送 POST；不作为套餐扣量依据。成功与未执行的检查仍无 diagnostic。针对精确配对 `https://api.commandcode.ai/provider/v1` + `deepseek/deepseek-v4.1-flash`，共享客户端能力声明 `openai_supports_tool_choice_required=False`，doctor、DiagnosisRunner、EvidencePlannerRunner 同源使用；SDK 将默认强制选择降为 `auto`，不关闭 thinking，不改变工具 schema、提示、2 次探针请求/60 秒/1 次输出重试或正式策略预算。实际工具执行和结构化输出验收仍必须满足；其他模型/端点沿用原配置。该传输行为变化须绑定新的实施修订，既有冻结清单与失败回执不得修改。
+
+
 > M22 修订（2026-09-20 依据所有者对 p1-formal-v27 预检归因的裁定批准）：目录模型 ID 安全正则由小写限定 `^[a-z0-9][a-z0-9._:/-]{0,127}$` 放宽为**允许 ASCII 大写** `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`——长度与其余字符限制不变，不做大小写归一，绑定模型名仍按原始 ID 精确匹配（大小写不同视为不存在）。背景：第三方目录合法包含大写厂商前缀 ID（26/71），旧正则会以无关条目阻断目标模型预检（v26/v27 失败与该缺陷一致）。控制字符、超长（>128）、非字符串 id、响应结构错误仍拒绝。不加重试、不放宽超时、不改请求上界；本修订不修改评测、预算、checkout 门与既有冻结 manifest。
 
 > 当前约束：本文件定义 P0 基本原型及后续阶段边界；实施计划批准前不开始实现。

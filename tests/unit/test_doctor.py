@@ -585,3 +585,243 @@ def test_profile_checks_fail_closed_when_baseline_snapshot_is_unavailable(
     assert checks[1].passed is False
     assert checks[2].passed is False
     assert checks[1].observed == checks[2].observed == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    "mode, expected",
+    [
+        ("http", "HTTP_429"),
+        ("timeout", "TIMEOUT"),
+        ("bad_output", "UNEXPECTED_MODEL_BEHAVIOR"),
+        ("missing_tool", "UNEXPECTED_MODEL_BEHAVIOR"),
+        ("success", None),
+    ],
+)
+def test_probe_diagnostics_preserve_real_agent_limits(mode, expected):
+    from pydantic_ai.exceptions import ModelHTTPError
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    calls = 0
+
+    def respond(messages, info):
+        nonlocal calls
+        calls += 1
+        if mode == "http":
+            raise ModelHTTPError(429, "secret-model", {"secret": "DO_NOT_LEAK"})
+        if mode == "timeout":
+            raise TimeoutError("DO_NOT_LEAK")
+        if mode == "bad_output":
+            return ModelResponse(parts=[TextPart("DO_NOT_LEAK")])
+        if mode == "success" and calls == 1:
+            return ModelResponse(parts=[ToolCallPart("read_probe_value", {})])
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    info.output_tools[0].name,
+                    {"tool_value": "DOCTOR_TOOL_OK"},
+                )
+            ]
+        )
+
+    runner = DoctorRunner(
+        DiagnosticSettings(_env_file=None),
+        Path("."),
+        run_command=lambda *a, **k: None,
+        db_connect=lambda **k: None,
+        models_list=lambda: None,
+        model=FunctionModel(respond),
+        temporary_directory=lambda: None,
+    )
+    check = asyncio.run(runner._model_probe_check(True))
+    assert calls <= 2
+    if expected is None:
+        assert check.passed
+        assert check.diagnostic is None
+        assert calls == 2
+    else:
+        assert not check.passed
+        assert f"kind={expected};" in check.diagnostic
+        assert "DO_NOT_LEAK" not in check.model_dump_json()
+        assert "secret-model" not in check.model_dump_json()
+        if mode == "missing_tool":
+            assert "validator_rejections=2" in check.diagnostic
+            assert "tool_called=0" in check.diagnostic
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+def test_probe_http_failure_is_diagnosable_through_the_real_sdk(status):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx2.Response(
+            status,
+            json={
+                "error": {
+                    "message": "DO_NOT_LEAK",
+                    "type": "invalid_request_error",
+                }
+            },
+            request=request,
+        )
+
+    async def exercise():
+        async with (
+            httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http,
+            AsyncOpenAI(
+            api_key="DO_NOT_LEAK",
+            base_url="https://example.invalid/v1",
+            http_client=http,
+            max_retries=0,
+            ) as client,
+        ):
+            from pydantic_ai.models.openai import OpenAIChatModel
+
+            runner = DoctorRunner(
+                DiagnosticSettings(_env_file=None),
+                Path("."),
+                run_command=lambda *a, **k: None,
+                db_connect=lambda **k: None,
+                models_list=lambda: None,
+                model=OpenAIChatModel("test", provider=OpenAIProvider(openai_client=client)),
+                temporary_directory=lambda: None,
+            )
+            with override_allow_model_requests(True):
+                return await runner._model_probe_check(True)
+
+    check = asyncio.run(exercise())
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert f"kind=HTTP_{status};" in check.diagnostic
+    assert "model_requests=0;" in check.diagnostic
+    assert "DO_NOT_LEAK" not in check.model_dump_json()
+
+
+def test_probe_usage_limit_is_diagnosable_with_request_count() -> None:
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    def respond(messages, info):
+        return ModelResponse(parts=[ToolCallPart("read_probe_value", {})])
+
+    runner = DoctorRunner(
+        DiagnosticSettings(_env_file=None),
+        Path("."),
+        run_command=lambda *a, **k: None,
+        db_connect=lambda **k: None,
+        models_list=lambda: None,
+        model=FunctionModel(respond),
+        temporary_directory=lambda: None,
+    )
+    check = asyncio.run(runner._model_probe_check(True))
+
+    assert check.passed is False
+    assert check.diagnostic is not None
+    assert "kind=USAGE_LIMIT;" in check.diagnostic
+    assert "model_requests=2;" in check.diagnostic
+    assert "tool_called=1;" in check.diagnostic
+
+
+def test_probe_connection_error_is_diagnosable_without_requests() -> None:
+    def handler(request):
+        raise httpx2.ConnectError("DO_NOT_LEAK", request=request)
+
+    async def exercise():
+        async with (
+            httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http,
+            AsyncOpenAI(
+                api_key="DO_NOT_LEAK",
+                base_url="https://example.invalid/v1",
+                http_client=http,
+                max_retries=0,
+            ) as client,
+        ):
+            from pydantic_ai.models.openai import OpenAIChatModel
+
+            runner = DoctorRunner(
+                DiagnosticSettings(_env_file=None),
+                Path("."),
+                run_command=lambda *a, **k: None,
+                db_connect=lambda **k: None,
+                models_list=lambda: None,
+                model=OpenAIChatModel("test", provider=OpenAIProvider(openai_client=client)),
+                temporary_directory=lambda: None,
+            )
+            with override_allow_model_requests(True):
+                return await runner._model_probe_check(True)
+
+    check = asyncio.run(exercise())
+
+    assert check.passed is False
+    assert check.diagnostic is not None
+    assert "kind=CONNECTION_ERROR;" in check.diagnostic
+    assert "model_requests=0;" in check.diagnostic
+    assert "DO_NOT_LEAK" not in check.model_dump_json()
+
+@pytest.mark.parametrize('omit_tool', [False, True])
+def test_thinking_gateway_probe_uses_auto_but_still_requires_actual_tool(
+    tmp_path, monkeypatch, omit_tool,
+):
+    import json
+
+    requests = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if payload['tool_choice'] != 'auto':
+            return httpx2.Response(400, request=request, json={'error': {
+                'message': 'Thinking mode does not support this tool_choice',
+            }})
+        tools = payload['tools']
+        output_name = next(t['function']['name'] for t in tools
+                           if t['function']['name'] != 'read_probe_value')
+        first = len(requests) == 1 and not omit_tool
+        name = 'read_probe_value' if first else output_name
+        args = {} if first else {'tool_value': 'DOCTOR_TOOL_OK'}
+        return httpx2.Response(200, request=request, json={
+            'id': 'offline', 'object': 'chat.completion', 'created': 1,
+            'model': 'deepseek/deepseek-v4.1-flash',
+            'choices': [{'index': 0, 'finish_reason': 'tool_calls', 'message': {
+                'role': 'assistant', 'content': None, 'tool_calls': [{
+                    'id': f'call_{len(requests)}', 'type': 'function',
+                    'function': {'name': name, 'arguments': json.dumps(args)},
+                }],
+            }}],
+        })
+
+    async def exercise():
+        async with (
+            httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http,
+            AsyncOpenAI(api_key='offline', base_url='https://example.invalid/v1',
+                        http_client=http, max_retries=0) as client,
+        ):
+            monkeypatch.setattr(doctor_module, 'OpenAIProvider',
+                                lambda **kw: OpenAIProvider(openai_client=client))
+            runner = DoctorRunner.for_project(DiagnosticSettings(
+                _env_file=None, model_name='deepseek/deepseek-v4.1-flash',
+                model_base_url='https://api.commandcode.ai/provider/v1',
+            ), tmp_path)
+            with override_allow_model_requests(True):
+                return await runner._model_probe_check(True)
+
+    check = asyncio.run(exercise())
+    assert len(requests) == 2
+    assert check.passed is (not omit_tool)
+    assert all(p['tool_choice'] == 'auto' for p in requests)
+    if omit_tool:
+        assert 'validator_rejections=2' in check.diagnostic
+
+
+def test_gateway_profile_is_scoped_to_the_exact_endpoint_and_model():
+    from data_incident_gym.diagnostic_config import openai_compatibility_kwargs
+
+    for model, endpoint in [
+        ('mimo-v2.5-pro', 'https://api.xiaomimimo.com/v1'),
+        ('deepseek/deepseek-v4.1-flash', 'https://example.invalid/v1'),
+        ('other', 'https://api.commandcode.ai/provider/v1'),
+    ]:
+        assert openai_compatibility_kwargs(DiagnosticSettings(
+            _env_file=None, model_name=model, model_base_url=endpoint,
+        )) == {}

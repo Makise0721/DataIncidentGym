@@ -63,3 +63,18 @@ class DiagnosticSettings(BaseSettings):
         if not value.get_secret_value().strip():
             raise ValueError("model_api_key must not be blank")
         return value
+
+
+def openai_compatibility_kwargs(settings: DiagnosticSettings) -> dict:
+    """Declare the verified gateway capability without changing thinking mode.
+
+    CommandCode's DeepSeek thinking route rejects forced tool choice. Auto
+    only changes transport selection; agent output/tool validators still apply.
+    All other endpoint/model pairs retain their existing provider profile.
+    """
+    if (
+        settings.model_base_url.rstrip("/") == "https://api.commandcode.ai/provider/v1"
+        and settings.model_name == "deepseek/deepseek-v4.1-flash"
+    ):
+        return {"profile": {"openai_supports_tool_choice_required": False}}
+    return {}

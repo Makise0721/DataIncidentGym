@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from contextlib import contextmanager
@@ -858,3 +859,22 @@ def test_safe_validation_details_filters_unknown_names_and_bounds_length() -> No
     # The nested unknown key collapses to the fixed marker.
     assert _UNKNOWN_FIELD_MARKER in locs
     assert "claims" in locs
+
+@pytest.mark.parametrize('strategy', [
+    DiagnosticStrategy.STATIC_SKILL, DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+])
+def test_settings_model_uses_the_verified_thinking_gateway_profile(tmp_path, strategy):
+    from data_incident_gym.diagnostic_config import DiagnosticSettings
+
+    _write_public_run(tmp_path)
+    runner = DiagnosisRunner.for_run(
+        RUN_ID, DiagnosticSettings(
+            _env_file=None, model_name='deepseek/deepseek-v4.1-flash',
+            model_base_url='https://api.commandcode.ai/provider/v1',
+        ), strategy, tmp_path, tools=SimpleNamespace(),
+    )
+    try:
+        assert runner._model.profile['openai_supports_tool_choice_required'] is False
+        assert runner._owned_model_client.max_retries == 0
+    finally:
+        asyncio.run(runner._owned_model_client.close())

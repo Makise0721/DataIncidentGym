@@ -61,7 +61,10 @@ from data_incident_gym.diagnosis import (
     ToolTraceEvent,
     TraceEvent,
 )
-from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.diagnostic_config import (
+    DiagnosticSettings,
+    openai_compatibility_kwargs,
+)
 from data_incident_gym.diagnostic_contracts import (
     MODEL_ERROR_TYPE_REASONS,
     MODEL_RULE_REASONS,
@@ -2453,7 +2456,9 @@ class DiagnosisRunner:
                 max_retries=0,
             )
             provider = OpenAIProvider(openai_client=client)
-            model = OpenAIChatModel(settings.model_name, provider=provider)
+            model = OpenAIChatModel(
+                settings.model_name, provider=provider, **openai_compatibility_kwargs(settings),
+            )
             model_identity = ModelIdentity("openai-compatible", settings.model_name)
             owned_model_client = client
         elif model_identity is None:

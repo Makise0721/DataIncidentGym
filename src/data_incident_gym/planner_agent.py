@@ -56,7 +56,10 @@ from data_incident_gym.diagnostic_agent import (
     ModelIdentity,
     load_base_prompt,
 )
-from data_incident_gym.diagnostic_config import DiagnosticSettings
+from data_incident_gym.diagnostic_config import (
+    DiagnosticSettings,
+    openai_compatibility_kwargs,
+)
 from data_incident_gym.evidence import EvidenceRecord
 from data_incident_gym.evidence_planner import (
     PlannerController,
@@ -170,7 +173,8 @@ class EvidencePlannerRunner:
                 max_retries=0,
             )
             model = OpenAIChatModel(
-                settings.model_name, provider=OpenAIProvider(openai_client=client)
+                settings.model_name, provider=OpenAIProvider(openai_client=client),
+                **openai_compatibility_kwargs(settings),
             )
             model_identity = ModelIdentity("openai-compatible", settings.model_name)
             owned_model_client = client
