@@ -43,7 +43,11 @@ _EXPECTED_UV = "0.11.24"
 _COMMAND_TIMEOUT_SECONDS = 30
 _URL_TIMEOUT_SECONDS = 5
 _VERSION_PATTERN = re.compile(r"^\d+(?:\.\d+){2,}$")
-_SAFE_MODEL_NAME = re.compile(r"^[a-z0-9][a-z0-9._:/-]{0,127}$")
+# Catalog vendors legitimately publish IDs with ASCII uppercase segments
+# (e.g. "moonshotai/Kimi-K3"), so the guard accepts both cases and keeps the
+# length plus character restrictions; membership matching stays exact (no
+# case folding).
+_SAFE_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _DIAGNOSTIC_DATABASE_ENV_KEYS = (
     "DIG_DIAGNOSTIC_POSTGRES_HOST",
     "DIG_DIAGNOSTIC_POSTGRES_PORT",

@@ -203,6 +203,80 @@ def test_catalog_diagnostic_falls_back_to_error_kind_for_unknown_exceptions() ->
     assert "something unexpected" not in arbitrary_check.diagnostic
 
 
+def test_endpoint_check_accepts_mixed_case_catalog_and_exact_target_match() -> None:
+    async def models_list() -> object:
+        return SimpleNamespace(
+            data=[
+                SimpleNamespace(id="moonshotai/Kimi-K3"),
+                SimpleNamespace(id="zai-org/GLM-5.3"),
+                SimpleNamespace(id="deepseek/deepseek-v4.1-flash"),
+            ]
+        )
+
+    runner = _endpoint_runner(models_list, model_name="deepseek/deepseek-v4.1-flash")
+    check, endpoint_ok, model_ids = asyncio.run(runner._endpoint_check())
+
+    assert check.passed is True
+    assert check.diagnostic is None
+    assert endpoint_ok is True
+    assert "moonshotai/Kimi-K3" in model_ids
+    presence = runner._model_present_check(endpoint_ok, model_ids)
+    assert presence.passed is True
+    assert presence.observed == "deepseek/deepseek-v4.1-flash"
+
+
+def test_model_present_rejects_bound_name_differing_only_in_case() -> None:
+    async def models_list() -> object:
+        return SimpleNamespace(data=[SimpleNamespace(id="zai-org/GLM-5.3")])
+
+    runner = _endpoint_runner(models_list, model_name="zai-org/glm-5.3")
+    check, endpoint_ok, model_ids = asyncio.run(runner._endpoint_check())
+
+    assert check.passed is True
+    assert endpoint_ok is True
+    presence = runner._model_present_check(endpoint_ok, model_ids)
+    assert presence.passed is False
+    assert presence.observed == "UNAVAILABLE"
+
+
+def test_endpoint_check_reports_reachable_but_missing_bound_target() -> None:
+    async def models_list() -> object:
+        return SimpleNamespace(data=[SimpleNamespace(id="moonshotai/Kimi-K3")])
+
+    runner = _endpoint_runner(models_list, model_name="deepseek/deepseek-v4.1-flash")
+    check, endpoint_ok, model_ids = asyncio.run(runner._endpoint_check())
+
+    assert check.passed is True
+    assert endpoint_ok is True
+    presence = runner._model_present_check(endpoint_ok, model_ids)
+    assert presence.passed is False
+
+
+def test_endpoint_check_still_rejects_control_chars_and_overlong_ids() -> None:
+    async def control_char_id() -> object:
+        return SimpleNamespace(data=[SimpleNamespace(id="bad\x01id")])
+
+    async def overlong_id() -> object:
+        return SimpleNamespace(data=[SimpleNamespace(id="a" * 129)])
+
+    control_check, _, _ = asyncio.run(_endpoint_runner(control_char_id)._endpoint_check())
+    overlong_check, _, _ = asyncio.run(_endpoint_runner(overlong_id)._endpoint_check())
+
+    assert "kind=MALFORMED:entry_id_unsafe" in control_check.diagnostic
+    assert "kind=MALFORMED:entry_id_unsafe" in overlong_check.diagnostic
+
+
+def test_endpoint_check_boundary_length_is_accepted() -> None:
+    async def models_list() -> object:
+        return SimpleNamespace(data=[SimpleNamespace(id="A" + "a" * 127)])
+
+    check, endpoint_ok, model_ids = asyncio.run(_endpoint_runner(models_list)._endpoint_check())
+
+    assert check.passed is True
+    assert endpoint_ok is True
+    assert model_ids == {"A" + "a" * 127}
+
+
 def test_for_project_wires_the_catalog_probe_to_the_provider_client(
     tmp_path,
     monkeypatch,
@@ -304,9 +378,14 @@ def test_run_cascades_model_checks_when_catalog_get_fails(tmp_path, monkeypatch)
     assert "elapsed_ms=" in endpoint_diagnostic
 
 
-def _endpoint_runner(models_list) -> DoctorRunner:
+def _endpoint_runner(models_list, model_name: str | None = None) -> DoctorRunner:
+    settings = (
+        DiagnosticSettings(_env_file=None)
+        if model_name is None
+        else DiagnosticSettings(_env_file=None, model_name=model_name)
+    )
     return DoctorRunner(
-        DiagnosticSettings(_env_file=None),
+        settings,
         Path("."),
         run_command=lambda *_args, **_kwargs: None,
         db_connect=lambda **_kwargs: None,

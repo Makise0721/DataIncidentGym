@@ -26,7 +26,7 @@ doctor 对目录**逐条目**校验，任一非法即整体判 MODEL_ENDPOINT �
 | 预检 | 传输层 | 校验层 | 真实原因 |
 | --- | --- | --- | --- |
 | v25（urllib 探针） | Cloudflare 按 UA 403 | 未到达 | 传输封锁（当时已归因） |
-| v26（SDK 探针） | 成功 | **entry_id_unsafe** | 与 v27 相同；当时"独立复现成功"是因为只测了 `_models_list()` 传输层、未跑 `_endpoint_check` 校验层——复现测错了层，诊断字段给出了决定性证据 |
+| v26（SDK 探针） | 成功 | **entry_id_unsafe** | **与同一校验缺陷一致，尚不能逐次确证**——v26 未保留当次响应或异常证据；已确证的是当时独立复现漏测了校验层（只测 `_models_list` 传输层，未跑 `_endpoint_check`），v27 的 diagnostic 给出了该缺陷的决定性证据 |
 | v27（SDK 探针 + diagnostic） | 成功 | **entry_id_unsafe** | 本文归因 |
 
 "三次目录成功不能反推预检当时失败原因"的判断完全正确；可诊断性优先于重试的裁定被结果验证。
