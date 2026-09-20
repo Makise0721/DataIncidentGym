@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx2
+import pytest
 from openai import AsyncOpenAI
 from pydantic_ai.models import override_allow_model_requests
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -178,6 +179,28 @@ def test_endpoint_check_rejects_unsafe_catalog_entries() -> None:
 
     assert check.passed is False
     assert endpoint_ok is False
+    assert check.diagnostic is not None
+    assert "kind=MALFORMED:entry_id_unsafe" in check.diagnostic
+
+
+def test_catalog_diagnostic_falls_back_to_error_kind_for_unknown_exceptions() -> None:
+    import httpx2
+
+    async def raw_transport_timeout() -> object:
+        raise httpx2.TimeoutException("raw transport timeout")
+
+    async def arbitrary_error() -> object:
+        raise RuntimeError("something unexpected")
+
+    raw_check, _, _ = asyncio.run(_endpoint_runner(raw_transport_timeout)._endpoint_check())
+    arbitrary_check, _, _ = asyncio.run(_endpoint_runner(arbitrary_error)._endpoint_check())
+
+    assert "kind=ERROR" in raw_check.diagnostic
+    assert "exc=TimeoutException" in raw_check.diagnostic
+    assert "raw transport timeout" not in raw_check.diagnostic
+    assert "kind=ERROR" in arbitrary_check.diagnostic
+    assert "exc=RuntimeError" in arbitrary_check.diagnostic
+    assert "something unexpected" not in arbitrary_check.diagnostic
 
 
 def test_for_project_wires_the_catalog_probe_to_the_provider_client(
@@ -274,6 +297,139 @@ def test_run_cascades_model_checks_when_catalog_get_fails(tmp_path, monkeypatch)
     model_plane = result.checks[-3:]
     assert [check.passed for check in model_plane] == [False, False, False]
     assert [check.observed for check in model_plane] == ["UNAVAILABLE"] * 3
+    endpoint_diagnostic = model_plane[0].diagnostic
+    assert endpoint_diagnostic is not None
+    assert "kind=HTTP_403" in endpoint_diagnostic
+    assert "timeout_ms=5000" in endpoint_diagnostic
+    assert "elapsed_ms=" in endpoint_diagnostic
+
+
+def _endpoint_runner(models_list) -> DoctorRunner:
+    return DoctorRunner(
+        DiagnosticSettings(_env_file=None),
+        Path("."),
+        run_command=lambda *_args, **_kwargs: None,
+        db_connect=lambda **_kwargs: None,
+        models_list=models_list,
+        model=SimpleNamespace(),
+        temporary_directory=lambda: None,
+    )
+
+
+def test_catalog_diagnostic_distinguishes_timeout_and_connection_errors() -> None:
+    import httpx2
+    from openai import APIConnectionError, APITimeoutError
+
+    request = httpx2.Request("GET", "https://example.invalid/v1/models")
+
+    async def timeout_list() -> object:
+        raise APITimeoutError(request=request)
+
+    async def connection_list() -> object:
+        raise APIConnectionError(request=request)
+
+    timeout_check, _, _ = asyncio.run(_endpoint_runner(timeout_list)._endpoint_check())
+    connection_check, _, _ = asyncio.run(
+        _endpoint_runner(connection_list)._endpoint_check()
+    )
+
+    assert "kind=TIMEOUT" in timeout_check.diagnostic
+    assert "exc=APITimeoutError" in timeout_check.diagnostic
+    assert "kind=CONNECTION_ERROR" in connection_check.diagnostic
+    assert "exc=APIConnectionError" in connection_check.diagnostic
+
+
+def test_catalog_diagnostic_records_http_status_codes() -> None:
+    import httpx2
+    from openai import APIStatusError
+
+    def status_error(status: int) -> APIStatusError:
+        request = httpx2.Request("GET", "https://example.invalid/v1/models")
+        response = httpx2.Response(status, request=request)
+        return APIStatusError("request rejected", response=response, body=None)
+
+    for status in (401, 403, 429, 500, 503):
+        payload = status_error(status)
+
+        async def models_list(_payload=payload) -> object:
+            raise _payload
+
+        check, _, _ = asyncio.run(_endpoint_runner(models_list)._endpoint_check())
+
+        assert check.diagnostic is not None
+        assert f"kind=HTTP_{status}" in check.diagnostic, check.diagnostic
+        assert "exc=APIStatusError" in check.diagnostic
+
+
+def test_catalog_diagnostic_marks_malformed_stages() -> None:
+    async def not_a_list() -> object:
+        return SimpleNamespace(data="oops")
+
+    async def bad_id_type() -> object:
+        return SimpleNamespace(data=[SimpleNamespace(id=123)])
+
+    async def unsafe_id() -> object:
+        return SimpleNamespace(data=[SimpleNamespace(id="Bad Name!")])
+
+    cases = {
+        "MALFORMED:data_not_list": not_a_list,
+        "MALFORMED:entry_id_type": bad_id_type,
+        "MALFORMED:entry_id_unsafe": unsafe_id,
+    }
+    for expected_kind, models_list in cases.items():
+        check, _, _ = asyncio.run(_endpoint_runner(models_list)._endpoint_check())
+
+        assert check.diagnostic is not None
+        assert f"kind={expected_kind}" in check.diagnostic, check.diagnostic
+
+
+def test_catalog_diagnostic_is_secret_free_and_times_the_failure() -> None:
+    import httpx2
+    from openai import APIStatusError
+
+    request = httpx2.Request("GET", "https://example.invalid/v1/models")
+    response = httpx2.Response(403, request=request)
+    error = APIStatusError(
+        "denied for key sk-DO-NOT-LEAK with body {'error':'x'}",
+        response=response,
+        body=None,
+    )
+
+    async def models_list() -> object:
+        raise error
+
+    runner = _endpoint_runner(models_list)
+    check, _, _ = asyncio.run(runner._endpoint_check())
+
+    assert check.diagnostic is not None
+    assert "sk-DO-NOT-LEAK" not in check.diagnostic
+    assert "denied" not in check.diagnostic
+    assert "body" not in check.diagnostic
+    assert "timeout_ms=5000" in check.diagnostic
+    elapsed = int(check.diagnostic.split("elapsed_ms=")[1])
+    assert elapsed >= 0
+
+
+def test_endpoint_check_success_carries_no_diagnostic() -> None:
+    async def models_list() -> object:
+        return SimpleNamespace(data=[SimpleNamespace(id="mimo-v2.5-pro")])
+
+    check, _, _ = asyncio.run(_endpoint_runner(models_list)._endpoint_check())
+
+    assert check.passed is True
+    assert check.diagnostic is None
+
+
+def test_doctor_check_rejects_diagnostic_on_passed_check() -> None:
+    with pytest.raises(ValueError, match="diagnostic"):
+        doctor_module.DoctorCheck(
+            code=DoctorCheckCode.MODEL_ENDPOINT,
+            passed=True,
+            observed="REACHABLE",
+            reason_code="MODEL_ENDPOINT_PASSED",
+            recommendation_code=None,
+            diagnostic="stage=catalog_list",
+        )
 
 
 def _runner(tmp_path) -> DoctorRunner:

@@ -107,6 +107,36 @@ def test_model_backed_receipt_requires_full_doctor_pass() -> None:
     assert is_receipt_acceptable(model_receipt_with_failed_probe) is False
 
 
+def test_doctor_receipt_round_trips_diagnostic_and_reads_legacy_receipts() -> None:
+    from data_incident_gym.doctor import DoctorCheck, DoctorCheckCode
+
+    diagnostic_check = DoctorCheck(
+        code=DoctorCheckCode.MODEL_ENDPOINT,
+        passed=False,
+        observed="UNAVAILABLE",
+        reason_code="MODEL_ENDPOINT_FAILED",
+        recommendation_code="CHECK_MODEL_ENDPOINT",
+        diagnostic="stage=catalog_list;kind=TIMEOUT;exc=APITimeoutError;timeout_ms=5000;elapsed_ms=5001",
+    )
+    legacy_check = diagnostic_check.model_copy(update={"diagnostic": None})
+    legacy_json = json.loads(legacy_check.model_dump_json())
+    assert "diagnostic" not in legacy_json or legacy_json["diagnostic"] is None
+
+    round_trip = DoctorCheck.model_validate_json(diagnostic_check.model_dump_json())
+    assert round_trip.diagnostic == diagnostic_check.diagnostic
+
+    legacy_receipt_check = {
+        "code": "MODEL_ENDPOINT",
+        "passed": False,
+        "observed": "UNAVAILABLE",
+        "reason_code": "MODEL_ENDPOINT_FAILED",
+        "recommendation_code": "CHECK_MODEL_ENDPOINT",
+    }
+    legacy_check = DoctorCheck.model_validate(legacy_receipt_check)
+    assert legacy_check.diagnostic is None
+    assert legacy_check.passed is False
+
+
 def test_receipt_rejects_scope_mismatch_against_selected_cells(
     tmp_path: Path,
 ) -> None:

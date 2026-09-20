@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import subprocess
+import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal, Self
 
 import psycopg
+from openai import APIConnectionError, APITimeoutError
 from pydantic import BaseModel, ConfigDict, StrictBool, StrictStr, model_validator
 from pydantic_ai import Agent, ModelRetry, RunContext, UsageLimits
 from pydantic_ai.models import Model
@@ -101,6 +103,16 @@ class DoctorCheck(BaseModel):
     observed: StrictStr
     reason_code: StrictStr
     recommendation_code: StrictStr | None
+    #: Secret-free failure summary (stage, exception class, HTTP status,
+    #: timeout and latency). Present only on failed checks that can produce
+    #: one; older receipts without the field read as None.
+    diagnostic: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def validate_diagnostic(self) -> Self:
+        if self.passed and self.diagnostic is not None:
+            raise ValueError("passed checks must not carry a diagnostic")
+        return self
 
 
 class DoctorResult(BaseModel):
@@ -144,6 +156,51 @@ class DoctorProbeOutput(BaseModel):
 @dataclass
 class ProbeState:
     tool_called: bool = False
+
+
+class _CatalogResponseError(Exception):
+    """Raised when the catalog response shape fails validation."""
+
+    def __init__(self, stage: str) -> None:
+        super().__init__(stage)
+        self.stage = stage
+
+
+def _catalog_diagnostic(
+    exc: Exception,
+    *,
+    timeout_seconds: int,
+    elapsed_ms: int,
+) -> str:
+    """Build a deterministic, secret-free failure summary for the catalog probe.
+
+    Only the failure kind, the exception class name, an integer HTTP status,
+    the configured timeout and the measured latency may appear; exception
+    messages, response bodies and headers are deliberately excluded so the
+    summary can never carry credentials or unfiltered payload text.
+
+    Production exceptions arrive wrapped by the OpenAI SDK (APITimeoutError /
+    APIConnectionError / APIStatusError family); only injected fakes can raise
+    raw transport exceptions, which fall back to ``kind=ERROR`` with the class
+    name still recorded for attribution.
+    """
+
+    if isinstance(exc, _CatalogResponseError):
+        kind = f"MALFORMED:{exc.stage}"
+    elif isinstance(exc, APITimeoutError):
+        kind = "TIMEOUT"
+    elif isinstance(exc, APIConnectionError):
+        kind = "CONNECTION_ERROR"
+    else:
+        status_code = getattr(exc, "status_code", None)
+        kind = f"HTTP_{status_code}" if isinstance(status_code, int) else "ERROR"
+    return (
+        "stage=catalog_list;"
+        f"kind={kind};"
+        f"exc={type(exc).__name__};"
+        f"timeout_ms={timeout_seconds * 1000};"
+        f"elapsed_ms={elapsed_ms}"
+    )
 
 
 class DoctorRunner:
@@ -195,6 +252,8 @@ class DoctorRunner:
         code: DoctorCheckCode,
         passed: bool,
         observed: str,
+        *,
+        diagnostic: str | None = None,
     ) -> DoctorCheck:
         safe_observed = observed if passed else "UNAVAILABLE"
         return DoctorCheck(
@@ -203,6 +262,7 @@ class DoctorRunner:
             observed=safe_observed,
             reason_code=f"{code.value}_{'PASSED' if passed else 'FAILED'}",
             recommendation_code=None if passed else RECOMMENDATION_BY_CHECK[code],
+            diagnostic=diagnostic,
         )
 
     @staticmethod
@@ -525,22 +585,37 @@ class DoctorRunner:
         stack, no automatic retries) instead of a bare urllib request.
         """
 
+        started = time.monotonic()
         try:
             page = await self._models_list()
             entries = getattr(page, "data", None)
             if not isinstance(entries, list):
-                raise ValueError("invalid models response")
+                raise _CatalogResponseError("data_not_list")
             model_ids = set()
             for item in entries:
                 model_id = getattr(item, "id", None)
-                if (
-                    not isinstance(model_id, str)
-                    or _SAFE_MODEL_NAME.fullmatch(model_id) is None
-                ):
-                    raise ValueError("invalid model entry")
+                if not isinstance(model_id, str):
+                    raise _CatalogResponseError("entry_id_type")
+                if _SAFE_MODEL_NAME.fullmatch(model_id) is None:
+                    raise _CatalogResponseError("entry_id_unsafe")
                 model_ids.add(model_id)
-        except Exception:
-            return self._check(DoctorCheckCode.MODEL_ENDPOINT, False, "UNAVAILABLE"), False, set()
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            diagnostic = _catalog_diagnostic(
+                exc,
+                timeout_seconds=_URL_TIMEOUT_SECONDS,
+                elapsed_ms=elapsed_ms,
+            )
+            return (
+                self._check(
+                    DoctorCheckCode.MODEL_ENDPOINT,
+                    False,
+                    "UNAVAILABLE",
+                    diagnostic=diagnostic,
+                ),
+                False,
+                set(),
+            )
         return self._check(DoctorCheckCode.MODEL_ENDPOINT, True, "REACHABLE"), True, model_ids
 
     def _model_present_check(self, endpoint_ok: bool, model_ids: set[str]) -> DoctorCheck:
