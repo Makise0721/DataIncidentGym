@@ -35,8 +35,9 @@ INSUFFICIENT_EVIDENCE 通过要求缺口集合精确相等且全部合同工具�
   `event_type == "TOOL_TRACE"` 过滤，真实字面量为 `TOOL_CALL`，导致 `refusal_witnessed` 恒假。
   该缺陷已独立发现并修复（提交 `600da53`），基线报告未见证数同步更正为 v30 seq 15 一例）。
 - **回归断言**：拒绝集与上述集合逐格相等；8 个 PASSED 格全部接受；4 个反事实变体全部接受
-  （变体 13 按所有者完整配方重建：补已采 schema 与根因引用，**并断言其 evaluator PASSED**——
-  审计实测仅补根因引用不足使其 PASSED）。
+  （变体 13 按所有者完整配方重建：绑定**已采 schema 与根因 claim** 的引用——审计实测仅补
+  根因引用**不足以**使其 PASSED；回归断言重建后的变体 evaluator PASSED。两批 seq 13 的事实：
+  均为 `orphan_payment_coupon_a / STATIC_SKILL`，整改版报告生成表已按此正确显示）。
 
 ## 2. 可重试性 Fork（**待所有者裁决**）
 
@@ -51,6 +52,16 @@ INSUFFICIENT_EVIDENCE 通过要求缺口集合精确相等且全部合同工具�
   机制与重试提示可挂载；static 需要在终局提交流程加同类 validator 钩子）。真正可重试（消耗输出
   重试预算与模型请求）、证据保留、拒绝码可观测；代价：改动输出校验路径，范围更大。
 - 门语义（§1）在两种方案下一致，差异只在触发点与终态后果。
+
+### 2.1 所有者对 D2 的三条约束（实施时必须同时满足）
+
+1. **validator 自身异常 fail-closed**：门校验代码内部任何异常都不得放行提交——异常转换为固定
+   `GATE_INTERNAL_ERROR` 拒绝（可重试），耗尽后进入 §下方定义的终态；绝无"因门崩溃而通过"。
+2. **重试耗尽终态明确且拒绝码可见**：输出重试预算（2 次）耗尽时必须产生定义明确的终态与可见
+   拒绝码（`MODEL_OUTPUT_RETRY_EXHAUSTED` 语义，落入归档 summary/轨迹），不得静默接受；测试钉住。
+3. **planner target_refusals 缺口随本次修复**：planner 归档 trace 未复制 `target_refusals`
+   的既有缺口（`planner_agent.py:331-339` vs `strategy_adapter.py:252`）在本次一并修复，
+   并以回归钉住（v2 batch 拒绝可被见证）。
 
 ## 3. 数据缝与接线（按审计唯一化）
 
