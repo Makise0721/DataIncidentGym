@@ -118,3 +118,14 @@ INSUFFICIENT_EVIDENCE 通过要求缺口集合精确相等且全部合同工具�
 
 - 外部 harness 会话（`strategy_bridge`、`examples/isolation_acceptance.py`）的门安装推迟（F6）：两者不在冻结测量路径；实施时须同步核对其固定码断言与提交预算序列。
 - `PlanTraceEvent` 合同未动；planner 门留痕复用既有 `EvidenceGateTraceEvent`（run 结果层，无冻结 schema 漂移）。
+
+### 6.1 复审记录（第二次独立审计：PASS WITH FINDINGS）
+
+两 BLOCKER 以 A/B 复现证明修复（无会话静默接受 → 已消失；有会话证据清空 → 已消失且证据保留）；F3（集成测试实跑通过：evaluation 1 passed、planner 4 passed）、F4、F7、语料回归与 kernel 形状重放（15 个 kernel 格结果与 Diagnosis 重放逐格相同、零 GATE_INTERNAL_ERROR）全部确认。复审发现与处置：
+
+| 项 | 级别 | 处置 |
+| --- | --- | --- |
+| M1：e2e 工厂加参未透传（该路径静默无门） | MINOR | 已修复：透传 `submission_policy` 至 `DiagnosisRunner.for_run` |
+| N1：planner 门事件排在 plan 事件之前（非时序）；`_plan_events` 返回类型放宽为 `list[Any]` | NOTE | 已修复：门事件移至 plan 事件之后（提交发生在动作之后），保持时间序；宽松注解保留（混合事件类型） |
+| N2：`SCENARIO_LOAD_FAILED` 评估与健康恢复的产物校验冲突（既有耦合，F7 使其在瞬时装载失败时可达） | NOTE | 记录：方向 fail-closed（中止而非无门通过）；若后续需要该组合，另行小修 `_failed_evaluation` 的 recovery 组合 |
+| N3：门致耗尽的 `MODEL_PROTOCOL` 事件归因为 `error_origin=UNKNOWN` | NOTE | 记录：拒绝码经 `EVIDENCE_GATE` 事件与终态 summary 可见，归因字段不额外改动 |
