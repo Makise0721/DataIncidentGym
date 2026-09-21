@@ -437,14 +437,7 @@ def _plan_events(deps: PlannerDeps) -> list[Any]:
     their fixed codes, so archives name why a submission was refused.
     """
 
-    events: list[Any] = [
-        EvidenceGateTraceEvent(
-            event_type="EVIDENCE_GATE",
-            reason_code=refusal["code"],
-            accepted=False,
-        )
-        for refusal in deps.gate_refusals
-    ]
+    events: list[Any] = []
     for turn in deps.turns:
         is_step = turn["tool"] == "plan_step"
         events.append(
@@ -462,6 +455,16 @@ def _plan_events(deps: PlannerDeps) -> list[Any]:
                 reason=None if is_step else turn.get("reason"),
             )
         )
+    # Gate refusals happen when the model submits, i.e. after its action
+    # turns; keep the archive in chronological order.
+    events.extend(
+        EvidenceGateTraceEvent(
+            event_type="EVIDENCE_GATE",
+            reason_code=refusal["code"],
+            accepted=False,
+        )
+        for refusal in deps.gate_refusals
+    )
     return events
 
 

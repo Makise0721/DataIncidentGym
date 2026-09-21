@@ -1920,6 +1920,7 @@ def _runner(project_root: Path, strategy: DiagnosticStrategy) -> EvaluationRunne
                 provider="pydantic-function",
                 model="m7-evidence-driven-function-model",
             ),
+            submission_policy=submission_policy,
         )
 
     return EvaluationRunner(
