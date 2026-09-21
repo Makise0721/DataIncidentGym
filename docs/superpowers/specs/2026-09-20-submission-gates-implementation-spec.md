@@ -97,3 +97,24 @@ INSUFFICIENT_EVIDENCE 通过要求缺口集合精确相等且全部合同工具�
 ## 5. 明确不做
 
 不改提示词（I3 另行）、不改 evaluator/评分、不改归档、不重冻、不做真实验证与测量。
+
+## 6. 整改记录（v2.1，按实施审计 FAIL 的逐项处置）
+
+实施审计（`579d35f..53a4445`）结论 FAIL：两 BLOCKER 均在 kernel 路径。整改提交 `c24f650`：
+
+| 审计项 | 处置 |
+| --- | --- |
+| F1 BLOCKER：I1 无法评估 `KernelDecision` 的 `ClaimEvidence`（合法 CONFIRMED 决策必被拒为内部错误） | 新增 `_ProjectedKernelSubmission`：把候选决策投影为诊断 claim 形状（`_claim_evidence_to_diagnosis_claim`，与终局 `_claims_to_diagnosis_claims` 同源）；门在投影上评估 |
+| F2 BLOCKER：门在 `kernel.finalize` 之后（内核已锁、重试不可能 → 静默接受或清空归档） | 门移到 `finalize` **之前**；拒绝 → 可重试（内核仍开放）；耗尽 → `MODEL_OUTPUT_RETRY_EXHAUSTED` 终态且内核证据保留（`diagnostic_kernel._SAFE_MODEL_ERRORS` 同步加码） |
+| F3 MAJOR：三个工厂未更新（e2e 矩阵、两个集成） | 全部更新并传入 policy（e2e 工厂同步加参） |
+| F4 MAJOR：planner 门拒绝无 trace 留痕、耗尽映射缺失 | `PlannerDeps.gate_refusals` 台账 + `_plan_events` 渲染 `EvidenceGateTraceEvent`；耗尽按门标记映射新码；planner 码表加码 |
+| F5 MINOR：缺 NO_INCIDENT/HEALTH_STATE 与 kernel 门用例 | 新增：CONFIRMED 合同跳过 HEALTH_STATE、NO_INCIDENT 合同检查 HEALTH_STATE、kernel 投影达 claim 规则（非内部错误）、kernel 门前置+耗尽可见+内核证据保留 |
+| F7 MINOR：早加载失败后二次装载成功 = 静默无门 | 单次装载语义：早期装载失败即走既有 `SCENARIO_LOAD_FAILED`，不再重试装载 |
+| F6/F9/F10/F11/F12 NOTE | F6：外部 harness 会话（`strategy_bridge`/`isolation_acceptance`）装门**推迟并登记于"明确不做"**（非测量路径）；F9：门标记粒度为 validator 调用，记录为已接受边界；F10：§1 措辞更正——I1 三格中 v29 seq 13 还失败 `REQUIRED_EVIDENCE_TYPES_PRESENT`，拒绝仍由支撑规则驱动；F11：planner 门先于 `session.submit` 的顺序偏离已记录（方向安全：仍是可重试拒绝）；F12：语料回归增加 KernelDecision 形状重放（经同一投影），与 Diagnosis 重放结果逐格一致、零内部错误 |
+
+整改后证据：单测 **1089 passed / 5 skipped**；语料回归拒绝集逐格精确（v29 I1={9,13}；v30 I1={9}、I2={8}），8 个 PASSED 格与 4 个反事实变体全部接受，kernel 形状重放零不一致、零 `GATE_INTERNAL_ERROR`。
+
+## 7. 明确不做（补充）
+
+- 外部 harness 会话（`strategy_bridge`、`examples/isolation_acceptance.py`）的门安装推迟（F6）：两者不在冻结测量路径；实施时须同步核对其固定码断言与提交预算序列。
+- `PlanTraceEvent` 合同未动；planner 门留痕复用既有 `EvidenceGateTraceEvent`（run 结果层，无冻结 schema 漂移）。
