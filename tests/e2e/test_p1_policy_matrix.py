@@ -1875,6 +1875,7 @@ def _runner(project_root: Path, strategy: DiagnosticStrategy) -> EvaluationRunne
     def diagnosis_factory(
         run_id: str,
         selected_strategy: DiagnosticStrategy,
+        submission_policy: object | None = None,
     ) -> DiagnosisRunner | FixedRuleRunner:
         assert selected_strategy is strategy
         if selected_strategy is DiagnosticStrategy.FIXED_RULE:

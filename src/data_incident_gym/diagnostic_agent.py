@@ -2421,39 +2421,71 @@ def _execute_evidence(
     return accepted
 
 
+def _claim_evidence_to_diagnosis_claim(claim: object) -> object | None:
+    """Project one kernel ``ClaimEvidence`` onto the diagnosis claim shapes.
+
+    The evaluator's support rules read the diagnosis claim fields
+    (``root_cause_code``/``asset``/health fields); kernel submissions carry
+    ``ClaimEvidence`` instead, so the submission gates evaluate a projection
+    with exactly the shape the evaluator will judge after the kernel outcome
+    is materialized.
+    """
+
+    if claim.kind is ClaimKind.ROOT_CAUSE:
+        return RootCauseClaim(
+            kind="ROOT_CAUSE",
+            root_cause_code=claim.value,
+            evidence_ids=claim.evidence_ids,
+        )
+    if claim.kind is ClaimKind.AFFECTED_ASSET:
+        return AffectedAssetClaim(
+            kind="AFFECTED_ASSET",
+            asset=claim.value,
+            evidence_ids=claim.evidence_ids,
+        )
+    if claim.kind is ClaimKind.HEALTH_STATE:
+        return HealthStateClaim(
+            kind="HEALTH_STATE",
+            relation_name=claim.relation_name,
+            history_name=claim.history_name,
+            bucket=claim.bucket,
+            current_value=claim.current_value,
+            evidence_ids=claim.evidence_ids,
+        )
+    return None
+
+
+def _project_kernel_claims(claims: object) -> tuple[object, ...]:
+    projected = (
+        _claim_evidence_to_diagnosis_claim(claim)
+        for claim in claims  # type: ignore[attr-defined]
+    )
+    return tuple(item for item in projected if item is not None)
+
+
+class _ProjectedKernelSubmission:
+    """The gate-visible projection of a candidate kernel decision.
+
+    Projection failures collapse the claims to a non-iterable sentinel: the
+    policy then refuses with ``GATE_INTERNAL_ERROR`` (constraint 1) instead of
+    throwing, and the projection is only ever built while a policy is active.
+    """
+
+    def __init__(self, decision: object) -> None:
+        self.status = getattr(decision, "status", None)
+        try:
+            self.claims = _project_kernel_claims(decision.claims)  # type: ignore[attr-defined]
+        except Exception:
+            self.claims = None
+        self.unresolved_evidence = getattr(decision, "unresolved_evidence", ())
+
+
 def _claims_to_diagnosis_claims(state: _RunState) -> tuple[object, ...]:
     if state.kernel is None:
         return ()
-    claims: list[object] = []
-    for claim in state.kernel.snapshot(model_requests_used=state.usage.requests).claims:
-        if claim.kind is ClaimKind.ROOT_CAUSE:
-            claims.append(
-                RootCauseClaim(
-                    kind="ROOT_CAUSE",
-                    root_cause_code=claim.value,
-                    evidence_ids=claim.evidence_ids,
-                )
-            )
-        elif claim.kind is ClaimKind.AFFECTED_ASSET:
-            claims.append(
-                AffectedAssetClaim(
-                    kind="AFFECTED_ASSET",
-                    asset=claim.value,
-                    evidence_ids=claim.evidence_ids,
-                )
-            )
-        elif claim.kind is ClaimKind.HEALTH_STATE:
-            claims.append(
-                HealthStateClaim(
-                    kind="HEALTH_STATE",
-                    relation_name=claim.relation_name,
-                    history_name=claim.history_name,
-                    bucket=claim.bucket,
-                    current_value=claim.current_value,
-                    evidence_ids=claim.evidence_ids,
-                )
-            )
-    return tuple(claims)
+    return _project_kernel_claims(
+        state.kernel.snapshot(model_requests_used=state.usage.requests).claims
+    )
 
 
 def _diagnosis_from_kernel(state: _RunState, outcome: KernelOutcome) -> Diagnosis:
@@ -2703,6 +2735,28 @@ class DiagnosisRunner:
                     current.kernel_rejection_attempt = None
                     code = reasons[0] if reasons else "MODEL_PROTOCOL_ERROR"
                     raise ModelRetry(_kernel_retry_message(code)) from None
+                refusal = (
+                    _submission_gate_refusal(
+                        current, _ProjectedKernelSubmission(decision)
+                    )
+                    if current.submission_policy is not None
+                    else None
+                )
+                if refusal is not None:
+                    # The gate runs BEFORE finalize: the kernel stays open, so
+                    # a retry can submit a corrected decision.
+                    current.last_refusal_was_gate = True
+                    current.kernel_rejection_attempt = None
+                    current.current_output_details = None
+                    current.current_output_tool = _kernel_output_tool_for(output)
+                    current.trace.append(
+                        EvidenceGateTraceEvent(
+                            event_type="EVIDENCE_GATE",
+                            reason_code=refusal.code,
+                            accepted=False,
+                        )
+                    )
+                    raise ModelRetry(f"{refusal.code}: {refusal.message}") from None
                 try:
                     outcome = current.kernel.finalize(decision)
                 except KernelError as error:
@@ -2743,18 +2797,6 @@ class DiagnosisRunner:
                         _kernel_retry_message(error.code, detail=error.detail)
                     ) from None
                 current.outcome = outcome
-                refusal = _submission_gate_refusal(current, decision)
-                if refusal is not None:
-                    current.last_refusal_was_gate = True
-                    current.kernel_rejection_attempt = None
-                    current.trace.append(
-                        EvidenceGateTraceEvent(
-                            event_type="EVIDENCE_GATE",
-                            reason_code=refusal.code,
-                            accepted=False,
-                        )
-                    )
-                    raise ModelRetry(f"{refusal.code}: {refusal.message}") from None
                 current.trace.append(
                     EvidenceGateTraceEvent(
                         event_type="EVIDENCE_GATE",

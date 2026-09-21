@@ -223,8 +223,13 @@ class EvaluationRunner:
                 early_scenario: ScenarioSpec | None = self._private_scenario_loader(
                     incident_case_id
                 )
+                early_load_failed = False
             except Exception:
+                # One load attempt only: a failed load must not silently
+                # re-succeed later and leave this cell gated away (constraint 1
+                # spirit); the SCENARIO_LOAD_FAILED evaluation path below runs.
                 early_scenario = None
+                early_load_failed = True
             submission_policy = (
                 SubmissionPolicy(early_scenario)
                 if early_scenario is not None
@@ -275,19 +280,15 @@ class EvaluationRunner:
 
         scenario: ScenarioSpec | None = None
         verification: ScenarioVerification | None = None
-        try:
-            scenario = (
-                early_scenario
-                if early_scenario is not None
-                else self._private_scenario_loader(incident_case_id)
-            )
-        except Exception:
+        if early_load_failed:
+            scenario = None
             evaluation = _failed_evaluation(
                 incident_case_id,
                 scenario_run.run_id,
                 "SCENARIO_LOAD_FAILED",
             )
         else:
+            scenario = early_scenario
             try:
                 verification = self._private_verification_loader(scenario_run.run_id)
             except Exception:

@@ -468,12 +468,17 @@ def _runner(project_root: Path) -> EvaluationRunner:
     settings = Settings(_env_file=None)
     diagnostic_settings = DiagnosticSettings(_env_file=None)
 
-    def diagnosis_factory(run_id: str, strategy: DiagnosticStrategy):
+    def diagnosis_factory(
+        run_id: str,
+        strategy: DiagnosticStrategy,
+        submission_policy: object | None = None,
+    ):
         assert strategy is DiagnosticStrategy.EVIDENCE_PLANNER
         return EvidencePlannerRunner.for_run(
             run_id,
             diagnostic_settings,
             project_root,
+            submission_policy=submission_policy,
             model=FunctionModel(partial(_director, run_id=run_id)),
             model_identity=ModelIdentity(
                 provider="pydantic-function",

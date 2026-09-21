@@ -307,6 +307,11 @@ class PlannerDeps:
     #: One entry per action-tool call, in order — the model's own view, kept for
     #: trace building. ``StrategySession.snapshot`` stays authoritative.
     turns: list[dict[str, Any]] = field(default_factory=list)
+    #: Submission-gate refusals (D2): fixed codes only, one per refusal, in
+    #: order. Rendered as EVIDENCE_GATE events so archives name the refusal.
+    gate_refusals: list[dict[str, Any]] = field(default_factory=list)
+    #: Whether the LAST validator refusal came from a submission gate.
+    last_refusal_was_gate: bool = False
 
 
 def register_planner_tools(agent: Any) -> None:

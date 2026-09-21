@@ -117,3 +117,65 @@ def test_kernel_decision_shaped_submissions_use_the_same_gates() -> None:
 
     assert refusal is not None
     assert refusal.code == GAP_RECEIPT_REQUIRED
+
+_NO_INCIDENT_CASE = "order_volume_within_sla"
+
+
+def test_confirmed_contract_skips_non_applicable_health_claims() -> None:
+    policy = _confirmed_policy()
+    submission = SimpleNamespace(
+        claims=(_claim("HEALTH_STATE", ("ev_" + "a" * 64,)),),
+        unresolved_evidence=(),
+    )
+
+    # HEALTH_STATE carries no support rule under a CONFIRMED contract, so the
+    # gate skips it (fail-open direction, matching the evaluator's gate).
+    assert policy.check(submission, records=(), trace=()) is None
+
+
+def test_no_incident_contract_checks_health_claims() -> None:
+    policy = SubmissionPolicy(load_scenario_spec(_NO_INCIDENT_CASE))
+    submission = SimpleNamespace(
+        claims=(_claim("HEALTH_STATE", ("ev_" + "a" * 64,)),),
+        unresolved_evidence=(),
+    )
+
+    refusal = policy.check(submission, records=(), trace=())
+
+    assert refusal is not None
+    assert refusal.code == CLAIM_SUPPORT_REQUIRED
+
+
+def test_kernel_decision_projection_reaches_the_claim_rules() -> None:
+    from data_incident_gym.diagnostic_agent import _ProjectedKernelSubmission
+    from data_incident_gym.diagnostic_contracts import (
+        ClaimEvidence,
+        ClaimKind,
+        KernelDecision,
+    )
+
+    decision = KernelDecision(
+        status="CONFIRMED",
+        run_id="a" * 32,
+        selected_hypothesis_id="h_loss",
+        assessments=(),
+        claims=(
+            ClaimEvidence(
+                kind=ClaimKind.ROOT_CAUSE,
+                value="SOURCE_REQUIRED_FIELD_NULL",
+                evidence_ids=("ev_" + "0" * 64,),
+            ),
+        ),
+        unresolved_evidence=(),
+        summary="x",
+        recommended_actions=(),
+        confidence=0.9,
+    )
+    policy = _confirmed_policy()
+
+    refusal = policy.check(_ProjectedKernelSubmission(decision), records=(), trace=())
+
+    # The projection makes the claim evaluable: the refusal is the claim rule,
+    # never GATE_INTERNAL_ERROR from a shape mismatch.
+    assert refusal is not None
+    assert refusal.code == CLAIM_SUPPORT_REQUIRED

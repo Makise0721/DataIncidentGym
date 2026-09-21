@@ -44,6 +44,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
+    EvidenceGateTraceEvent,
     PlanObligationRecord,
     PlanTraceEvent,
     ToolTraceEvent,
@@ -90,6 +91,7 @@ MODEL_ERROR_REASONS = frozenset(
         "MODEL_TOOL_CALL_LIMIT",
         "MODEL_TIMEOUT",
         "MODEL_PROTOCOL_ERROR",
+        "MODEL_OUTPUT_RETRY_EXHAUSTED",
         "MODEL_RUNTIME_ERROR",
         "RUN_SETUP_ERROR",
     }
@@ -237,7 +239,7 @@ class EvidencePlannerRunner:
             session's own submission-refusal budget.
             """
 
-            del ctx
+            ctx.deps.last_refusal_was_gate = False
             refusal = None
             policy = self._submission_policy
             if policy is not None:
@@ -247,6 +249,8 @@ class EvidencePlannerRunner:
                     trace=self._tool_trace_events(),
                 )
             if refusal is not None:
+                ctx.deps.last_refusal_was_gate = True
+                ctx.deps.gate_refusals.append({"code": refusal.code})
                 raise ModelRetry(f"{refusal.code}: {refusal.message}")
             receipt = self._session.submit(submission)
             if receipt.accepted and receipt.diagnosis is not None:
@@ -303,7 +307,12 @@ class EvidencePlannerRunner:
         except UsageLimitExceeded as error:
             return self._terminal(_usage_limit_reason(error), started_at, started, deps, usage)
         except UnexpectedModelBehavior:
-            return self._terminal("MODEL_PROTOCOL_ERROR", started_at, started, deps, usage)
+            reason = (
+                "MODEL_OUTPUT_RETRY_EXHAUSTED"
+                if deps.last_refusal_was_gate
+                else "MODEL_PROTOCOL_ERROR"
+            )
+            return self._terminal(reason, started_at, started, deps, usage)
         except Exception:
             return self._terminal("MODEL_RUNTIME_ERROR", started_at, started, deps, usage)
 
@@ -421,10 +430,21 @@ class EvidencePlannerRunner:
         return self._model_identity
 
 
-def _plan_events(deps: PlannerDeps) -> list[PlanTraceEvent]:
-    """One plan event per declared step/close, in the order the model made them."""
+def _plan_events(deps: PlannerDeps) -> list[Any]:
+    """One plan event per declared step/close, in the order the model made them.
 
-    events: list[PlanTraceEvent] = []
+    Submission-gate refusals are rendered first, as EVIDENCE_GATE events with
+    their fixed codes, so archives name why a submission was refused.
+    """
+
+    events: list[Any] = [
+        EvidenceGateTraceEvent(
+            event_type="EVIDENCE_GATE",
+            reason_code=refusal["code"],
+            accepted=False,
+        )
+        for refusal in deps.gate_refusals
+    ]
     for turn in deps.turns:
         is_step = turn["tool"] == "plan_step"
         events.append(

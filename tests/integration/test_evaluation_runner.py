@@ -188,13 +188,18 @@ def _runner(project_root: Path) -> EvaluationRunner:
     settings = Settings(_env_file=None)
     diagnostic_settings = DiagnosticSettings(_env_file=None)
 
-    def diagnosis_factory(run_id: str, strategy: DiagnosticStrategy) -> DiagnosisRunner:
+    def diagnosis_factory(
+        run_id: str,
+        strategy: DiagnosticStrategy,
+        submission_policy: object | None = None,
+    ) -> DiagnosisRunner:
         assert strategy is DiagnosticStrategy.STATIC_SKILL
         return DiagnosisRunner.for_run(
             run_id,
             diagnostic_settings,
             strategy,
             project_root,
+            submission_policy=submission_policy,
             model=FunctionModel(partial(_static_diagnosis, run_id=run_id)),
             model_identity=ModelIdentity(
                 provider="pydantic-function",

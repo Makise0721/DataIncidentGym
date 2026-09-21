@@ -1104,3 +1104,67 @@ def test_validator_exception_fails_closed(tmp_path: Path) -> None:
     # Constraint 1: a broken gate must never let the submission through.
     assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
     assert result.diagnosis.summary == "MODEL_RUNTIME_ERROR"
+
+
+def _kernel_decision_responder() -> object:
+    claim = {
+        "kind": "ROOT_CAUSE",
+        "value": "SOURCE_REQUIRED_FIELD_NULL",
+        "evidence_ids": ["ev_" + "0" * 64],
+    }
+
+    def respond(_messages: object, agent_info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[1].name,
+                    {
+                        "schema_version": "p1.kernel_decision.v1",
+                        "run_id": RUN_ID,
+                        "selected_hypothesis_id": "h_loss",
+                        "assessments": [],
+                        "claims": [claim],
+                        "summary": "The claim cites an unregistered record.",
+                        "recommended_actions": [],
+                        "confidence": 0.9,
+                    },
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    return FunctionModel(respond)
+
+
+def test_kernel_gate_refusal_stays_retryable_and_exhausts_visibly(
+    tmp_path: Path,
+) -> None:
+    _write_public_run(tmp_path)
+    policy = _AlwaysRefusePolicy()
+    runner = DiagnosisRunner.for_run(
+        RUN_ID,
+        _settings(),
+        DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+        tmp_path,
+        model=_kernel_decision_responder(),
+        tools=SimpleNamespace(),
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+        submission_policy=policy,
+    )
+
+    result = asyncio.run(runner.diagnose())
+
+    # The gate runs before finalize, so the kernel stays open across retries;
+    # exhaustion is defined and visible, and the kernel evidence survives.
+    assert result.diagnosis.status is DiagnosisStatus.MODEL_ERROR
+    assert result.diagnosis.summary == "MODEL_OUTPUT_RETRY_EXHAUSTED"
+    assert result.kernel_state is not None
+    assert policy.calls >= 1
+    refusals = [
+        event
+        for event in result.trace
+        if getattr(event, "event_type", None) == "EVIDENCE_GATE"
+        and getattr(event, "reason_code", None) == "GATE_TEST_REFUSAL"
+        and not event.accepted
+    ]
+    assert len(refusals) == policy.calls
