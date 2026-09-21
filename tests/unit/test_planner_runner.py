@@ -513,3 +513,56 @@ def test_planner_settings_model_uses_the_verified_thinking_gateway_profile(proje
         assert runner._owned_model_client.max_retries == 0
     finally:
         asyncio.run(runner._owned_model_client.close())
+
+# -- constraint 3: batch target_refusals survive into the archived trace ------
+
+
+def test_planner_step_records_capture_target_refusals_key(project_root: Path) -> None:
+    runner = _runner(
+        [
+            ("plan_step", {"tool_name": "get_dbt_run_results", "arguments": {"run_id": RUN_ID},
+                           "intent": "read the run"}),
+            *[("close_obligation", {"obligation_id": oid, "outcome": "REVOKED"})
+              for oid in ()],
+        ],
+        project_root,
+    )
+    import asyncio as _asyncio
+
+    _asyncio.run(runner.diagnose())
+
+    records = runner._controller.step_records()
+    assert records
+    assert all("target_refusals" in step for step in records)
+
+
+def test_planner_trace_copies_batch_target_refusals() -> None:
+    from data_incident_gym.diagnosis import TargetRefusal
+    from data_incident_gym.planner_agent import EvidencePlannerRunner
+
+    refusal = TargetRefusal(target="raw_orders", code="RELATION_NOT_ALLOWED")
+
+    class _StubController:
+        def step_records(self):  # type: ignore[no-untyped-def]
+            return (
+                {
+                    "step": 1,
+                    "tool_name": "get_relation_schema_expectation",
+                    "arguments": {"relation_name": "raw_orders"},
+                    "accepted": False,
+                    "error_code": "TARGETS_REFUSED",
+                    "evidence_ids": [],
+                    "elapsed_ms": 5,
+                    "target_refusals": (refusal,),
+                },
+            )
+
+    runner = EvidencePlannerRunner.__new__(EvidencePlannerRunner)
+    runner._run_id = RUN_ID
+    runner._controller = _StubController()
+
+    events = runner._tool_trace_events()
+
+    assert len(events) == 1
+    assert events[0].error_code == "TARGETS_REFUSED"
+    assert events[0].target_refusals == (refusal,)
