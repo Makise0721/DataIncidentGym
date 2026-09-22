@@ -50,7 +50,7 @@ from data_incident_gym.evidence import (
 )
 from data_incident_gym.run_context import IncidentBrief, ObservableRunContext
 
-STRATEGY_PROTOCOL_VERSION = "p1.strategy_adapter.v1"
+STRATEGY_PROTOCOL_VERSION = "p1.strategy_adapter.v2"
 
 PROTOCOL_TOOL_ALLOWLIST = frozenset(
     {

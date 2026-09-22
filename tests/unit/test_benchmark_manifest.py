@@ -200,7 +200,7 @@ def test_manifest_path_rejects_unversioned_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
         manifest_path_for("p2-formal-v1")
     with pytest.raises(BenchmarkManifestError):
-        manifest_path_for("p1-formal-v31")
+        manifest_path_for("p1-formal-v32")
 
 
 def test_build_manifest_accepts_approved_rerun_identities() -> None:
@@ -234,6 +234,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
         "p1-formal-v28",
         "p1-formal-v29",
         "p1-formal-v30",
+        "p1-formal-v31",
     ):
         manifest = build_manifest(
             "b" * 40,
@@ -248,7 +249,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
 
 def test_build_manifest_rejects_unapproved_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
-        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v31")
+        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v32")
 
 
 def test_both_approved_model_pairings_build_the_same_schedule() -> None:
@@ -376,7 +377,15 @@ def test_frozen_v22_policy_surfaces_still_match_the_current_tree() -> None:
     identity digests and the final-diagnosis schema digest of the six frozen
     strategies. A shared-schema change (for example widening a diagnosis
     vocabulary) fails here instead of silently invalidating sealed identities.
+
+    M24 (2026-09-21) protocol identity upgrade: ``CONTROLLER_PROTOCOL_VERSION``
+    v19 -> v20 intentionally re-binds the controller protocol payload for the
+    five model strategies, so those two fields are compared for *expected*
+    drift (v19 before, v20 now) and excluded from the equality assertion.
+    ``FIXED_RULE`` binds its own ``p1.fixed-rule.v1`` and must not move at all.
     """
+
+    _CONTROLLER_IDENTITY_KEYS = {"controller_protocol_version", "controller_protocol_sha256"}
 
     frozen = json.loads(
         (PROJECT_ROOT / "config" / "benchmark" / "p1-formal-v22.json").read_text(
@@ -388,4 +397,36 @@ def test_frozen_v22_policy_surfaces_still_match_the_current_tree() -> None:
         for strategy in FROZEN_POLICY_STRATEGIES
     ]
 
-    assert current == frozen["policies"]
+    def _without_controller_identity(policies: list[dict]) -> list[dict]:
+        return [
+            {
+                **policy,
+                "policy_identity": {
+                    key: value
+                    for key, value in policy["policy_identity"].items()
+                    if key not in _CONTROLLER_IDENTITY_KEYS
+                },
+            }
+            for policy in policies
+        ]
+
+    assert _without_controller_identity(current) == _without_controller_identity(
+        frozen["policies"]
+    )
+
+    drifted = {
+        policy["policy_identity"]["strategy"]
+        for policy, sealed in zip(current, frozen["policies"], strict=True)
+        if policy["policy_identity"]["controller_protocol_version"]
+        != sealed["policy_identity"]["controller_protocol_version"]
+    }
+    assert drifted == {
+        "STATIC_SKILL",
+        "DIAGNOSTIC_KERNEL",
+        "NO_TOOL",
+        "KERNEL_NO_LINEAGE",
+        "KERNEL_NO_SCHEMA",
+    }
+    for policy, sealed in zip(current, frozen["policies"], strict=True):
+        if policy["policy_identity"]["strategy"] == "FIXED_RULE":
+            assert policy == sealed

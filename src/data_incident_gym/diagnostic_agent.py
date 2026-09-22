@@ -108,7 +108,7 @@ BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v18"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v19"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v20"
 
 # The model submits one of three terminal-shaped payloads. The name and the
 # description are part of the model-visible contract, so both are recorded in
