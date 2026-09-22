@@ -877,7 +877,7 @@
     "order_volume_pattern_a",
     "order_volume_within_sla"
   ],
-  "implementation_revision": "115299eac028830e4878f1c15100160902f2442f",
+  "implementation_revision": "e5d81d99abbf6803cb3a4351b2f6471ebac57e77",
   "manifest_id": "p1-formal-v31",
   "model_configuration": {
     "base_url": "https://api.commandcode.ai/provider/v1",
