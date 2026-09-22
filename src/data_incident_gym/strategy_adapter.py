@@ -657,6 +657,20 @@ class ProtocolTools:
     def __init__(self, session: StrategySession) -> None:
         self._session = session
 
+    def lineage_node_candidates(self, subjects: tuple[str, ...]) -> tuple[str, ...]:
+        """Project the run catalog's callable lineage nodes for the kernel.
+
+        This is not a protocol tool: it spends no budget, registers no evidence
+        and returns no receipt, so it does not go through ``_call``. The kernel
+        consults it to decide which node IDs ``get_dbt_lineage`` may accept, so
+        the facade must stay transparent for it exactly as it is for the six
+        tool methods; dropping it would leave the kernel with an empty
+        candidate set and refuse every lineage call as unproven.
+        """
+
+        resolver = getattr(self._session._tools, "lineage_node_candidates", None)  # noqa: SLF001
+        return tuple(resolver(subjects)) if callable(resolver) else ()
+
     def _call(self, tool_name: str, arguments: dict[str, str]) -> tuple[EvidenceRecord, ...]:
         request = ToolRequest(
             request_id=f"{tool_name}:{self._session._attempts + 1}",
