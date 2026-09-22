@@ -321,6 +321,55 @@ def test_same_condition_requires_identical_capabilities() -> None:
     assert same_condition(base, narrowed) is False
 
 
+def test_facade_forwards_lineage_node_candidates_without_spending_budget() -> None:
+    """Regression: the facade must stay transparent for the catalog projection.
+
+    ``lineage_node_candidates`` is not a protocol tool — it spends no budget,
+    registers no evidence and returns no receipt — so it must be forwarded
+    verbatim rather than routed through ``call_tool``. Dropping it left the
+    kernel with an empty candidate set, which made it refuse lineage calls for
+    legitimate catalog nodes and stalled the run into ``MODEL_REQUEST_LIMIT``.
+    """
+
+    _CATALOG = frozenset({"seed.jaffle_shop.raw_payments", "model.jaffle_shop.stg_payments"})
+
+    class _CatalogTools(_StaticTools):
+        def lineage_node_candidates(self, subjects: tuple[str, ...]) -> tuple[str, ...]:
+            return tuple(sorted(subject for subject in subjects if subject in _CATALOG))
+
+    tools = _CatalogTools(_run_record())
+    session = StrategySession(
+        run_id="a" * 32,
+        tools=tools,
+        context=_context(),
+        declaration=_declaration(),
+    )
+    subjects = (
+        "seed.jaffle_shop.raw_payments",
+        "raw_payments",
+        "model.jaffle_shop.stg_payments",
+    )
+
+    before = session.snapshot()["tool_call_attempts"]
+    facade = session.tools_facade()
+    forwarded = facade.lineage_node_candidates(subjects)
+    after = session.snapshot()["tool_call_attempts"]
+
+    # identical to the backend, catalogue-derived order preserved
+    assert forwarded == tools.lineage_node_candidates(subjects)
+    assert forwarded == ("model.jaffle_shop.stg_payments", "seed.jaffle_shop.raw_payments")
+    # reading the projection is not a tool attempt and consumes no budget
+    assert after == before
+    # and a backend without the resolver degrades to an empty candidates tuple
+    bare = StrategySession(
+        run_id="a" * 32,
+        tools=_StaticTools(_run_record()),
+        context=_context(),
+        declaration=_declaration(),
+    )
+    assert bare.tools_facade().lineage_node_candidates(subjects) == ()
+
+
 def test_builtin_facade_is_equivalent_to_direct_tools(tmp_path: Path) -> None:
     """T09 acceptance: a built-in runner behind the protocol facade produces the
     same diagnosis, evidence, counters and trace shapes as direct execution."""
