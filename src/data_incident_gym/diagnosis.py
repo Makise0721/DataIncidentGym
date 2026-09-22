@@ -458,12 +458,12 @@ class RejectedAssessmentSummary(BaseModel):
 
 
 class RejectedClaimSummary(BaseModel):
-    """One claim as it stood in the refused submission, bounded and lossy.
+    """One claim as it stood in the refused kernel decision, bounded and lossy.
 
-    ``evidence_ids`` holds the citations that resolved to registered records.
-    The three counts are **explicit for v2 audits** (no defaults), so a missing
-    field can never be read as "zero unregistered citations"; v1 archives omit
-    them and are reported as indeterminable rather than complete.
+    ``evidence_ids`` holds the citations that resolved to registered records;
+    citations the projection could not resolve are counted once, per decision,
+    in ``unknown_evidence_count``. The per-claim counting identity lives on
+    the refusal-audit projection (``AuditClaimSummary``), not here.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -503,6 +503,43 @@ class AuditUnresolvedSummary(BaseModel):
     evidence_kind: NonBlankStr
     reason_code: NonBlankStr
     subject: StrictStr | None = None
+
+
+def derive_claim_recomputability(
+    kind: str,
+    known_value: str | None,
+    unregistered_evidence_refs: int,
+    truncated_evidence_refs: int,
+) -> tuple[bool, str]:
+    """Whether one audited claim's gate verdict can be re-derived offline.
+
+    The single source of this judgement: the audit writer fills the stored
+    ``recomputable`` pair from here, and the offline reader re-derives through
+    the same function instead of trusting the stored boolean. The decision
+    comes from the projection's shape alone — never from the gate's message
+    text (which is fixed and generic) and never from whether the refusal was
+    convenient:
+
+    - a claim with an unregistered citation is re-derivable from the counts
+      alone (the refusal condition is "had an unregistered citation"), without
+      rebuilding the claim;
+    - a claim whose citation list was capped has an incomplete evidence set;
+    - a HEALTH_STATE claim's support rule needs ``history_name``, ``bucket``
+      and ``current_value``, which the projection never keeps;
+    - a ROOT_CAUSE or AFFECTED_ASSET claim whose value the projection redacted
+      cannot be re-judged, because the rule needs the value;
+    - anything else keeps its known fields and re-judges normally.
+    """
+
+    if unregistered_evidence_refs > 0:
+        return True, "RECOMPUTABLE_UNREGISTERED_REF"
+    if truncated_evidence_refs > 0:
+        return False, "NOT_RECOMPUTABLE_TRUNCATED_REFS"
+    if kind == "HEALTH_STATE":
+        return False, "NOT_RECOMPUTABLE_HEALTH_CLAIM_FIELDS"
+    if known_value is None:
+        return False, "NOT_RECOMPUTABLE_REDACTED_CLAIM_VALUE"
+    return True, "RECOMPUTABLE_PROJECTED_CLAIM"
 
 
 class RefusalAudit(BaseModel):

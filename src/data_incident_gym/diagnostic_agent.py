@@ -63,6 +63,7 @@ from data_incident_gym.diagnosis import (
     RootCauseClaim,
     ToolTraceEvent,
     TraceEvent,
+    derive_claim_recomputability,
 )
 from data_incident_gym.diagnostic_config import (
     DiagnosticSettings,
@@ -1279,20 +1280,13 @@ def _refusal_audit(
     *,
     reason_code: str,
     submission: Any,
-    refusal_reason: str,
 ) -> RefusalAudit | None:
     """Preserve the refused submission's bounded inputs for offline review (P-1).
 
-    ``recomputable`` is decided here, deterministically, from the shape of the
-    projection alone — never from whether the refusal happened to be convenient:
-
-    - a claim whose citations are partly unregistered can be re-derived from the
-      counts alone (the refusal condition is "had an unregistered citation"), so
-      it is recomputable without reconstructing the claim;
-    - a claim whose value the projection had to redact cannot be re-judged,
-      because the evaluator's rule needs the value;
-    - a claim whose citation list was capped has an incomplete evidence set;
-    - anything else keeps its known fields and re-judges normally.
+    ``recomputable`` is decided here, deterministically, through
+    ``derive_claim_recomputability`` — the same single source the offline
+    reader re-derives through, so the stored pair can never drift from the
+    reader's own judgement.
 
     Returns ``None`` only when the submission carries no claims to project (the
     reason code still lands on the trace event, and the reader reports the
@@ -1318,29 +1312,27 @@ def _refusal_audit(
     truncated_claim_count = _overflow(claims, _MAX_SUMMARY_ITEMS)
     for claim in claims[:_MAX_SUMMARY_ITEMS]:
         citations = tuple(getattr(claim, "evidence_ids", ()))
-        resolved = tuple(item for item in citations if item in registered)
-        unregistered = len(citations) - len(resolved)
+        # The cap bounds the inspected window of the citation list itself, so a
+        # citation dropped by the cap is counted exactly once (as truncated) and
+        # an unregistered citation inside the window exactly once: the identity
+        # total = kept + unregistered + truncated holds for every combination.
+        window = citations[:_MAX_CLAIM_EVIDENCE_REFS]
         truncated = _overflow(citations, _MAX_CLAIM_EVIDENCE_REFS)
-        resolved_kept = resolved[:_MAX_CLAIM_EVIDENCE_REFS]
+        resolved = tuple(item for item in window if item in registered)
+        unregistered = len(window) - len(resolved)
         kind = _enum_value(getattr(claim, "kind", ""))
         raw_value = getattr(claim, "value", None)
         known_value = raw_value if isinstance(raw_value, str) and raw_value.strip() else None
-
-        if "UNREGISTERED" in refusal_reason and unregistered > 0:
-            recomputable, reason = True, "RECOMPUTABLE_UNREGISTERED_REF"
-        elif kind in {"ROOT_CAUSE", "AFFECTED_ASSET"} and known_value is None:
-            recomputable, reason = False, "NOT_RECOMPUTABLE_REDACTED_CLAIM_VALUE"
-        elif truncated > 0:
-            recomputable, reason = False, "NOT_RECOMPUTABLE_TRUNCATED_REFS"
-        else:
-            recomputable, reason = True, "RECOMPUTABLE_PROJECTED_CLAIM"
+        recomputable, reason = derive_claim_recomputability(
+            kind, known_value, unregistered, truncated
+        )
 
         audit_claims.append(
             AuditClaimSummary(
                 kind=kind,
                 known_value=known_value,
                 relation_name=getattr(claim, "relation_name", None),
-                evidence_ids=resolved_kept,
+                evidence_ids=resolved,
                 total_evidence_refs=len(citations),
                 unregistered_evidence_refs=unregistered,
                 truncated_evidence_refs=truncated,
@@ -2864,7 +2856,6 @@ class DiagnosisRunner:
                                 current,
                                 reason_code=refusal.code,
                                 submission=_ProjectedKernelSubmission(decision),
-                                refusal_reason=refusal.message,
                             ),
                         )
                     )
@@ -2959,7 +2950,6 @@ class DiagnosisRunner:
                             current,
                             reason_code=refusal.code,
                             submission=output,
-                            refusal_reason=refusal.message,
                         ),
                     )
                 )
