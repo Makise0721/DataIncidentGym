@@ -458,12 +458,72 @@ class RejectedAssessmentSummary(BaseModel):
 
 
 class RejectedClaimSummary(BaseModel):
+    """One claim as it stood in the refused submission, bounded and lossy.
+
+    ``evidence_ids`` holds the citations that resolved to registered records.
+    The three counts are **explicit for v2 audits** (no defaults), so a missing
+    field can never be read as "zero unregistered citations"; v1 archives omit
+    them and are reported as indeterminable rather than complete.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     kind: Literal["ROOT_CAUSE", "AFFECTED_ASSET", "HEALTH_STATE"]
     known_value: StrictStr | None = None
     relation_name: StrictStr | None = None
     evidence_ids: tuple[StrictStr, ...] = ()
+
+
+class AuditClaimSummary(BaseModel):
+    """Per-claim audit record for one refusal (``p1.refusal_audit.v1``).
+
+    Every citation the claim carried is accounted for by
+    ``total_evidence_refs = len(evidence_ids) + unregistered_evidence_refs
+    + truncated_evidence_refs``. ``recomputable`` is decided by deterministic
+    projection code and carries a fixed reason code; the offline reader must
+    re-derive it rather than trust the boolean.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: Literal["ROOT_CAUSE", "AFFECTED_ASSET", "HEALTH_STATE"]
+    known_value: StrictStr | None = None
+    relation_name: StrictStr | None = None
+    evidence_ids: tuple[StrictStr, ...]
+    total_evidence_refs: Annotated[StrictInt, Field(ge=0)]
+    unregistered_evidence_refs: Annotated[StrictInt, Field(ge=0)]
+    truncated_evidence_refs: Annotated[StrictInt, Field(ge=0)]
+    recomputable: StrictBool
+    recomputability_reason: NonBlankStr
+
+
+class AuditUnresolvedSummary(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    evidence_kind: NonBlankStr
+    reason_code: NonBlankStr
+    subject: StrictStr | None = None
+
+
+class RefusalAudit(BaseModel):
+    """The refusal's own inputs, preserved so the verdict can be re-derived.
+
+    Bounded like ``RejectedDecisionSummary``: public identifiers and resolved
+    citations only, unknown content reduced to counts. Free text, raw values
+    and unregistered identifiers never enter the archive.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["p1.refusal_audit.v1"] = "p1.refusal_audit.v1"
+    reason_code: NonBlankStr
+    model_request_index: Annotated[StrictInt, Field(ge=0)]
+    status: Literal["CONFIRMED", "INSUFFICIENT_EVIDENCE", "NO_INCIDENT"]
+    applicable_claim_kinds: tuple[StrictStr, ...]
+    claims: tuple[AuditClaimSummary, ...]
+    unresolved_evidence: tuple[AuditUnresolvedSummary, ...]
+    truncated_claim_count: Annotated[StrictInt, Field(ge=0)]
+    truncated_unresolved_count: Annotated[StrictInt, Field(ge=0)]
 
 
 class RejectedUnresolvedSummary(BaseModel):
@@ -524,6 +584,10 @@ class EvidenceGateTraceEvent(BaseModel):
     reason_code: NonBlankStr
     accepted: StrictBool
     rejected_decision: RejectedDecisionSummary | None = None
+    # Additive (P-1): the refusal's own bounded inputs. Absent on v1 archives
+    # and whenever the gate refused a submission it could not project, which is
+    # reported as indeterminable rather than as a zero count.
+    refusal_audit: RefusalAudit | None = None
 
 
 class ModelCallShape(BaseModel):

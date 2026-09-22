@@ -41,6 +41,8 @@ from data_incident_gym.diagnosis import (
     KERNEL_STRATEGIES,
     MODEL_STRATEGIES,
     AffectedAssetClaim,
+    AuditClaimSummary,
+    AuditUnresolvedSummary,
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
@@ -53,6 +55,7 @@ from data_incident_gym.diagnosis import (
     ModelCallShape,
     ModelProtocolTraceEvent,
     PolicyIdentity,
+    RefusalAudit,
     RejectedAssessmentSummary,
     RejectedClaimSummary,
     RejectedDecisionSummary,
@@ -1263,6 +1266,109 @@ def _submission_gate_refusal(
     else:
         records = tuple(state.evidence_records)
     return policy.check(submission, records=records, trace=tuple(state.trace))
+
+
+def _enum_value(value: object) -> str:
+    """The plain string behind an enum member, unchanged for plain strings."""
+
+    return str(getattr(value, "value", value))
+
+
+def _refusal_audit(
+    state: _RunState,
+    *,
+    reason_code: str,
+    submission: Any,
+    refusal_reason: str,
+) -> RefusalAudit | None:
+    """Preserve the refused submission's bounded inputs for offline review (P-1).
+
+    ``recomputable`` is decided here, deterministically, from the shape of the
+    projection alone — never from whether the refusal happened to be convenient:
+
+    - a claim whose citations are partly unregistered can be re-derived from the
+      counts alone (the refusal condition is "had an unregistered citation"), so
+      it is recomputable without reconstructing the claim;
+    - a claim whose value the projection had to redact cannot be re-judged,
+      because the evaluator's rule needs the value;
+    - a claim whose citation list was capped has an incomplete evidence set;
+    - anything else keeps its known fields and re-judges normally.
+
+    Returns ``None`` only when the submission carries no claims to project (the
+    reason code still lands on the trace event, and the reader reports the
+    refusal as indeterminable rather than as a zero count).
+    """
+
+    claims = tuple(getattr(submission, "claims", ()))
+    if not claims and not tuple(getattr(submission, "unresolved_evidence", ())):
+        return None
+
+    records = (
+        tuple(state.kernel.evidence_records)
+        if state.kernel is not None
+        else tuple(state.evidence_records)
+    )
+    registered = {record.evidence_id for record in records}
+    policy = state.submission_policy
+    # Defensive: a policy stub may not expose the projection, and the audit must
+    # never be the reason a refusal fails to be recorded.
+    applicable = getattr(policy, "applicable_claim_kinds", None) or frozenset()
+
+    audit_claims: list[AuditClaimSummary] = []
+    truncated_claim_count = _overflow(claims, _MAX_SUMMARY_ITEMS)
+    for claim in claims[:_MAX_SUMMARY_ITEMS]:
+        citations = tuple(getattr(claim, "evidence_ids", ()))
+        resolved = tuple(item for item in citations if item in registered)
+        unregistered = len(citations) - len(resolved)
+        truncated = _overflow(citations, _MAX_CLAIM_EVIDENCE_REFS)
+        resolved_kept = resolved[:_MAX_CLAIM_EVIDENCE_REFS]
+        kind = _enum_value(getattr(claim, "kind", ""))
+        raw_value = getattr(claim, "value", None)
+        known_value = raw_value if isinstance(raw_value, str) and raw_value.strip() else None
+
+        if "UNREGISTERED" in refusal_reason and unregistered > 0:
+            recomputable, reason = True, "RECOMPUTABLE_UNREGISTERED_REF"
+        elif kind in {"ROOT_CAUSE", "AFFECTED_ASSET"} and known_value is None:
+            recomputable, reason = False, "NOT_RECOMPUTABLE_REDACTED_CLAIM_VALUE"
+        elif truncated > 0:
+            recomputable, reason = False, "NOT_RECOMPUTABLE_TRUNCATED_REFS"
+        else:
+            recomputable, reason = True, "RECOMPUTABLE_PROJECTED_CLAIM"
+
+        audit_claims.append(
+            AuditClaimSummary(
+                kind=kind,
+                known_value=known_value,
+                relation_name=getattr(claim, "relation_name", None),
+                evidence_ids=resolved_kept,
+                total_evidence_refs=len(citations),
+                unregistered_evidence_refs=unregistered,
+                truncated_evidence_refs=truncated,
+                recomputable=recomputable,
+                recomputability_reason=reason,
+            )
+        )
+
+    unresolved_items = tuple(getattr(submission, "unresolved_evidence", ()))
+    audit_unresolved = tuple(
+        AuditUnresolvedSummary(
+            evidence_kind=_enum_value(getattr(item, "evidence_kind", "")),
+            reason_code=_enum_value(getattr(item, "reason_code", "")),
+            subject=getattr(item, "subject", None),
+        )
+        for item in unresolved_items[:_MAX_SUMMARY_ITEMS]
+    )
+
+    return RefusalAudit(
+        reason_code=reason_code,
+        model_request_index=state.usage.requests,
+        status=_enum_value(getattr(submission, "status", "INSUFFICIENT_EVIDENCE")),
+        applicable_claim_kinds=tuple(sorted(applicable)),
+        claims=tuple(audit_claims),
+        unresolved_evidence=audit_unresolved,
+        truncated_claim_count=truncated_claim_count,
+        truncated_unresolved_count=_overflow(unresolved_items, _MAX_SUMMARY_ITEMS),
+    )
 
 
 def _is_output_retry_exhaustion(state: _RunState, error: BaseException) -> bool:
@@ -2754,6 +2860,12 @@ class DiagnosisRunner:
                             event_type="EVIDENCE_GATE",
                             reason_code=refusal.code,
                             accepted=False,
+                            refusal_audit=_refusal_audit(
+                                current,
+                                reason_code=refusal.code,
+                                submission=_ProjectedKernelSubmission(decision),
+                                refusal_reason=refusal.message,
+                            ),
                         )
                     )
                     raise ModelRetry(f"{refusal.code}: {refusal.message}") from None
@@ -2843,6 +2955,12 @@ class DiagnosisRunner:
                         event_type="EVIDENCE_GATE",
                         reason_code=refusal.code,
                         accepted=False,
+                        refusal_audit=_refusal_audit(
+                            current,
+                            reason_code=refusal.code,
+                            submission=output,
+                            refusal_reason=refusal.message,
+                        ),
                     )
                 )
                 raise ModelRetry(f"{refusal.code}: {refusal.message}") from None

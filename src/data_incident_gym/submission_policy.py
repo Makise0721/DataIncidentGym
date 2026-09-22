@@ -60,6 +60,30 @@ class SubmissionPolicy:
     def __init__(self, scenario: ScenarioSpec) -> None:
         self._scenario = scenario
 
+    @property
+    def scenario(self) -> ScenarioSpec:
+        """The scenario contract this policy was built for (read-only).
+
+        The refusal audit records the applicable claim kinds derived from
+        ``scenario.expected_status``, so an offline reviewer can re-derive the
+        I1 verdict without holding the private scenario itself.
+        """
+
+        return self._scenario
+
+    @property
+    def applicable_claim_kinds(self) -> frozenset[str]:
+        """The claim kinds I1 judges for this scenario.
+
+        Exposed here — on the harness side, which already owns the private
+        contract — so the diagnosis plane never has to name a scenario
+        expectation (the P1 isolation guard forbids that literal there).
+        """
+
+        return APPLICABLE_CLAIM_KINDS_BY_EXPECTED_STATUS.get(
+            self._scenario.expected_status, frozenset()
+        )
+
     def check(
         self,
         submission: Any,
