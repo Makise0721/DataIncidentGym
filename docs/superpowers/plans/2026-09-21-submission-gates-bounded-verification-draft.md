@@ -94,11 +94,18 @@ uv run data-incident-gym eval run silent_payment_drop_partition_a --strategy sta
 | O1 | 每格归档 trace 的 `EVIDENCE_GATE` 事件：拒绝码、时序位置（回合内）、是否最终接受 |
 | O2 | 拒绝码分布：`CLAIM_SUPPORT_REQUIRED` / `GAP_RECEIPT_REQUIRED` / `GATE_INTERNAL_ERROR` 各自出现次数——**`GATE_INTERNAL_ERROR` 必须为零** |
 | O3 | 拒绝后结局：重试后被接受（修复成功）vs 耗尽为 `MODEL_OUTPUT_RETRY_EXHAUSTED`，逐格记录 |
-| O4 | **误拒为零**：任何最终 evaluator PASSED 的格出现过门拒绝事件即违例（精度定理线上版）；3 个 PASSED 对照格必须零拒绝事件 |
+| O4 | **误拒为零**（**2026-09-21 修订**）：对每一次门拒绝事件，**逐次复核该次拒绝是否为误拒**。门允许模型收到可重试拒绝反馈后修正成功，属 D2 预期通路，**不构成违例**；**不得**用最终 PASSED 倒推先前拒绝有误。原规则「任何最终 evaluator PASSED 的格出现过门拒绝事件即违例」**已废止**（理由见下注） |
 | O5 | 触发期望格是否实际触发预期门码；**模型本次直接做对而不触发属正常结果**，如实记录，不算不符 |
 | O6 | 耗尽终态格的归档完整性：trace 与证据保留（D2 设计初衷），终态码可见 |
 | O7 | 每格预算实测（模型请求/工具调用/输出重试/时长）对照合同上界 8/8/2/300 |
 | O8 | 每次 run 后活库恢复；全部结束后只读指纹仍 == §2 的 F0 |
+
+> **修订（2026-09-21，O4 判定口径修正；草案留档，仅作过程记录）**：O4 原写作「任何最终 evaluator
+> PASSED 的格出现过门拒绝事件即违例」，该规则**不成立**——门的设计就是发出可重试的
+> `ModelRetry`，模型收到反馈后修正成功属预期通路，用最终成功倒推先前拒绝有误是错误推理。
+> 本文为草案（已被
+> [正式授权书](2026-09-21-submission-gates-bounded-verification-authorization.md) 取代），
+> 此注仅保持两份文本口径一致，不改变草案的历史留档性质。
 
 ## 6. 判定规则
 
