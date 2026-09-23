@@ -18,8 +18,8 @@
 | 结束后基线 | 指纹恒等 F0 `e5c7848e…`;ledger.jsonl sha256 `b71c0f63…beab07` |
 
 失败构成:42 格 `EVALUATION_FAILED` + seq4 `RUN_SETUP_ERROR`(第一时段旧账)。
-过率 36/79 = **45.6%**(v29:3/13≈23%,v30:8/31≈26%;**整套实现变化的比较,
-不归因于单一改动**)。
+36 个 `COMPLETED` 的策略分布为 `STATIC_SKILL` 16/36、`DIAGNOSTIC_KERNEL` 20/36、
+`NO_TOOL` 0/7。它们是 79 格暂停前缀的原始计数；该前缀不是完整套件，不据此给出总体过率。
 
 ## 2. 身份与恢复核对(79 格全量)
 
@@ -46,7 +46,8 @@ input / 697,071 output tokens,381 次工具调用**。费用以 provider 账目�
 | `UNRESOLVED_EVIDENCE_UNBOUND` | kernel 合同 | decision | 6 | 7 次 kernel 合同拒绝全部 INDETERMINABLE(KERNEL_CONTRACT_PATHWAY,登记待办) |
 | `EVIDENCE_GAP_OPEN` | kernel 合同 | decision | 1 | 同上 |
 
-- **harness 门层 12 次拒绝,离线重算零误拒**(全部 CORRECT 或如实不可判)。
+- **harness 门层共 14 次拒绝**:12 次可判且均为 `CORRECT`(I1 10 + I2 2),另有
+  2 次 I1 `INDETERMINABLE`(均在 seq38);12 个可判事件中 `FALSE_REFUSAL` = 0。
   `GATE_INTERNAL_ERROR` = 0。
 - 2 次 I1 不可判均在 seq38,basis 为
   `CLAIM_NOT_RECOMPUTABLE:NOT_RECOMPUTABLE_HEALTH_CLAIM_FIELDS`——HEALTH_STATE
@@ -54,8 +55,9 @@ input / 697,071 output tokens,381 次工具调用**。费用以 provider 账目�
   非数据缺陷)。
 - 拒绝-修复通路:经历 harness 拒绝的 8 格中,1 格修复后最终 COMPLETED,
   7 格终 FAILED(修复后仍败于证据/合同,或预算内未完成修复)。
-- **边界**:「零误拒」的口径是「被复核的 12 次拒绝无一误拒」;未被触发的违例
-  (模型未提交的)不在可观测面内,不能推断「门未放过任何违例」。
+- **边界**:零误拒只适用于 12 个可判事件;另有 2 个 harness 拒绝不可判,不能表述为
+  14 次拒绝全部复核正确。未被触发的违例(模型未提交的)不在可观测面内,不能推断
+  「门未放过任何违例」。
 
 ## 5. 失败项分布(42 个评测失败格)
 
@@ -67,11 +69,13 @@ input / 697,071 output tokens,381 次工具调用**。费用以 provider 账目�
 
 ## 6. 对本轮主问题的回答(更新)
 
-**修复 lineage 候选转发并加入提交门后,真实运行的表现**(79 格终态样本):
-过率 45.6% 显著高于 v29/v30(23%/26%),但这是协议身份 v20、两道门、门面修复、
-P-1 归档**整套实现变化**的比较,不能把收益归因于提交门;主导失败维度
-(证据完整性、gap 声明)与历史弱点同类,未见结构性改善。门的行为面:
-零内部错误、12 次拒绝全部复核正确、拒绝-修复通路工作(1 例修复成功)。
+**本轮只能作暂停前缀的描述性比较**:同序号前缀中,v31 seq1–13 为 4/13 `COMPLETED`,
+v29 seq1–13 为 3/13;v31 seq1–18 为 7/18,v30 seq1–18 为 5/18。
+这些是受赛程与停止规则影响的部分前缀计数,只作描述,不作总体推断或归因。
+v31 与历史批次还包含协议身份 v20、两道门、门面修复、P-1 归档等整套实现差异,
+不能把前缀差异归因于单一改动。主导失败维度(证据完整性、gap 声明)与历史弱点同类,
+未见结构性改善。门的行为面:`GATE_INTERNAL_ERROR` 为 0;14 次 harness 拒绝中
+12 次可判且为 `CORRECT`,2 次不可判;拒绝-修复通路工作(1 例修复成功)。
 两次 HTTP 520(seq2/seq65)是 provider 瞬时故障,与策略维度无关。
 
 ## 7. 后续与待办
