@@ -7,6 +7,13 @@
   执行结果如实留档于会话输出;worktree 检出门的最终验证发生在清单提交之后,**不能**
   再以新提交记录(否则 `diff 绑定修订..HEAD` 超出清单文件、检出门自毁),其完整数字
   由下一份真实测量报告补记——这是结构性约束,如实声明,不是遗漏。
+  **修订(2026-09-23,所有者更正)**:上一段的「清单提交之后不能再以新提交记录」
+  **不成立,已撤回**——`_verify_checkout` 检查的是**运行 checkout 自身的 HEAD**
+  (`project_root` 的 `rev-parse HEAD`),不是主分支 HEAD。正式运行固定在清单提交
+  `91582e5` 的独立干净 worktree 即可;主分支后续提交不改变该历史提交,不破坏其
+  检出门,验证结果亦不妨碍提交入库(即本补记)。
+- **修订(2026-09-23,执行结果补记与所有者独立确认)**:F1–F6 全部按 §3 判据执行
+  通过,详见 §3.1;所有者独立复核支持冻结身份收口(§3.2),真实模型测量仍未放行。
 - 纪律:未 push;未改写历史;未重跑失败格;未发起任何模型/网络请求;真实模型测量
   仍等待单独放行。
 
@@ -90,6 +97,29 @@ sha256 与 F2 一致。
 
 **F7 停点**:冻结收口。preflight/run 属真实模型测量,**等待单独放行**(密钥经 User 作用域
 回退、`PYTHONIOENCODING=utf-8` 前置、429 容错规则按计划 §3.2——均不在本轮执行)。
+
+### 3.1 执行结果(2026-09-22 实测,2026-09-23 补记入库)
+
+每步均按上述判据执行,全部通过;任何一步未发生判据外的调整。
+
+| 步 | 实测 |
+| --- | --- |
+| F1 | 绑定修订 **X = `e5d81d99abbf6803cb3a4351b2f6471ebac57e77`**(本报告提交)。 |
+| F2 | 删除旧清单文件后官方 `benchmark freeze` 重新生成:exit 0,`sha256: f4196010e0b8ff3fdd9fdf26f2c877bb04bd4d9cb4db5d612a13541fca2b4c9a`,`cells: 106; model_backed: 94; fixed_rule: 12`。 |
+| F3 | `git diff HEAD`(HEAD=X,清单仍为 `bae3063` 版)唯一差异行即 `implementation_revision: 115299e… → e5d81d9…`。与 ed04be9 中间版的文件级比对因 Git Bash 与 Windows Python 的 `/tmp` 路径不一致未能执行;该判据由传递性闭合(现版 vs `bae3063` 仅差绑定〔直接验证〕+ 上轮已证 ed04be9 版 vs `bae3063` 仅差绑定 ⇒ 现版 vs ed04be9 版仅差绑定)。 |
+| F4 | 清单提交 **Y = `91582e588e90156236040b87c18d0ecc2dccfbd2`**;`git diff --name-only X..Y` 恰为 `config/benchmark/p1-formal-v31.json`。 |
+| F5 | Y 的独立干净 worktree(`git worktree add --detach`,porcelain 为空)中以真实 `BenchmarkRunner._verify_checkout`(`for_project`, `project_root=worktree`)→ **`CHECKOUT GATE: PASSED`**。因果复核:同 checkout 置入 `bae3063` 版清单并提交(探测提交,不碰主分支)后复跑 → **`FAILED (formal checkout contains paths beyond the manifest)`**,与 §3.6 记录的旧绑定拒绝码一致。复核后 worktree 已 `remove --force` + `prune`(探测提交不可达,随清理消亡)。注:直接覆写不提交会先撞 `formal benchmark requires a clean checkout`,故按上轮先例以探测提交保持树干净再复跑。 |
+| F6 | 主树(HEAD=Y)`benchmark verify`:exit 0,`verified: 17 catalog scenarios; 12 formal scenarios; 106 cells; 94 model-backed`,sha256 `f4196010…` 与 F2 一致。 |
+
+### 3.2 所有者独立确认(2026-09-23)
+
+所有者独立核对并确认:HEAD 为 `91582e5`、清单绑定 `e5d81d9`;两提交之间恰好只改清单
+文件;相对 `bae3063` 清单唯一字段变化为 `implementation_revision`;`benchmark verify`
+通过且摘要与 `f4196010…2b4c9a` 一致;P-1 离线复核测试 24 passed。全量单测与
+integration/e2e 本轮仅核对报告、未重复运行;干净 worktree 检出门实跑采用上述执行记录。
+裁定:冻结身份收口,之前的绑定阻塞已消除;真实模型测量仍未放行,后续运行固定
+`91582e5` 与完整摘要,继续执行既定停止规则;历史缺陷暴露面检查与 kernel 合同拒绝
+复核保留为独立待办。
 
 ## 4. 边界与登记待办(沿用,不外推)
 
