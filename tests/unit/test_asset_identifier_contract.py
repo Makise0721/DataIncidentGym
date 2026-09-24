@@ -16,13 +16,13 @@ from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
     Diagnosis,
     DiagnosisMetrics,
-    DiagnosisRunResult,
+    DiagnosisRunResultV2,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     KernelStateTraceEvent,
     PolicyIdentity,
     RootCauseClaim,
-    ToolTraceEvent,
+    ToolTraceEventV2,
 )
 from data_incident_gym.diagnostic_agent import (
     CONTROLLER_PROTOCOL_VERSION,
@@ -528,13 +528,14 @@ def test_recovered_outcome_passes_the_evaluator_asset_check() -> None:
     assert outcome.affected_assets == (FAILED_NODE, STG_PAYMENTS_ID)
 
     tool_events = tuple(
-        ToolTraceEvent(
-            event_type="TOOL_CALL",
+        ToolTraceEventV2(
+            event_type="TOOL_CALL_V2",
             tool_name=tool,
             arguments=arguments,
             fingerprint=f"{index:064x}",
             evidence_ids=(record.evidence_id,),
             elapsed_ms=0,
+            outcome_origin="EVIDENCE_BACKEND",
         )
         for index, (tool, arguments, record) in enumerate(trace_calls)
     )
@@ -576,7 +577,7 @@ def test_recovered_outcome_passes_the_evaluator_asset_check() -> None:
         recommended_actions=outcome.recommended_actions,
         confidence=outcome.confidence,
     )
-    run_result = DiagnosisRunResult(
+    run_result = DiagnosisRunResultV2(
         strategy=DiagnosticStrategy.DIAGNOSTIC_KERNEL,
         policy_identity=PolicyIdentity(
             strategy=DiagnosticStrategy.DIAGNOSTIC_KERNEL,

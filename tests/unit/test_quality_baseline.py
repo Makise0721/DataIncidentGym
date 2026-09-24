@@ -128,6 +128,7 @@ def _axis3_scenario_and_run(expected, actual, trace=()):
         observable_evidence_contract=SimpleNamespace(unresolved_gaps=expected)
     )
     diagnosis_run = SimpleNamespace(
+        schema_version="p1.diagnosis.v1",
         diagnosis=SimpleNamespace(unresolved_evidence=actual),
         trace=trace,
     )

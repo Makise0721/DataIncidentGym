@@ -26,7 +26,9 @@ from data_incident_gym.diagnosis import (
     ToolTraceEvent,
     UnresolvedEvidence,
     UnresolvedEvidenceV2,
-    refusal_witnessed,
+)
+from data_incident_gym.diagnosis import (
+    refusal_witnessed as _refusal_witnessed,
 )
 from data_incident_gym.evaluation import _insufficiency_matches
 from data_incident_gym.evidence import EVIDENCE_BATCH_TOOLS, TARGETS_REFUSED_CODE
@@ -48,6 +50,13 @@ FINGERPRINT = "d" * 64
 PROFILE_TOOL = "get_relation_data_profile"
 CUSTOMERS = "model.jaffle_shop.customers"
 STG_ORDERS = "model.jaffle_shop.stg_orders"
+
+
+def refusal_witnessed(*args, **kwargs) -> bool:
+    """Keep legacy assertions explicit about their trusted v1 run schema."""
+
+    kwargs["diagnosis_run_schema_version"] = "p1.diagnosis.v1"
+    return _refusal_witnessed(*args, **kwargs).witnessed
 
 
 def _type_change(**overrides) -> ColumnTypeMutation:

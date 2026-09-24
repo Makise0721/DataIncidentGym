@@ -39,7 +39,8 @@ from data_incident_gym.artifacts import (
     ARTIFACT_FILENAMES,
     EvidenceArtifact,
     RunMetadata,
-    TraceEnvelope,
+    trace_schema_for_policy_identity,
+    validate_trace_envelope,
 )
 from data_incident_gym.benchmark_manifest import (
     BenchmarkManifest,
@@ -60,6 +61,8 @@ from data_incident_gym.diagnosis import (
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
     KernelStateTraceEvent,
+    ToolTraceEvent,
+    refusal_witnessed,
 )
 from data_incident_gym.diagnostic_kernel import InvestigationState
 from data_incident_gym.evaluation import (
@@ -584,7 +587,9 @@ def _efficiency(items: list[dict[str, Any]]) -> dict[str, Any]:
     equivalent = 0
     for item in passed:
         tool_calls = [
-            event.event for event in item["trace"] if event.event.event_type == "TOOL_CALL"
+            event.event
+            for event in item["trace"]
+            if isinstance(event.event, ToolTraceEvent)
         ]
         fingerprints = [event.fingerprint for event in tool_calls]
         exact += len(fingerprints) - len(set(fingerprints))
@@ -627,7 +632,7 @@ def _efficiency(items: list[dict[str, Any]]) -> dict[str, Any]:
         if decisive_at is not None:
             post_decisive.append(
                 sum(
-                    event.event.event_type == "TOOL_CALL"
+                    isinstance(event.event, ToolTraceEvent)
                     for event in item["trace"][decisive_at + 1 :]
                 )
             )
@@ -680,6 +685,86 @@ def _efficiency(items: list[dict[str, Any]]) -> dict[str, Any]:
         "elapsed_ms": {
             "total": sum(metric.elapsed_ms for metric in metrics),
             "median": median([metric.elapsed_ms for metric in metrics]) if metrics else None,
+        },
+    }
+
+
+def _refusal_witness_source_counts(
+    items: list[dict[str, Any]], diagnosis_run_schema_version: str
+) -> dict[str, Any]:
+    counts = {
+        "CONTROLLER_PRECHECK": 0,
+        "EVIDENCE_BACKEND": 0,
+        "LEGACY_UNATTRIBUTED": 0,
+    }
+    expected_tool_bound_gaps = 0
+    denominator = 0
+    gap_set_mismatch_cells = 0
+    inapplicable_reasons = {
+        "SCENARIO_NOT_INSUFFICIENT_EVIDENCE": 0,
+        "RUN_NOT_INSUFFICIENT_EVIDENCE": 0,
+        "CONTRACT_GAP_NOT_DECLARED": 0,
+    }
+    for item in items:
+        scenario = item["scenario"]
+        diagnosis = item["diagnosis"]
+        contract_gaps = scenario.observable_evidence_contract.unresolved_gaps
+        tool_gaps = tuple(gap for gap in contract_gaps if gap.tool_name is not None)
+        expected_tool_bound_gaps += len(tool_gaps)
+        if not tool_gaps:
+            continue
+        if scenario.expected_status != DiagnosisStatus.INSUFFICIENT_EVIDENCE.value:
+            inapplicable_reasons["SCENARIO_NOT_INSUFFICIENT_EVIDENCE"] += len(tool_gaps)
+            continue
+        if diagnosis.status is not DiagnosisStatus.INSUFFICIENT_EVIDENCE:
+            inapplicable_reasons["RUN_NOT_INSUFFICIENT_EVIDENCE"] += len(tool_gaps)
+            continue
+        expected_gaps = {
+            (gap.gap_kind, gap.subject, gap.reason_code) for gap in contract_gaps
+        }
+        actual_gaps = {
+            (gap.evidence_kind, gap.subject, gap.reason_code)
+            for gap in diagnosis.unresolved_evidence
+        }
+        if actual_gaps != expected_gaps:
+            gap_set_mismatch_cells += 1
+        trace_events = tuple(envelope.event for envelope in item["trace"])
+        for gap in tool_gaps:
+            gap_key = (gap.gap_kind, gap.subject, gap.reason_code)
+            if gap_key not in actual_gaps:
+                inapplicable_reasons["CONTRACT_GAP_NOT_DECLARED"] += 1
+                continue
+            denominator += 1
+            witness = refusal_witnessed(
+                trace_events,
+                tool_name=gap.tool_name,
+                target=gap.subject,
+                code=gap.reason_code,
+                diagnosis_run_schema_version=diagnosis_run_schema_version,
+            )
+            if witness.witnessed and witness.outcome_origin in counts:
+                counts[witness.outcome_origin] += 1
+    return {
+        "denominator_definition": (
+            "declared tool-bound contract gaps in insufficient-evidence cells, counted per gap "
+            "when that gap is present in the diagnosis; full gap-set mismatches are reported "
+            "separately"
+        ),
+        "expected_tool_bound_gaps": expected_tool_bound_gaps,
+        "eligible_tool_bound_gaps": denominator,
+        "gap_set_mismatch_cells": gap_set_mismatch_cells,
+        "inapplicable_tool_bound_gaps": sum(inapplicable_reasons.values()),
+        "inapplicable_reasons": inapplicable_reasons,
+        **{
+            source: {
+                "numerator": numerator,
+                "denominator": denominator,
+                "rate": numerator / denominator if denominator else None,
+                "zero_denominator_reason": (
+                    None if denominator else "NO_APPLICABLE_DECLARED_TOOL_GAPS"
+                ),
+            }
+            for source, numerator in counts.items()
         },
     }
 
@@ -847,13 +932,19 @@ class BenchmarkReporter:
             item.is_symlink() or not item.is_file() for item in children
         ):
             self._fail(f"artifact bundle is not exactly six regular files: {cell.run_id}")
+        policy = next(item for item in self._manifest.policies if item.strategy is cell.strategy)
         try:
             metadata = RunMetadata.model_validate(_load_json(run_path / "metadata.json"))
             evidence = EvidenceArtifact.model_validate(_load_json(run_path / "evidence.json"))
             diagnosis = Diagnosis.model_validate(_load_json(run_path / "diagnosis.json"))
             evaluation = EvaluationResult.model_validate(_load_json(run_path / "evaluation.json"))
             trace = tuple(
-                TraceEnvelope.model_validate(_load_json_line(line))
+                validate_trace_envelope(
+                    _load_json_line(line),
+                    expected_schema_version=trace_schema_for_policy_identity(
+                        policy.policy_identity
+                    ),
+                )
                 for line in (run_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
                 if line
             )
@@ -907,7 +998,7 @@ class BenchmarkReporter:
         elif cell.strategy is DiagnosticStrategy.KERNEL_NO_SCHEMA:
             allowed_tools.remove("get_relation_schema")
         if any(
-            item.event.event_type == "TOOL_CALL" and item.event.tool_name not in allowed_tools
+            isinstance(item.event, ToolTraceEvent) and item.event.tool_name not in allowed_tools
             for item in trace
         ):
             self._fail(f"trace uses a tool outside the strategy allowlist: {cell.run_id}")
@@ -1012,17 +1103,26 @@ class BenchmarkReporter:
             for strategy in DiagnosticStrategy
             if any(item["cell"].strategy is strategy for item in records)
         }
-        strategy_metrics = {
-            strategy.value: {
+        strategy_metrics: dict[str, Any] = {}
+        for strategy, items in groups.items():
+            policy = next(
+                item for item in self._manifest.policies if item.strategy is strategy
+            )
+            trace_schema = trace_schema_for_policy_identity(policy.policy_identity)
+            diagnosis_run_schema = (
+                "p1.diagnosis_run.v2" if trace_schema == "p1.trace.v2" else "p1.diagnosis.v1"
+            )
+            strategy_metrics[strategy.value] = {
                 "cells": len(items),
                 "completed": sum(item["ledger"].state == "COMPLETED" for item in items),
                 "failed": sum(item["ledger"].state == "FAILED" for item in items),
                 **(_metric_values(items) if strategy in MAIN_STRATEGIES else {}),
                 "efficiency": _efficiency(items) if strategy in MAIN_STRATEGIES else None,
+                "refusal_witness_sources": _refusal_witness_source_counts(
+                    items, diagnosis_run_schema
+                ),
                 "reliability": self._reliability(strategy, items),
             }
-            for strategy, items in groups.items()
-        }
         invalid_gates = sorted(
             (gate for item in records for gate in item["invalid_gates"]),
             key=lambda gate: (gate["run_id"], gate["gate"], gate["reason_code"]),
@@ -1302,6 +1402,57 @@ class BenchmarkReporter:
                 f"{citations['health_claim_citations']}"
             )
         rows.extend(["", *excluded_notes])
+        def witness_ratio(metric: dict[str, Any]) -> str:
+            if metric["rate"] is None:
+                return "n/a"
+            return f"{metric['numerator']}/{metric['denominator']} ({metric['rate']:.3f})"
+
+        rows.extend(
+            [
+                "",
+                "## Refusal witness sources",
+                "",
+                "These are descriptive per-gap metrics. The denominator contains declared "
+                "tool-bound contract gaps in insufficient-evidence cells when that individual "
+                "gap is present in the diagnosis. A different gap in the same cell does not "
+                "remove a matched gap from the denominator; full gap-set mismatches and "
+                "inapplicable gaps are reported separately.",
+                "",
+                "| Strategy | Controller precheck | Evidence backend | Legacy unattributed | "
+                "Eligible gaps | Gap-set mismatch cells | Inapplicable gaps |",
+                "|---|---|---|---|---:|---:|---:|",
+            ]
+        )
+        witness_notes: list[str] = []
+        for strategy, data in summary["strategies"].items():
+            sources = data["refusal_witness_sources"]
+            rows.append(
+                "| "
+                + " | ".join(
+                    [
+                        strategy,
+                        witness_ratio(sources["CONTROLLER_PRECHECK"]),
+                        witness_ratio(sources["EVIDENCE_BACKEND"]),
+                        witness_ratio(sources["LEGACY_UNATTRIBUTED"]),
+                        str(sources["eligible_tool_bound_gaps"]),
+                        str(sources["gap_set_mismatch_cells"]),
+                        str(sources["inapplicable_tool_bound_gaps"]),
+                    ]
+                )
+                + " |"
+            )
+            reasons = ", ".join(
+                f"{reason}={count}"
+                for reason, count in sources["inapplicable_reasons"].items()
+                if count
+            )
+            witness_notes.append(
+                f"- `{strategy}`: expected declared tool-bound gaps="
+                f"{sources['expected_tool_bound_gaps']}; inapplicable reasons="
+                f"{reasons or 'none'}; zero-denominator rates use "
+                f"`{sources['CONTROLLER_PRECHECK']['zero_denominator_reason'] or 'none'}`."
+            )
+        rows.extend(["", *witness_notes])
         rows.extend(
             [
                 "",

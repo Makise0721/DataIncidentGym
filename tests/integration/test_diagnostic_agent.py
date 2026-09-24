@@ -293,7 +293,7 @@ async def test_real_lab_tools_drive_a_kernel_confirmed_diagnosis() -> None:
         assert all(
             set(event.arguments) <= {"run_id", "node_id", "direction", "relation_name"}
             for event in result.trace
-            if event.event_type == "TOOL_CALL"
+            if event.event_type in {"TOOL_CALL", "TOOL_CALL_V2"}
         )
     finally:
         assert lab.restore(RUNNING_SCENARIO).state == "HEALTHY"

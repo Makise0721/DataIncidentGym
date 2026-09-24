@@ -242,7 +242,7 @@ def test_both_prompts_expose_the_shared_m11_ontology_and_test_claim_rule() -> No
     assert (KERNEL_PROMPT_VERSION, STATIC_PROMPT_VERSION, CONTROLLER_PROTOCOL_VERSION) == (
         "p1.kernel.v18",
         "p1.static.v5",
-        "p1.controller.v20",
+        "p1.controller.v21",
     )
     for prompt in (STATIC_PROMPT, KERNEL_PROMPT):
         assert all(code in prompt for code in expected)
@@ -1016,7 +1016,9 @@ class _AlwaysRefusePolicy:
     def __init__(self) -> None:
         self.calls = 0
 
-    def check(self, submission, records, trace):  # type: ignore[no-untyped-def]
+    def check(
+        self, submission, records, trace, *, diagnosis_run_schema_version=None
+    ):  # type: ignore[no-untyped-def]
         self.calls += 1
         from data_incident_gym.submission_policy import GateRefusal
 
@@ -1024,7 +1026,9 @@ class _AlwaysRefusePolicy:
 
 
 class _RaisingPolicy:
-    def check(self, submission, records, trace):  # type: ignore[no-untyped-def]
+    def check(
+        self, submission, records, trace, *, diagnosis_run_schema_version=None
+    ):  # type: ignore[no-untyped-def]
         raise RuntimeError("gate exploded")
 
 

@@ -27,9 +27,9 @@ from data_incident_gym.benchmark_manifest import (
 )
 from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
+    DiagnosisRunResultAny,
     DiagnosisStatus,
     DiagnosticStrategy,
-    ToolTraceEvent,
     refusal_witnessed,
 )
 from data_incident_gym.evaluation import (
@@ -43,6 +43,8 @@ from data_incident_gym.evaluation_inputs import (
     SCORING_INPUTS_SCHEMA_VERSION,
     ArtifactDigest,
     EvaluationInputBundle,
+    EvaluationInputBundleAny,
+    EvaluationInputBundleV2,
     EvaluationInputsError,
     EvaluatorIdentity,
     RecoveryProof,
@@ -163,7 +165,7 @@ def _payload_is_legacy(payload: dict[str, Any]) -> bool:
     )
 
 
-def _load_bundle_for_analysis(payload: dict[str, Any]) -> EvaluationInputBundle:
+def _load_bundle_for_analysis(payload: dict[str, Any]) -> EvaluationInputBundleAny:
     """Strictly validate a bundle, with tested pre-M23 digest compatibility.
 
     Legacy payloads (trace events without ``transport_diagnostic``) record
@@ -180,11 +182,20 @@ def _load_bundle_for_analysis(payload: dict[str, Any]) -> EvaluationInputBundle:
     """
 
     restored = _restore_typed_diagnosis(copy.deepcopy(payload))
+    schema_version = restored.get("schema_version")
+    if schema_version == "p1.evaluation_inputs.v1":
+        bundle_model = EvaluationInputBundle
+    elif schema_version == "p1.evaluation_inputs.v2":
+        bundle_model = EvaluationInputBundleV2
+    else:
+        raise QualityBaselineError("unsupported scoring-input bundle schema")
     legacy = False
     try:
-        bundle = EvaluationInputBundle.model_validate(restored)
+        bundle = bundle_model.model_validate(restored)
     except ValidationError as exc:
-        if "diagnosis digest does not match" not in str(exc):
+        if bundle_model is not EvaluationInputBundle or (
+            "diagnosis digest does not match" not in str(exc)
+        ):
             raise
         if not _payload_is_legacy(restored):
             raise
@@ -213,7 +224,7 @@ def _load_bundle_for_analysis(payload: dict[str, Any]) -> EvaluationInputBundle:
     artifact_digests = tuple(
         ArtifactDigest.model_validate(item) for item in restored["artifact_digests"]
     )
-    bundle = EvaluationInputBundle.model_construct(
+    bundle = bundle_model.model_construct(
         schema_version=restored.get(
             "schema_version", SCORING_INPUTS_SCHEMA_VERSION
         ),
@@ -381,7 +392,7 @@ def _axis1(
 
 def _axis2(
     scenario: Any,
-    diagnosis_run: DiagnosisRunResult,
+    diagnosis_run: DiagnosisRunResultAny,
 ) -> Axis2Result:
     verdicts: list[Axis2ClaimVerdict] = []
     for verdict in claim_support_verdicts(
@@ -414,7 +425,7 @@ def _axis2(
 
 def _axis3(
     scenario: Any,
-    diagnosis_run: DiagnosisRunResult,
+    diagnosis_run: DiagnosisRunResultAny,
 ) -> Axis3Result:
     contract_gaps = scenario.observable_evidence_contract.unresolved_gaps
     expected = tuple(
@@ -428,23 +439,21 @@ def _axis3(
     )
     missing = tuple(sorted(set(expected) - set(actual)))
     extra = tuple(sorted(set(actual) - set(expected)))
-    # The witness rule consumes ToolTraceEvent instances (event_type
-    # "TOOL_CALL"); filtering by a wrong literal once silently emptied this
-    # tuple and made every tool gap look unwitnessed.
-    trace_events = tuple(
-        event for event in diagnosis_run.trace if isinstance(event, ToolTraceEvent)
-    )
+    # Pass the full trace so a returned trace_sequence is the archive sequence,
+    # including intervening model, plan, and gate events.
     unwitnessed = tuple(
         sorted(
             (gap.gap_kind, gap.subject, gap.reason_code)
             for gap in contract_gaps
             if gap.tool_name is not None
             and not refusal_witnessed(
-                trace_events,
+                diagnosis_run.trace,
                 tool_name=gap.tool_name,
                 target=gap.subject,
                 code=gap.reason_code,
+                diagnosis_run_schema_version=diagnosis_run.schema_version,
             )
+            .witnessed
             and (gap.gap_kind, gap.subject, gap.reason_code) in set(missing)
         )
     )
@@ -456,7 +465,7 @@ def _axis3(
     )
 
 
-def _run_transport_summary(diagnosis_run: DiagnosisRunResult) -> str | None:
+def _run_transport_summary(diagnosis_run: DiagnosisRunResultAny) -> str | None:
     events = [
         event
         for event in diagnosis_run.trace

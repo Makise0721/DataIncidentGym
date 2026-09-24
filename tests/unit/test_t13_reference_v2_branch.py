@@ -562,13 +562,15 @@ async def test_pair_b_abstains_with_exactly_the_two_contract_gaps(tmp_path: Path
         tool_name="get_relation_schema_expectation",
         target="raw_customers",
         code="RELATION_NOT_ALLOWED",
-    )
+        diagnosis_run_schema_version=result.schema_version,
+    ).witnessed
     assert refusal_witnessed(
         trace_events,
         tool_name="get_dbt_node_definition",
         target=FAILURE_NODE,
         code="NODE_NOT_ALLOWED",
-    )
+        diagnosis_run_schema_version=result.schema_version,
+    ).witnessed
     # The observation schema stays readable in B and is collected and cited.
     schema_subjects = {
         record.subject

@@ -16,7 +16,8 @@ from data_incident_gym.artifacts import (
     ARTIFACT_FILENAMES,
     EvidenceArtifact,
     RunMetadata,
-    TraceEnvelope,
+    trace_schema_for_policy_identity,
+    validate_trace_envelope,
 )
 from data_incident_gym.benchmark_manifest import APPROVED_MANIFEST_IDS, BenchmarkManifest
 from data_incident_gym.benchmark_runner import (
@@ -269,13 +270,17 @@ def _load_cell_records(
     receipt: BenchmarkDoctorReceipt,
 ) -> tuple[RunMetadata, Diagnosis, EvaluationResult]:
     artifact = _artifact_path(project_root, entry)
+    policy = next(item for item in manifest.policies if item.strategy is entry.strategy)
+    expected_trace_schema = trace_schema_for_policy_identity(policy.policy_identity)
     try:
         metadata = RunMetadata.model_validate(_load_json(artifact / "metadata.json"))
         evidence = EvidenceArtifact.model_validate(_load_json(artifact / "evidence.json"))
         diagnosis = Diagnosis.model_validate(_load_json(artifact / "diagnosis.json"))
         evaluation = EvaluationResult.model_validate(_load_json(artifact / "evaluation.json"))
         trace = tuple(
-            TraceEnvelope.model_validate(_load_json_line(line))
+            validate_trace_envelope(
+                _load_json_line(line), expected_schema_version=expected_trace_schema
+            )
             for line in (artifact / "trace.jsonl").read_text(encoding="utf-8").splitlines()
             if line.strip()
         )

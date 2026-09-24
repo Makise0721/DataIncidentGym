@@ -20,6 +20,8 @@ from data_incident_gym.artifacts import (
     ArtifactRun,
     ArtifactWriter,
     RecoveryStatus,
+    trace_envelope_model,
+    trace_schema_for_run,
 )
 from data_incident_gym.diagnosis import (
     Diagnosis,
@@ -482,7 +484,7 @@ async def test_kernel_binds_gaps_through_arguments_and_projects_confirmed_result
     assert all(
         set(event.arguments) <= {"run_id", "node_id", "direction", "relation_name"}
         for event in result.trace
-        if event.event_type == "TOOL_CALL"
+        if event.event_type in {"TOOL_CALL", "TOOL_CALL_V2"}
     )
 
 
@@ -813,12 +815,26 @@ async def test_runner_loads_private_scenario_early_for_submission_gates(
         return _not_applicable_evaluation(case_id)
 
     class FakeWriter:
-        def write(self, _artifact_run: object) -> Path:
+        def write(self, _artifact_run: ArtifactRun) -> Path:
             calls.append("artifact.write")
             artifact_dir = tmp_path / "artifacts" / RUN_ID
             artifact_dir.mkdir(parents=True, exist_ok=True)
             for name in ARTIFACT_FILENAMES:
                 (artifact_dir / name).write_text("{}\n", encoding="utf-8")
+            trace_schema = trace_schema_for_run(_artifact_run.diagnosis_run)
+            envelope_model = trace_envelope_model(trace_schema)
+            (artifact_dir / "trace.jsonl").write_text(
+                "".join(
+                    envelope_model(
+                        schema_version=trace_schema,
+                        sequence=index,
+                        event=event,
+                    ).model_dump_json()
+                    + "\n"
+                    for index, event in enumerate(_artifact_run.diagnosis_run.trace, start=1)
+                ),
+                encoding="utf-8",
+            )
             return artifact_dir
 
     runner = EvaluationRunner(

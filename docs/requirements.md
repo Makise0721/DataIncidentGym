@@ -606,6 +606,20 @@ artifacts/<run_id>/
   见 M15（7）），evaluator 身份随之升为 `p1.evaluator.v3`；新正式测量必须先冻结新的 manifest
   身份。
 
+> M23 修订（2026-09-24，拒绝来源合同）：仅新运行采用带 harness 来源的轨迹。模型策略协议升为
+> `p1.controller.v21`，工具事件用 `TOOL_CALL_V2` / `p1.trace.v2`，聚合运行用
+> `p1.diagnosis_run.v2`，评分输入用 `p1.evaluation_inputs.v2`；evaluator 升为
+> `p1.evaluator.v4`，并显式保留 v2、v3、v4 评分身份。单目标 `RELATION_NOT_ALLOWED` /
+> `NODE_NOT_ALLOWED` 只接受 `CONTROLLER_PRECHECK` 或 `EVIDENCE_BACKEND` 见证，并保留各自来源；
+> T13 批量工具必须是后端 `TARGETS_REFUSED` 原子拒绝且逐目标精确匹配。后置校验、协议门和运行时
+> 错误不得见证缺口。拒绝判定按受信任的运行/归档 schema 选择版本；v1 事件、规范 JSON、摘要、T13
+> 规则及既有归档保持不变。报告分别输出 `CONTROLLER_PRECHECK`、`EVIDENCE_BACKEND` 与
+> `LEGACY_UNATTRIBUTED` 见证数及 rate。分母只含 expected 与 actual 均为
+> `INSUFFICIENT_EVIDENCE` 的格，并按单条缺口计入实际声明集合与合同的交集；同格其他缺口不匹配时，
+> 仍保留已匹配缺口的见证。报告另列未声明合同缺口、不适用原因和整格 `GAP_SET_MISMATCH` 数，
+> 零分母给出固定原因。这些描述指标不改变既有成功指标及其分母。正式合同、验收用例与授权边界见
+> `docs/superpowers/specs/2026-09-24-refusal-provenance-contract-design.md`。
+
 ### 13.3 重复可靠性协议（`p1.reliability.v1`）
 
 基准报告的 `strategies[*].reliability` 必须按下列固定规则输出重复稳定性；完整规范见

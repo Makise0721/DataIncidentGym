@@ -209,7 +209,8 @@ def reference_evaluation_runner(
 
 def _receipt_proved(
     scenario: ScenarioSpec,
-    trace_events: tuple[ToolTraceEvent, ...],
+    trace_events: tuple[object, ...],
+    diagnosis_run_schema_version: str = "p1.diagnosis.v1",
 ) -> bool:
     for gap in scenario.observable_evidence_contract.unresolved_gaps:
         if gap.tool_name is None:
@@ -219,7 +220,8 @@ def _receipt_proved(
             tool_name=gap.tool_name,
             target=gap.subject,
             code=gap.reason_code,
-        ):
+            diagnosis_run_schema_version=diagnosis_run_schema_version,
+        ).witnessed:
             return False
     return True
 
@@ -288,6 +290,8 @@ def _build_findings(
     collected_evidence_types: set[str],
     cited_evidence_types: set[str],
     trace_events: tuple[ToolTraceEvent, ...],
+    diagnosis_run_trace: tuple[object, ...],
+    diagnosis_run_schema_version: str,
     tool_calls: int,
 ) -> tuple[tuple[CertificationFinding, ...], dict[str, bool]]:
     expected_status = scenario.expected_status
@@ -301,7 +305,11 @@ def _build_findings(
     )
     assets_ok = set(affected_assets) == set(scenario.affected_assets) if confirmed else True
     gaps_ok = gap_keys == _expected_gap_keys(scenario) if insufficient else True
-    receipts_ok = _receipt_proved(scenario, trace_events) if insufficient else True
+    receipts_ok = (
+        _receipt_proved(scenario, diagnosis_run_trace, diagnosis_run_schema_version)
+        if insufficient
+        else True
+    )
     required_types = set(scenario.required_evidence_types)
     types_ok = required_types.issubset(collected_evidence_types)
     missing_types = sorted(required_types - collected_evidence_types)
@@ -446,6 +454,8 @@ async def certify_scenario(
             if evidence_id in evidence_type_by_id
         },
         trace_events=trace_events,
+        diagnosis_run_trace=bundle.diagnosis_run.trace,
+        diagnosis_run_schema_version=bundle.diagnosis_run.schema_version,
         tool_calls=run.tool_calls,
     )
     certified = all(item.satisfied for item in findings)

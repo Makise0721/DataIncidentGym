@@ -28,13 +28,13 @@ from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
     Diagnosis,
     DiagnosisMetrics,
-    DiagnosisRunResult,
+    DiagnosisRunResultV2,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
     KernelStateTraceEvent,
     RootCauseClaim,
-    ToolTraceEvent,
+    ToolTraceEventV2,
 )
 from data_incident_gym.diagnostic_agent import (
     P1_ROOT_CAUSE_CODES,
@@ -258,14 +258,15 @@ def _evaluate(seq: int, kernel: DiagnosticKernel, decision: KernelDecision, log:
         confidence=outcome.confidence,
     )
     trace = [
-        ToolTraceEvent(
-            event_type="TOOL_CALL",
+        ToolTraceEventV2(
+            event_type="TOOL_CALL_V2",
             tool_name=tool,
             arguments=args,
             fingerprint="0" * 64,
             evidence_ids=accepted,
             error_code=error,
             elapsed_ms=0,
+            outcome_origin="EVIDENCE_BACKEND",
         )
         for tool, args, error, accepted in log
     ]
@@ -278,7 +279,7 @@ def _evaluate(seq: int, kernel: DiagnosticKernel, decision: KernelDecision, log:
             evidence_inventory=inventory,
         )
     )
-    result = DiagnosisRunResult(
+    result = DiagnosisRunResultV2(
         strategy=DiagnosticStrategy.DIAGNOSTIC_KERNEL,
         policy_identity=policy_identity_for_strategy(DiagnosticStrategy.DIAGNOSTIC_KERNEL),
         diagnosis=diagnosis,

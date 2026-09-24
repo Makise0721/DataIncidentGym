@@ -29,12 +29,14 @@ from data_incident_gym.diagnosis import (
     KERNEL_STRATEGIES,
     Diagnosis,
     DiagnosisMetrics,
-    DiagnosisRunResult,
+    DiagnosisRunResultAny,
+    DiagnosisRunResultV2,
     DiagnosisV2,
     DiagnosticStrategy,
     KernelStateTraceEvent,
     PolicyIdentity,
     TraceEvent,
+    TraceEventV2,
 )
 from data_incident_gym.diagnostic_agent import (
     MODEL_REQUEST_LIMIT,
@@ -102,6 +104,67 @@ class TraceEnvelope(BaseModel):
     schema_version: Literal["p1.trace.v1"]
     sequence: Annotated[StrictInt, Field(ge=1)]
     event: TraceEvent
+
+
+class TraceEnvelopeV2(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["p1.trace.v2"]
+    sequence: Annotated[StrictInt, Field(ge=1)]
+    event: TraceEventV2
+
+
+TraceEnvelopeAny = Annotated[
+    TraceEnvelope | TraceEnvelopeV2,
+    Field(discriminator="schema_version"),
+]
+
+
+def trace_envelope_model(schema_version: str) -> type[TraceEnvelope] | type[TraceEnvelopeV2]:
+    if schema_version == "p1.trace.v1":
+        return TraceEnvelope
+    if schema_version == "p1.trace.v2":
+        return TraceEnvelopeV2
+    raise ValueError("unsupported trace envelope schema")
+
+
+def trace_schema_for_run(diagnosis_run: DiagnosisRunResultAny) -> Literal[
+    "p1.trace.v1", "p1.trace.v2"
+]:
+    if isinstance(diagnosis_run, DiagnosisRunResultV2):
+        return "p1.trace.v2"
+    return "p1.trace.v1"
+
+
+def trace_schema_for_policy_identity(policy_identity: PolicyIdentity) -> Literal[
+    "p1.trace.v1", "p1.trace.v2"
+]:
+    """Select the trace reader from the trusted policy protocol identity."""
+
+    version = policy_identity.controller_protocol_version
+    if version == "p1.controller.v21":
+        return "p1.trace.v2"
+    if version.startswith("p1.controller.v"):
+        suffix = version.removeprefix("p1.controller.v")
+        if suffix.isdecimal() and 1 <= int(suffix) <= 20:
+            return "p1.trace.v1"
+    if version in {
+        "p1.fixed-rule.v1",
+        "p1.reference-analyst.v1",
+        "p1.planner_controller.v1",
+    }:
+        return "p1.trace.v1"
+    raise ValueError("unsupported policy identity for trace schema selection")
+
+
+def validate_trace_envelope(
+    payload: dict[str, Any], *, expected_schema_version: str | None = None
+) -> TraceEnvelope | TraceEnvelopeV2:
+    schema_version = payload.get("schema_version")
+    if expected_schema_version is not None and schema_version != expected_schema_version:
+        raise ValueError("trace envelope version does not match its run identity")
+    model = trace_envelope_model(schema_version)
+    return model.model_validate(payload)
 
 
 class EvidenceArtifact(BaseModel):
@@ -173,7 +236,7 @@ class ArtifactRun(BaseModel):
     recovery_status: RecoveryStatus
     model_base_url: StrictStr
     benchmark_manifest_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
-    diagnosis_run: DiagnosisRunResult
+    diagnosis_run: DiagnosisRunResultAny
     evaluation: EvaluationResult
 
     @model_validator(mode="after")
@@ -346,9 +409,11 @@ class ArtifactWriter:
 
     def _build_payloads(self, run: ArtifactRun) -> dict[str, str]:
         metadata = self._build_metadata(run)
+        trace_schema = trace_schema_for_run(run.diagnosis_run)
+        envelope_model = trace_envelope_model(trace_schema)
         trace = "".join(
-            TraceEnvelope(
-                schema_version="p1.trace.v1",
+            envelope_model(
+                schema_version=trace_schema,
                 sequence=index,
                 event=event,
             ).model_dump_json()
@@ -443,8 +508,11 @@ class ArtifactWriter:
         if texts != payloads:
             raise ValueError("artifact bundle changed during validation")
         metadata = RunMetadata.model_validate(_load_json(texts["metadata.json"]))
+        expected_trace_schema = trace_schema_for_run(run.diagnosis_run)
         trace_envelopes = tuple(
-            TraceEnvelope.model_validate(_load_json(line))
+            validate_trace_envelope(
+                _load_json(line), expected_schema_version=expected_trace_schema
+            )
             for line in texts["trace.jsonl"].splitlines()
             if line
         )
@@ -531,4 +599,10 @@ __all__ = [
     "RecoveryStatus",
     "RunMetadata",
     "TraceEnvelope",
+    "TraceEnvelopeAny",
+    "TraceEnvelopeV2",
+    "trace_envelope_model",
+    "trace_schema_for_policy_identity",
+    "trace_schema_for_run",
+    "validate_trace_envelope",
 ]

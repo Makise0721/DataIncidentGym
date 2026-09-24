@@ -34,10 +34,6 @@ from data_incident_gym.diagnosis import (
     ToolTraceEvent,
     UnresolvedEvidence,
 )
-from data_incident_gym.diagnostic_agent import (
-    CONTROLLER_PROTOCOL_VERSION,
-    KERNEL_PROMPT_VERSION,
-)
 from data_incident_gym.diagnostic_kernel import (
     ClaimEvidence,
     ClaimKind,
@@ -52,7 +48,6 @@ from data_incident_gym.diagnostic_kernel import (
     KernelFinalStatus,
 )
 from data_incident_gym.evaluation import (
-    EVALUATOR_VERSION,
     DeterministicEvaluator,
     EvaluationResult,
     EvaluationStatus,
@@ -81,7 +76,7 @@ from data_incident_gym.scenarios import ScenarioSpec, load_scenario_spec
 REPLAY_INDEX_PATH = (
     Path(__file__).resolve().parents[1] / "fixtures" / "diagnostic_replays" / "index.json"
 )
-REPLAY_PROTOCOL = f"{KERNEL_PROMPT_VERSION} / {CONTROLLER_PROTOCOL_VERSION} / {EVALUATOR_VERSION}"
+REPLAY_PROTOCOL = "p1.kernel.v18 / p1.controller.v20 / p1.evaluator.v3"
 REPLAY_SCHEMA_VERSION = "p1.diagnostic_replays.v1"
 REPLAY_GROUPS = frozenset(
     {"reference-gaps", "abstention-and-receipts", "claims-assets-budget"}
@@ -445,7 +440,7 @@ def _policy_identity(strategy: DiagnosticStrategy) -> PolicyIdentity:
         base_prompt_sha256="1" * 64,
         strategy_prompt_version="p1.static.v5",
         strategy_prompt_sha256="2" * 64,
-        controller_protocol_version=CONTROLLER_PROTOCOL_VERSION,
+        controller_protocol_version="p1.controller.v20",
         controller_protocol_sha256="3" * 64,
         tool_schema_sha256="4" * 64,
     )
@@ -735,6 +730,8 @@ def test_replay_reference_missing_required_schema() -> None:
             "RELATION_DATA_PROFILE",
         },
         trace_events=trace_events,
+        diagnosis_run_trace=original_run.trace,
+        diagnosis_run_schema_version=original_run.schema_version,
         tool_calls=len(trace_events),
     )
     types_finding = next(
@@ -791,6 +788,8 @@ def test_replay_reference_missing_required_schema() -> None:
             "RELATION_DATA_PROFILE",
         },
         trace_events=trace_events,
+        diagnosis_run_trace=original_run.trace,
+        diagnosis_run_schema_version=original_run.schema_version,
         tool_calls=len(trace_events),
     )
     assert cited_flags["types_ok"] is True

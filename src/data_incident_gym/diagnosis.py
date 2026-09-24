@@ -389,6 +389,38 @@ class ToolTraceEvent(BaseModel):
         return self
 
 
+class ToolTraceEventV2(ToolTraceEvent):
+    """A tool outcome with harness-attested execution provenance.
+
+    Keep the frozen v1 model above unchanged: adding a defaulted provenance
+    field there would alter historical run digests and serialized artifacts.
+    """
+
+    event_type: Literal["TOOL_CALL_V2"]
+    outcome_origin: Literal[
+        "CONTROLLER_PRECHECK",
+        "EVIDENCE_BACKEND",
+        "CONTROLLER_POSTCHECK",
+        "PROTOCOL_GATE",
+        "TOOL_RUNTIME",
+    ]
+
+    @model_validator(mode="after")
+    def validate_origin_contract(self) -> ToolTraceEventV2:
+        if self.error_code is None:
+            if self.outcome_origin != "EVIDENCE_BACKEND":
+                raise ValueError("successful tool events must originate at the evidence backend")
+        elif self.evidence_ids:
+            raise ValueError("failed tool events must not carry successful evidence IDs")
+        if self.target_refusals and self.outcome_origin != "EVIDENCE_BACKEND":
+            raise ValueError("target_refusals require an evidence-backend outcome")
+        if self.error_code == TARGETS_REFUSED_CODE and self.outcome_origin != "EVIDENCE_BACKEND":
+            raise ValueError("TARGETS_REFUSED requires an evidence-backend outcome")
+        if self.target_refusals and self.tool_name not in EVIDENCE_BATCH_TOOLS:
+            raise ValueError("target_refusals are only valid for batch tools")
+        return self
+
+
 #: Trace argument key carrying a batch call's requested targets. The request is
 #: recorded comma-joined in request order (identifiers and dbt unique ids never
 #: contain commas); an empty request records no key.
@@ -406,48 +438,239 @@ def _requested_targets(event: ToolTraceEvent) -> tuple[str, ...]:
     return tuple(part for part in raw.split(",") if part)
 
 
+class RefusalWitnessResult(BaseModel):
+    """Structured, provenance-aware result shared by all refusal consumers."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    witnessed: StrictBool
+    outcome_origin: Literal[
+        "CONTROLLER_PRECHECK",
+        "EVIDENCE_BACKEND",
+        "CONTROLLER_POSTCHECK",
+        "PROTOCOL_GATE",
+        "TOOL_RUNTIME",
+        "LEGACY_UNATTRIBUTED",
+    ] | None
+    event_fingerprint: Digest | None
+    trace_sequence: Annotated[StrictInt, Field(ge=1)] | None
+    failure_reason: Literal[
+        "NO_MATCH",
+        "AMBIGUOUS",
+        "CODE_MISMATCH",
+        "SOURCE_NOT_QUALIFIED",
+        "EVIDENCE_PRESENT",
+        "TRACE_VERSION_MISMATCH",
+    ] | None
+
+    @model_validator(mode="after")
+    def validate_result_shape(self) -> RefusalWitnessResult:
+        if self.witnessed:
+            if (
+                self.outcome_origin is None
+                or self.event_fingerprint is None
+                or self.trace_sequence is None
+                or self.failure_reason is not None
+            ):
+                raise ValueError("a witnessed refusal must identify its source event")
+        elif self.failure_reason is None:
+            raise ValueError("an unwitnessed result must name its failure reason")
+        return self
+
+
+def _failed_witness(
+    reason: Literal[
+        "NO_MATCH",
+        "AMBIGUOUS",
+        "CODE_MISMATCH",
+        "SOURCE_NOT_QUALIFIED",
+        "EVIDENCE_PRESENT",
+        "TRACE_VERSION_MISMATCH",
+    ],
+    *,
+    outcome_origin: Literal[
+        "CONTROLLER_PRECHECK",
+        "EVIDENCE_BACKEND",
+        "CONTROLLER_POSTCHECK",
+        "PROTOCOL_GATE",
+        "TOOL_RUNTIME",
+        "LEGACY_UNATTRIBUTED",
+    ] | None = None,
+    fingerprint: str | None = None,
+    sequence: int | None = None,
+) -> RefusalWitnessResult:
+    return RefusalWitnessResult(
+        witnessed=False,
+        outcome_origin=outcome_origin,
+        event_fingerprint=fingerprint,
+        trace_sequence=sequence,
+        failure_reason=reason,
+    )
+
+
 def refusal_witnessed(
-    trace_events: Iterable[ToolTraceEvent],
+    trace_events: Iterable[object],
     *,
     tool_name: str,
     target: str,
     code: str,
-) -> bool:
-    """Whether the trace witnesses exactly ``(target, code)`` for one tool.
+    diagnosis_run_schema_version: Literal["p1.diagnosis.v1", "p1.diagnosis_run.v2"],
+) -> RefusalWitnessResult:
+    """Return the unique refusal receipt under the trusted run schema.
 
-    The rule is chosen by the tool's **frozen protocol identity**
-    (``EVIDENCE_BATCH_TOOLS``), never by whether an event happens to carry
-    refusal entries — a v1 tool can never switch rules through the new field.
-
-    - **v2 batch tools**: a witness must be an atomic refusal (call-level
-      ``TARGETS_REFUSED``, no successful evidence), the target must appear in
-      the call's recorded request, and the exact ``(target, code)`` entry must
-      appear in exactly one such event. The call-level code never witnesses.
-    - **v1 tools**: the original rule — the target appears among the call's
-      arguments, the call is refused, and the count of such events is exactly
-      one whose code equals ``code``.
+    The v1 branch is frozen, including the T13 batch-tool rule. The v2 branch
+    additionally requires harness-attested provenance; versions are selected
+    by the aggregate run schema, never by event contents. The iterable must be
+    the full trace or a prefix beginning at trace sequence 1; returned sequence
+    numbers index every event, including non-tool events.
     """
 
-    events = tuple(event for event in trace_events if event.tool_name == tool_name)
-    if tool_name in EVIDENCE_BATCH_TOOLS:
-        witnesses = tuple(
-            event
-            for event in events
-            if event.error_code == TARGETS_REFUSED_CODE
-            and not event.evidence_ids
-            and target in _requested_targets(event)
-            and any(
-                item.target == target and item.code == code
-                for item in event.target_refusals
-            )
-        )
-        return len(witnesses) == 1
-    witnesses = tuple(
-        event
-        for event in events
-        if event.error_code is not None and target in event.arguments.values()
+    indexed = tuple(enumerate(trace_events, start=1))
+    tool_events = tuple(
+        (i, event)
+        for i, event in indexed
+        if isinstance(event, ToolTraceEvent) and event.tool_name == tool_name
     )
-    return len(witnesses) == 1 and witnesses[0].error_code == code
+
+    if diagnosis_run_schema_version == "p1.diagnosis.v1":
+        if any(type(event) is not ToolTraceEvent for _, event in tool_events):
+            return _failed_witness("TRACE_VERSION_MISMATCH")
+        if tool_name in EVIDENCE_BATCH_TOOLS:
+            witnesses = tuple(
+                (i, event)
+                for i, event in tool_events
+                if event.error_code == TARGETS_REFUSED_CODE
+                and not event.evidence_ids
+                and target in _requested_targets(event)
+                and any(
+                    item.target == target and item.code == code
+                    for item in event.target_refusals
+                )
+            )
+        else:
+            witnesses = tuple(
+                (i, event)
+                for i, event in tool_events
+                if event.error_code is not None and target in event.arguments.values()
+            )
+        if not witnesses:
+            return _failed_witness("NO_MATCH")
+        if len(witnesses) != 1:
+            return _failed_witness("AMBIGUOUS")
+        sequence, event = witnesses[0]
+        expected_code = (
+            TARGETS_REFUSED_CODE if tool_name in EVIDENCE_BATCH_TOOLS else code
+        )
+        if event.error_code != expected_code:
+            return _failed_witness(
+                "CODE_MISMATCH",
+                outcome_origin="LEGACY_UNATTRIBUTED",
+                fingerprint=event.fingerprint,
+                sequence=sequence,
+            )
+        return RefusalWitnessResult(
+            witnessed=True,
+            outcome_origin="LEGACY_UNATTRIBUTED",
+            event_fingerprint=event.fingerprint,
+            trace_sequence=sequence,
+            failure_reason=None,
+        )
+
+    if any(type(event) is not ToolTraceEventV2 for _, event in tool_events):
+        return _failed_witness("TRACE_VERSION_MISMATCH")
+    if tool_name in EVIDENCE_BATCH_TOOLS:
+        refusal_attempts = tuple(
+            (i, event)
+            for i, event in tool_events
+            if event.error_code is not None and target in _requested_targets(event)
+        )
+        if not refusal_attempts:
+            return _failed_witness("NO_MATCH")
+        if len(refusal_attempts) != 1:
+            return _failed_witness("AMBIGUOUS")
+        sequence, event = refusal_attempts[0]
+        if event.outcome_origin != "EVIDENCE_BACKEND":
+            return _failed_witness(
+                "SOURCE_NOT_QUALIFIED",
+                outcome_origin=event.outcome_origin,
+                fingerprint=event.fingerprint,
+                sequence=sequence,
+            )
+        if event.error_code != TARGETS_REFUSED_CODE:
+            return _failed_witness(
+                "CODE_MISMATCH",
+                outcome_origin=event.outcome_origin,
+                fingerprint=event.fingerprint,
+                sequence=sequence,
+            )
+        if event.evidence_ids:
+            return _failed_witness(
+                "EVIDENCE_PRESENT",
+                outcome_origin=event.outcome_origin,
+                fingerprint=event.fingerprint,
+                sequence=sequence,
+            )
+        if not any(item.target == target and item.code == code for item in event.target_refusals):
+            return _failed_witness(
+                "CODE_MISMATCH",
+                outcome_origin=event.outcome_origin,
+                fingerprint=event.fingerprint,
+                sequence=sequence,
+            )
+        return RefusalWitnessResult(
+            witnessed=True,
+            outcome_origin=event.outcome_origin,
+            event_fingerprint=event.fingerprint,
+            trace_sequence=sequence,
+            failure_reason=None,
+        )
+    else:
+        witnesses = tuple(
+            (i, event)
+            for i, event in tool_events
+            if event.error_code is not None and target in event.arguments.values()
+        )
+    if not witnesses:
+        return _failed_witness("NO_MATCH")
+    if len(witnesses) != 1:
+        return _failed_witness("AMBIGUOUS")
+    sequence, event = witnesses[0]
+    if event.error_code != (TARGETS_REFUSED_CODE if tool_name in EVIDENCE_BATCH_TOOLS else code):
+        return _failed_witness(
+            "CODE_MISMATCH",
+            outcome_origin=event.outcome_origin,
+            fingerprint=event.fingerprint,
+            sequence=sequence,
+        )
+    if event.evidence_ids:
+        return _failed_witness(
+            "EVIDENCE_PRESENT",
+            outcome_origin=event.outcome_origin,
+            fingerprint=event.fingerprint,
+            sequence=sequence,
+        )
+    if code in {"RELATION_NOT_ALLOWED", "NODE_NOT_ALLOWED"}:
+        if event.outcome_origin not in {"CONTROLLER_PRECHECK", "EVIDENCE_BACKEND"}:
+            return _failed_witness(
+                "SOURCE_NOT_QUALIFIED",
+                outcome_origin=event.outcome_origin,
+                fingerprint=event.fingerprint,
+                sequence=sequence,
+            )
+    elif event.outcome_origin != "EVIDENCE_BACKEND":
+        return _failed_witness(
+            "SOURCE_NOT_QUALIFIED",
+            outcome_origin=event.outcome_origin,
+            fingerprint=event.fingerprint,
+            sequence=sequence,
+        )
+    return RefusalWitnessResult(
+        witnessed=True,
+        outcome_origin=event.outcome_origin,
+        event_fingerprint=event.fingerprint,
+        trace_sequence=sequence,
+        failure_reason=None,
+    )
 
 
 class RejectedAssessmentSummary(BaseModel):
@@ -770,7 +993,7 @@ class PlanObligationRecord(BaseModel):
     close_reason: StrictStr | None = None
 
 
-TraceEvent = Annotated[
+TraceEventV1 = Annotated[
     ToolTraceEvent
     | EvidenceGateTraceEvent
     | ModelProtocolTraceEvent
@@ -779,6 +1002,21 @@ TraceEvent = Annotated[
     | PlanTraceEvent,
     Field(discriminator="event_type"),
 ]
+
+TraceEventV2 = Annotated[
+    ToolTraceEventV2
+    | EvidenceGateTraceEvent
+    | ModelProtocolTraceEvent
+    | KernelStateTraceEvent
+    | DiagnosisTerminalTraceEvent
+    | PlanTraceEvent,
+    Field(discriminator="event_type"),
+]
+
+# The public pre-v2 name remains the v1 union so existing model fields and
+# callers keep their frozen parsing behavior. New generic runtime containers
+# should use the explicitly versioned union they own.
+TraceEvent = TraceEventV1
 
 
 class PolicyIdentity(BaseModel):
@@ -815,7 +1053,7 @@ class DiagnosisRunResult(BaseModel):
     policy_identity: PolicyIdentity
     diagnosis: Diagnosis
     evidence_records: tuple[EvidenceRecord, ...]
-    trace: tuple[TraceEvent, ...]
+    trace: tuple[TraceEventV1, ...]
     metrics: DiagnosisMetrics
     kernel_state: Any | None = None
 
@@ -827,6 +1065,22 @@ class DiagnosisRunResult(BaseModel):
     def validate_contract(self) -> DiagnosisRunResult:
         if self.policy_identity.strategy is not self.strategy:
             raise ValueError("policy identity strategy must match diagnosis strategy")
+        if self.schema_version == "p1.diagnosis.v1" and (
+            self.policy_identity.controller_protocol_version == "p1.controller.v21"
+        ):
+            raise ValueError("v2 controller identity requires the v2 diagnosis-run schema")
+        if self.schema_version == "p1.diagnosis_run.v2" and (
+            self.policy_identity.controller_protocol_version != "p1.controller.v21"
+        ):
+            raise ValueError("v2 diagnosis-run schema requires the v2 controller identity")
+        if self.schema_version == "p1.diagnosis_run.v2" and self.strategy not in {
+            DiagnosticStrategy.STATIC_SKILL,
+            DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+            DiagnosticStrategy.NO_TOOL,
+            DiagnosticStrategy.KERNEL_NO_LINEAGE,
+            DiagnosticStrategy.KERNEL_NO_SCHEMA,
+        }:
+            raise ValueError("v2 diagnosis-run schema is reserved for built-in model strategies")
         if self.diagnosis.run_id != self._run_id_from_records():
             raise ValueError("diagnosis run_id must match evidence records")
         evidence_ids = tuple(record.evidence_id for record in self.evidence_records)
@@ -884,3 +1138,16 @@ class DiagnosisRunResult(BaseModel):
 
     def digest(self) -> str:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+
+class DiagnosisRunResultV2(DiagnosisRunResult):
+    """Aggregate run result for the provenance-aware trace contract."""
+
+    schema_version: Literal["p1.diagnosis_run.v2"] = "p1.diagnosis_run.v2"
+    trace: tuple[TraceEventV2, ...]
+
+
+DiagnosisRunResultAny = Annotated[
+    DiagnosisRunResult | DiagnosisRunResultV2,
+    Field(discriminator="schema_version"),
+]

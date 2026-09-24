@@ -14,7 +14,8 @@ from data_incident_gym.artifacts import (
     BudgetSummary,
     EvidenceArtifact,
     RunMetadata,
-    TraceEnvelope,
+    trace_envelope_model,
+    trace_schema_for_run,
 )
 from data_incident_gym.benchmark_manifest import BenchmarkManifest, build_manifest
 from data_incident_gym.benchmark_report import (
@@ -32,6 +33,7 @@ from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
+    DiagnosisRunResultV2,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
@@ -167,13 +169,19 @@ def _write_fixture(
                 evidence_inventory=(),
             )
         )
-        diagnosis_run = DiagnosisRunResult(
+        policy_identity = (
+            fixed_rule_policy_identity()
+            if cell.strategy is DiagnosticStrategy.FIXED_RULE
+            else policy_identity_for_strategy(cell.strategy)
+        )
+        run_model = (
+            DiagnosisRunResultV2
+            if policy_identity.controller_protocol_version == "p1.controller.v21"
+            else DiagnosisRunResult
+        )
+        diagnosis_run = run_model(
             strategy=cell.strategy,
-            policy_identity=(
-                fixed_rule_policy_identity()
-                if cell.strategy is DiagnosticStrategy.FIXED_RULE
-                else policy_identity_for_strategy(cell.strategy)
-            ),
+            policy_identity=policy_identity,
             diagnosis=diagnosis,
             evidence_records=(),
             trace=tuple(trace),
@@ -268,10 +276,12 @@ def _write_fixture(
         (artifact_path / "metadata.json").write_text(
             metadata.model_dump_json(indent=2) + "\n", encoding="utf-8"
         )
+        trace_schema = trace_schema_for_run(diagnosis_run)
+        envelope_model = trace_envelope_model(trace_schema)
         (artifact_path / "trace.jsonl").write_text(
             "".join(
-                TraceEnvelope(
-                    schema_version="p1.trace.v1", sequence=index, event=event
+                envelope_model(
+                    schema_version=trace_schema, sequence=index, event=event
                 ).model_dump_json()
                 + "\n"
                 for index, event in enumerate(diagnosis_run.trace, start=1)
@@ -337,9 +347,10 @@ def test_reporter_writes_deterministic_summary_and_markdown(tmp_path: Path) -> N
     summary = json.loads((suite_root / "summary.json").read_text(encoding="utf-8"))
     assert summary["manifest_sha256"] == manifest.digest()
     assert summary["cells"] == {"total": 106, "model_backed": 94, "fixed_rule": 12}
-    assert "当前固定样本尚未证明 Diagnostic Kernel 优势。" in (suite_root / "report.md").read_text(
-        encoding="utf-8"
-    )
+    report = (suite_root / "report.md").read_text(encoding="utf-8")
+    assert "当前固定样本尚未证明 Diagnostic Kernel 优势。" in report
+    assert "## Refusal witness sources" in report
+    assert "Controller precheck" in report
 
 
 def test_reporter_refuses_subset_suite(tmp_path: Path) -> None:
@@ -452,16 +463,25 @@ def test_reporter_independently_rejects_tool_outside_strategy_allowlist(
     for envelope in envelopes:
         envelope["sequence"] += 1
     tool_call = {
-        "schema_version": "p1.trace.v1",
+        "schema_version": envelopes[0]["schema_version"],
         "sequence": 1,
         "event": {
-            "event_type": "TOOL_CALL",
+            "event_type": (
+                "TOOL_CALL_V2"
+                if envelopes[0]["schema_version"] == "p1.trace.v2"
+                else "TOOL_CALL"
+            ),
             "tool_name": "get_dbt_run_results",
             "arguments": {"run_id": no_tool_cell.run_id},
             "fingerprint": "f" * 64,
             "evidence_ids": [],
             "error_code": None,
             "elapsed_ms": 0,
+            **(
+                {"outcome_origin": "EVIDENCE_BACKEND"}
+                if envelopes[0]["schema_version"] == "p1.trace.v2"
+                else {}
+            ),
         },
     }
     trace_path.write_text(
@@ -503,12 +523,14 @@ def test_summary_metrics_use_paired_and_run_level_contracts() -> None:
         ),
         evidence_ids=("ev_" + "1" * 64, "ev_" + "2" * 64),
         affected_assets=(confirmed_scenario.affected_assets[0],),
+        unresolved_evidence=(),
     )
     insufficient = SimpleNamespace(
         status=DiagnosisStatus.INSUFFICIENT_EVIDENCE,
-        claims=(),
-        evidence_ids=(),
-        affected_assets=(),
+            claims=(),
+            evidence_ids=(),
+            affected_assets=(),
+            unresolved_evidence=(),
     )
 
     def record(case_id: str, run_id: str, strategy: DiagnosticStrategy, diagnosis, role: str):

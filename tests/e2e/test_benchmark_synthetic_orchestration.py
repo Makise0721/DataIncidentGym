@@ -14,6 +14,7 @@ from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
+    DiagnosisRunResultV2,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
@@ -174,7 +175,8 @@ class _SyntheticEvaluationRunner:
                 evidence_inventory=(),
             )
         )
-        diagnosis_run = DiagnosisRunResult(
+        run_result_model = DiagnosisRunResult if fixed_rule else DiagnosisRunResultV2
+        diagnosis_run = run_result_model(
             strategy=strategy,
             policy_identity=policy,
             diagnosis=diagnosis,

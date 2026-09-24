@@ -45,7 +45,7 @@ from data_incident_gym.diagnosis import (
     AuditUnresolvedSummary,
     Diagnosis,
     DiagnosisMetrics,
-    DiagnosisRunResult,
+    DiagnosisRunResultV2,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
@@ -61,8 +61,10 @@ from data_incident_gym.diagnosis import (
     RejectedDecisionSummary,
     RejectedUnresolvedSummary,
     RootCauseClaim,
+    TargetRefusal,
     ToolTraceEvent,
-    TraceEvent,
+    ToolTraceEventV2,
+    TraceEventV2,
     derive_claim_recomputability,
 )
 from data_incident_gym.diagnostic_config import (
@@ -104,6 +106,8 @@ from data_incident_gym.run_context import ObservableRunContext, resolve_run_cont
 from data_incident_gym.strategy_adapter import (
     FinalSubmission,
     StrategySession,
+    _ProtocolGateSignal,
+    _ToolRuntimeSignal,
     builtin_declaration,
 )
 from data_incident_gym.submission_policy import GateRefusal, SubmissionPolicy
@@ -112,7 +116,7 @@ BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v18"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v20"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v21"
 
 # The model submits one of three terminal-shaped payloads. The name and the
 # description are part of the model-visible contract, so both are recorded in
@@ -658,13 +662,21 @@ class _RunState:
         tool_name: str,
         arguments: dict[str, str],
         fingerprint: str,
+        outcome_origin: Literal[
+            "CONTROLLER_PRECHECK",
+            "EVIDENCE_BACKEND",
+            "CONTROLLER_POSTCHECK",
+            "PROTOCOL_GATE",
+            "TOOL_RUNTIME",
+        ],
         evidence_ids: tuple[str, ...] = (),
         error_code: str | None = None,
+        target_refusals: tuple[TargetRefusal, ...] = (),
         started_at: float,
     ) -> None:
         self.trace.append(
-            ToolTraceEvent(
-                event_type="TOOL_CALL",
+            ToolTraceEventV2(
+                event_type="TOOL_CALL_V2",
                 tool_name=tool_name,
                 arguments={
                     key: _redact_trace_value(value) for key, value in arguments.items()
@@ -672,6 +684,8 @@ class _RunState:
                 fingerprint=fingerprint,
                 evidence_ids=evidence_ids,
                 error_code=error_code,
+                target_refusals=target_refusals,
+                outcome_origin=outcome_origin,
                 elapsed_ms=max(0, int((monotonic() - started_at) * 1000)),
             )
         )
@@ -1266,7 +1280,12 @@ def _submission_gate_refusal(
         records = tuple(state.kernel.evidence_records)
     else:
         records = tuple(state.evidence_records)
-    return policy.check(submission, records=records, trace=tuple(state.trace))
+    return policy.check(
+        submission,
+        records=records,
+        trace=tuple(state.trace),
+        diagnosis_run_schema_version="p1.diagnosis_run.v2",
+    )
 
 
 def _enum_value(value: object) -> str:
@@ -2355,6 +2374,18 @@ def _build_policy_surface(
         {
             "strategy": strategy.value,
             "protocol_version": CONTROLLER_PROTOCOL_VERSION,
+            "trace_contract": {
+                "trace_schema": "p1.trace.v2",
+                "run_schema": "p1.diagnosis_run.v2",
+                "tool_event_schema": ToolTraceEventV2.model_json_schema(),
+                "outcome_origins": [
+                    "CONTROLLER_PRECHECK",
+                    "EVIDENCE_BACKEND",
+                    "CONTROLLER_POSTCHECK",
+                    "PROTOCOL_GATE",
+                    "TOOL_RUNTIME",
+                ],
+            },
             "tool_schemas": tool_schema_payload,
             "budget": {
                 "model_request_limit": MODEL_REQUEST_LIMIT,
@@ -2451,6 +2482,7 @@ def _execute_evidence(
             arguments=arguments,
             fingerprint=fingerprint,
             error_code=_controller_error_code(error.code),
+            outcome_origin="CONTROLLER_PRECHECK",
             started_at=started_at,
         )
         provable = None
@@ -2476,14 +2508,42 @@ def _execute_evidence(
     except EvidenceToolError as error:
         error_code = _safe_tool_error_code(getattr(error, "code", None))
         state.adapter.reject(prepared, error_code)
+        target_refusals = tuple(
+            TargetRefusal(target=target, code=code)
+            for target, code in getattr(error, "target_refusals", ())
+        )
         state.record_tool_trace(
             tool_name=tool_name,
             arguments=arguments,
             fingerprint=prepared.fingerprint,
             error_code=error_code,
+            target_refusals=target_refusals,
+            outcome_origin="EVIDENCE_BACKEND",
             started_at=started_at,
         )
         raise ToolFailed(error_code) from None
+    except _ProtocolGateSignal:
+        state.adapter.reject(prepared, "EVIDENCE_TOOL_ERROR")
+        state.record_tool_trace(
+            tool_name=tool_name,
+            arguments=arguments,
+            fingerprint=prepared.fingerprint,
+            error_code="EVIDENCE_TOOL_ERROR",
+            outcome_origin="PROTOCOL_GATE",
+            started_at=started_at,
+        )
+        raise ToolFailed("EVIDENCE_TOOL_ERROR") from None
+    except _ToolRuntimeSignal:
+        state.adapter.reject(prepared, "EVIDENCE_TOOL_ERROR")
+        state.record_tool_trace(
+            tool_name=tool_name,
+            arguments=arguments,
+            fingerprint=prepared.fingerprint,
+            error_code="EVIDENCE_TOOL_ERROR",
+            outcome_origin="TOOL_RUNTIME",
+            started_at=started_at,
+        )
+        raise ToolFailed("EVIDENCE_TOOL_ERROR") from None
     except Exception:
         state.adapter.reject(prepared, "EVIDENCE_TOOL_ERROR")
         state.record_tool_trace(
@@ -2491,6 +2551,7 @@ def _execute_evidence(
             arguments=arguments,
             fingerprint=prepared.fingerprint,
             error_code="EVIDENCE_TOOL_ERROR",
+            outcome_origin="TOOL_RUNTIME",
             started_at=started_at,
         )
         raise ToolFailed("EVIDENCE_TOOL_ERROR") from None
@@ -2504,6 +2565,7 @@ def _execute_evidence(
             arguments=arguments,
             fingerprint=prepared.fingerprint,
             error_code=_controller_error_code(error.code),
+            outcome_origin="CONTROLLER_POSTCHECK",
             started_at=started_at,
         )
         raise ToolFailed(_kernel_retry_message(error.code)) from None
@@ -2514,6 +2576,7 @@ def _execute_evidence(
         arguments=arguments,
         fingerprint=prepared.fingerprint,
         evidence_ids=tuple(record.evidence_id for record in records),
+        outcome_origin="EVIDENCE_BACKEND",
         started_at=started_at,
     )
     return accepted
@@ -3009,7 +3072,7 @@ class DiagnosisRunner:
             )
         return receipt.diagnosis
 
-    def _result(self, state: _RunState) -> DiagnosisRunResult:
+    def _result(self, state: _RunState) -> DiagnosisRunResultV2:
         if _is_kernel_strategy(state.strategy):
             if state.outcome is None or state.kernel is None:
                 raise RuntimeError("diagnosis outcome is missing")
@@ -3040,7 +3103,7 @@ class DiagnosisRunner:
                 evidence_inventory=tuple(record.evidence_id for record in evidence_records),
             )
         )
-        return DiagnosisRunResult(
+        return DiagnosisRunResultV2(
             strategy=self._strategy,
             policy_identity=self._policy_identity,
             diagnosis=diagnosis,
@@ -3061,7 +3124,7 @@ class DiagnosisRunner:
             kernel_state=kernel_state,
         )
 
-    def _model_error_result(self, state: _RunState, reason: str) -> DiagnosisRunResult:
+    def _model_error_result(self, state: _RunState, reason: str) -> DiagnosisRunResultV2:
         if reason not in _MODEL_ERROR_REASONS:
             reason = "MODEL_RUNTIME_ERROR"
         if _is_kernel_strategy(state.strategy):
@@ -3093,7 +3156,7 @@ class DiagnosisRunner:
         self._close_session("STRATEGY_TIMEOUT" if reason == "MODEL_TIMEOUT" else "RUN_FAILED")
         return self._result(state)
 
-    async def diagnose(self) -> DiagnosisRunResult:
+    async def diagnose(self) -> DiagnosisRunResultV2:
         try:
             try:
                 return await self._diagnose_once()
@@ -3107,14 +3170,14 @@ class DiagnosisRunner:
                 with suppress(Exception):
                     await self._owned_model_client.close()
 
-    def _safe_terminal_result(self) -> DiagnosisRunResult:
+    def _safe_terminal_result(self) -> DiagnosisRunResultV2:
         diagnosis = Diagnosis(
             status=DiagnosisStatus.MODEL_ERROR,
             run_id=self._run_id,
             summary="MODEL_RUNTIME_ERROR",
             confidence=0.0,
         )
-        trace: tuple[TraceEvent, ...] = ()
+        trace: tuple[TraceEventV2, ...] = ()
         kernel_state: InvestigationState | None = None
         if _is_kernel_strategy(self._strategy):
             kernel_state = InvestigationState(
@@ -3152,7 +3215,7 @@ class DiagnosisRunner:
         )
         # Construction or teardown failures also close the session.
         self._close_session("RUN_FAILED")
-        return DiagnosisRunResult(
+        return DiagnosisRunResultV2(
             strategy=self._strategy,
             policy_identity=self._policy_identity,
             diagnosis=diagnosis,
@@ -3171,7 +3234,7 @@ class DiagnosisRunner:
             kernel_state=kernel_state,
         )
 
-    async def _diagnose_once(self) -> DiagnosisRunResult:
+    async def _diagnose_once(self) -> DiagnosisRunResultV2:
         kernel = (
             self._kernel(self._context)
             if _is_kernel_strategy(self._strategy)

@@ -12,7 +12,8 @@ from data_incident_gym.artifacts import (
     EvidenceArtifact,
     RecoveryStatus,
     RunMetadata,
-    TraceEnvelope,
+    trace_envelope_model,
+    trace_schema_for_run,
 )
 from data_incident_gym.benchmark_archive import ArchiveError, archive_suite
 from data_incident_gym.benchmark_manifest import build_manifest, generate_cells
@@ -83,10 +84,12 @@ def _write_cell(project_root: Path, manifest, run_id: str) -> None:
         recovery_status=RecoveryStatus.FAILED,
         artifact_files=ARTIFACT_FILENAMES,
     )
+    trace_schema = trace_schema_for_run(diagnosis_run)
+    envelope_model = trace_envelope_model(trace_schema)
     (cell / "trace.jsonl").write_text(
         "".join(
-            TraceEnvelope(
-                schema_version="p1.trace.v1", sequence=index, event=event
+            envelope_model(
+                schema_version=trace_schema, sequence=index, event=event
             ).model_dump_json()
             + "\n"
             for index, event in enumerate(diagnosis_run.trace, start=1)

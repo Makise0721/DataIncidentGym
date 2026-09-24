@@ -12,7 +12,7 @@ from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
     Diagnosis,
     DiagnosisClaim,
-    DiagnosisRunResult,
+    DiagnosisRunResultAny,
     DiagnosisStatus,
     HealthStateClaim,
     ToolTraceEvent,
@@ -48,7 +48,7 @@ from data_incident_gym.scenarios import (
     deleted_payment_rows,
 )
 
-EVALUATOR_VERSION = "p1.evaluator.v3"
+EVALUATOR_VERSION = "p1.evaluator.v4"
 
 # Claim kinds the evaluator has deterministic support rules for.
 ALL_CLAIM_KINDS = frozenset({"ROOT_CAUSE", "AFFECTED_ASSET", "HEALTH_STATE"})
@@ -352,7 +352,7 @@ def _health_claim_supported(
     return True
 
 
-def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResult) -> bool:
+def _health_evidence_valid(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResultAny) -> bool:
     """Whether every health claim of a NO_INCIDENT diagnosis is supported.
 
     v3 fixed a defect here: the v2 body returned after the first claim that
@@ -910,7 +910,7 @@ def _asset_claim_supported(
 
 def _claim_evidence_compatible(
     scenario: ScenarioSpec,
-    diagnosis_run: DiagnosisRunResult,
+    diagnosis_run: DiagnosisRunResultAny,
 ) -> bool:
     diagnosis = diagnosis_run.diagnosis
     inventory = {record.evidence_id: record for record in diagnosis_run.evidence_records}
@@ -1032,7 +1032,7 @@ def claim_support_verdicts(
     return tuple(verdicts)
 
 
-def _insufficiency_matches(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResult) -> bool:
+def _insufficiency_matches(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunResultAny) -> bool:
     diagnosis = diagnosis_run.diagnosis
     if diagnosis.status is not DiagnosisStatus.INSUFFICIENT_EVIDENCE:
         return False
@@ -1046,16 +1046,16 @@ def _insufficiency_matches(scenario: ScenarioSpec, diagnosis_run: DiagnosisRunRe
     }
     if expected != actual:
         return False
-    trace = tuple(event for event in diagnosis_run.trace if isinstance(event, ToolTraceEvent))
     for gap in scenario.observable_evidence_contract.unresolved_gaps:
         if gap.tool_name is None:
             continue
         if not refusal_witnessed(
-            trace,
+            diagnosis_run.trace,
             tool_name=gap.tool_name,
             target=gap.subject,
             code=gap.reason_code,
-        ):
+            diagnosis_run_schema_version=diagnosis_run.schema_version,
+        ).witnessed:
             return False
     return True
 
@@ -1091,7 +1091,7 @@ def _environment_verified(
     )
 
 
-def _controller_checks(diagnosis_run: DiagnosisRunResult) -> tuple[ControllerCheck, ...]:
+def _controller_checks(diagnosis_run: DiagnosisRunResultAny) -> tuple[ControllerCheck, ...]:
     if diagnosis_run.strategy not in KERNEL_STRATEGIES:
         return ()
     state = diagnosis_run.kernel_state
@@ -1159,7 +1159,7 @@ class DeterministicEvaluator:
     def evaluate(
         scenario: ScenarioSpec,
         verification: ScenarioVerification,
-        diagnosis_run: DiagnosisRunResult,
+        diagnosis_run: DiagnosisRunResultAny,
         *,
         recovery_succeeded: bool,
     ) -> EvaluationResult:

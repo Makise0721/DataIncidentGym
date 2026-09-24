@@ -77,6 +77,14 @@ def _expected_gaps(scenario: ScenarioSpec) -> set[tuple[str, str, str]]:
     }
 
 
+def _build_v1_findings(**kwargs):
+    return _build_findings(
+        **kwargs,
+        diagnosis_run_trace=kwargs["trace_events"],
+        diagnosis_run_schema_version="p1.diagnosis.v1",
+    )
+
+
 def test_receipt_proof_requires_matching_refusal_event() -> None:
     scenario = _scenario()
 
@@ -110,7 +118,7 @@ def test_receipt_proof_requires_matching_refusal_event() -> None:
 
 def test_findings_are_satisfied_for_a_contract_matching_run() -> None:
     scenario = _scenario()
-    findings, flags = _build_findings(
+    findings, flags = _build_v1_findings(
         scenario=scenario,
         evaluation_status="PASSED",
         diagnosis_status=scenario.expected_status,
@@ -150,7 +158,7 @@ def test_findings_are_satisfied_for_a_contract_matching_run() -> None:
 
 def test_failure_classification_separates_scoring_from_reference() -> None:
     scenario = _scenario()
-    _, flags = _build_findings(
+    _, flags = _build_v1_findings(
         scenario=scenario,
         evaluation_status="PASSED",
         diagnosis_status=scenario.expected_status,
@@ -182,7 +190,7 @@ def test_failure_classification_separates_scoring_from_reference() -> None:
     )
     assert scoring_classes == ("SCORING",)
 
-    _, mismatched = _build_findings(
+    _, mismatched = _build_v1_findings(
         scenario=scenario,
         evaluation_status="FAILED",
         diagnosis_status="CONFIRMED",
@@ -237,7 +245,7 @@ def test_missing_required_evidence_type_is_reference_not_scoring() -> None:
 
     scenario = _scenario()
     collected = set(scenario.required_evidence_types) - {"RELATION_SCHEMA"}
-    findings, flags = _build_findings(
+    findings, flags = _build_v1_findings(
         scenario=scenario,
         evaluation_status="FAILED",
         diagnosis_status=scenario.expected_status,
@@ -288,7 +296,7 @@ def test_collected_but_uncited_evidence_is_reference_not_scoring() -> None:
 
     scenario = _scenario()
     required = set(scenario.required_evidence_types)
-    findings, flags = _build_findings(
+    findings, flags = _build_v1_findings(
         scenario=scenario,
         evaluation_status="FAILED",
         diagnosis_status=scenario.expected_status,

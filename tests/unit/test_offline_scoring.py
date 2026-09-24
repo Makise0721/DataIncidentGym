@@ -13,11 +13,19 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from data_incident_gym.artifacts import ARTIFACT_FILENAMES, ArtifactRun, BudgetSummary
+from data_incident_gym.artifacts import (
+    ARTIFACT_FILENAMES,
+    ArtifactRun,
+    BudgetSummary,
+    trace_envelope_model,
+    trace_schema_for_run,
+)
 from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
+    DiagnosisRunResultAny,
+    DiagnosisRunResultV2,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosisV2,
@@ -38,6 +46,8 @@ from data_incident_gym.evaluation import (
 from data_incident_gym.evaluation_inputs import (
     ArtifactInputStatus,
     EvaluationInputBundle,
+    EvaluationInputBundleAny,
+    EvaluationInputBundleV2,
     EvaluationInputsError,
     RecoveryProof,
     _canonical_json,
@@ -121,6 +131,22 @@ def _static_insufficient_run() -> DiagnosisRunResult:
             ),
         ),
         metrics=_metrics(),
+    )
+
+
+def _v2_schema_run() -> DiagnosisRunResultV2:
+    legacy = _static_insufficient_run()
+    identity = legacy.policy_identity.model_copy(
+        update={"controller_protocol_version": "p1.controller.v21"}
+    )
+    return DiagnosisRunResultV2(
+        strategy=legacy.strategy,
+        policy_identity=identity,
+        diagnosis=legacy.diagnosis,
+        evidence_records=legacy.evidence_records,
+        trace=legacy.trace,
+        metrics=legacy.metrics,
+        kernel_state=legacy.kernel_state,
     )
 
 
@@ -235,11 +261,25 @@ def _verification(scenario: ScenarioSpec) -> ScenarioVerification:
 def _write_artifact_files(
     artifact_dir: Path,
     evaluation: EvaluationResult | None,
+    *,
+    run: DiagnosisRunResultAny | None = None,
 ) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     for name in ARTIFACT_FILENAMES:
         if name == "evaluation.json" and evaluation is not None:
             payload = evaluation.model_dump_json(indent=2) + "\n"
+        elif name == "trace.jsonl" and run is not None:
+            schema = trace_schema_for_run(run)
+            envelope_model = trace_envelope_model(schema)
+            payload = "".join(
+                envelope_model(
+                    schema_version=schema,
+                    sequence=index,
+                    event=event,
+                ).model_dump_json()
+                + "\n"
+                for index, event in enumerate(run.trace, start=1)
+            )
         else:
             payload = "{}\n"
         (artifact_dir / name).write_text(payload, encoding="utf-8", newline="")
@@ -273,7 +313,7 @@ def _prepared_bundle(project_root: Path) -> EvaluationInputBundle:
     evaluation = DeterministicEvaluator.evaluate(
         scenario, verification, run, recovery_succeeded=True
     )
-    _write_artifact_files(artifact_dir, evaluation)
+    _write_artifact_files(artifact_dir, evaluation, run=run)
     return build_evaluation_input_bundle(
         scenario=scenario,
         verification=verification,
@@ -287,10 +327,10 @@ def _prepared_bundle(project_root: Path) -> EvaluationInputBundle:
 
 def _prepare_project(
     project_root: Path,
-    run: DiagnosisRunResult | None = None,
+    run: DiagnosisRunResultAny | None = None,
     evaluation: EvaluationResult | None = None,
     scenario: ScenarioSpec | None = None,
-) -> EvaluationInputBundle:
+) -> EvaluationInputBundleAny:
     scenario = scenario or load_scenario_spec(CASE_ID)
     verification = _verification(scenario)
     run = run or _static_insufficient_run()
@@ -299,7 +339,7 @@ def _prepare_project(
         evaluation = DeterministicEvaluator.evaluate(
             scenario, verification, run, recovery_succeeded=True
         )
-    _write_artifact_files(artifact_dir, evaluation)
+    _write_artifact_files(artifact_dir, evaluation, run=run)
     bundle = build_evaluation_input_bundle(
         scenario=scenario,
         verification=verification,
@@ -431,13 +471,69 @@ def test_a_v2_diagnosis_round_trips_by_its_contract_marker(tmp_path: Path) -> No
     }
 
 
+def test_v2_run_and_evaluation_bundle_round_trip(tmp_path: Path) -> None:
+    bundle = _prepare_project(tmp_path, run=_v2_schema_run())
+
+    assert isinstance(bundle, EvaluationInputBundleV2)
+    loaded = load_evaluation_input_bundle(tmp_path, RUN_ID)
+
+    assert isinstance(loaded, EvaluationInputBundleV2)
+    assert loaded.diagnosis_run.schema_version == "p1.diagnosis_run.v2"
+    assert loaded.inputs_digest() == bundle.inputs_digest()
+
+
+def test_v2_bundle_rejects_v1_run_payload(tmp_path: Path) -> None:
+    bundle = _prepare_project(tmp_path, run=_v2_schema_run())
+    payload = bundle.model_dump(mode="json")
+    legacy_run = _static_insufficient_run()
+    payload["diagnosis_run"] = legacy_run.model_dump(mode="json")
+    payload["diagnosis_run_digest"] = legacy_run.digest()
+
+    with pytest.raises(ValidationError):
+        EvaluationInputBundleV2.model_validate(payload)
+
+
+def test_v2_bundle_rejects_v3_evaluator_identity(tmp_path: Path) -> None:
+    bundle = _prepare_project(tmp_path, run=_v2_schema_run())
+    payload = bundle.model_dump(mode="json")
+    payload["original_evaluator"]["version"] = "p1.evaluator.v3"
+
+    with pytest.raises(ValidationError, match="requires the v4 evaluator"):
+        EvaluationInputBundleV2.model_validate(payload)
+
+
+def test_v2_bundle_rejects_v1_trace_envelope(tmp_path: Path) -> None:
+    scenario = load_scenario_spec(CASE_ID)
+    verification = _verification(scenario)
+    run = _v2_schema_run()
+    evaluation = DeterministicEvaluator.evaluate(
+        scenario, verification, run, recovery_succeeded=True
+    )
+    artifact_dir = tmp_path / "artifacts" / RUN_ID
+    _write_artifact_files(artifact_dir, evaluation, run=_static_insufficient_run())
+
+    with pytest.raises(EvaluationInputsError) as error:
+        build_evaluation_input_bundle(
+            scenario=scenario,
+            verification=verification,
+            diagnosis_run=run,
+            recovery=_recovery_proof(scenario),
+            artifact_dir=artifact_dir,
+            budget=_budget(),
+            evaluator=default_evaluator_identity(),
+        )
+
+    assert error.value.code == "SCORING_INPUTS_INVALID"
+
+
 def test_a_v1_diagnosis_keeps_the_frozen_contract(tmp_path: Path) -> None:
-    _prepare_project(tmp_path)
+    bundle = _prepare_project(tmp_path)
 
     loaded = load_evaluation_input_bundle(tmp_path, RUN_ID)
 
     assert type(loaded.diagnosis_run.diagnosis) is Diagnosis
     assert loaded.diagnosis_run.diagnosis.schema_version == "p1.diagnosis.v1"
+    assert bundle.original_evaluator.version == "p1.evaluator.v4"
 
 
 def test_round_trip_preserves_inputs_and_classifies_re_scorable(tmp_path: Path) -> None:
@@ -539,7 +635,7 @@ def test_loader_rejects_changed_scenario_content(tmp_path: Path) -> None:
 
 def test_classification_distinguishes_partial_and_missing(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "artifacts" / RUN_ID
-    _write_artifact_files(artifact_dir, None)
+    _write_artifact_files(artifact_dir, None, run=_static_insufficient_run())
 
     partial = classify_scoring_inputs(tmp_path, RUN_ID)
     assert partial.status is ArtifactInputStatus.PARTIAL_ANALYSIS
@@ -857,7 +953,7 @@ def test_bundle_records_recovery_proof_with_fingerprint(tmp_path: Path) -> None:
 def test_bundle_rejects_malformed_recovery_fingerprint(tmp_path: Path) -> None:
     scenario = load_scenario_spec(CASE_ID)
     artifact_dir = tmp_path / "artifacts" / RUN_ID
-    _write_artifact_files(artifact_dir, None)
+    _write_artifact_files(artifact_dir, None, run=_static_insufficient_run())
 
     with pytest.raises(ValidationError):
         build_evaluation_input_bundle(
@@ -910,7 +1006,9 @@ def test_runner_service_chain_writes_attachment_then_rescores(tmp_path: Path) ->
     class FakeWriter:
         def write(self, artifact_run: ArtifactRun) -> Path:
             artifact_dir = tmp_path / "artifacts" / RUN_ID
-            _write_artifact_files(artifact_dir, artifact_run.evaluation)
+            _write_artifact_files(
+                artifact_dir, artifact_run.evaluation, run=artifact_run.diagnosis_run
+            )
             return artifact_dir
 
     runner = EvaluationRunner(

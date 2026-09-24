@@ -39,11 +39,19 @@ from pydantic import (
     model_validator,
 )
 
-from data_incident_gym.artifacts import ARTIFACT_FILENAMES, BudgetSummary
+from data_incident_gym.artifacts import (
+    ARTIFACT_FILENAMES,
+    BudgetSummary,
+    trace_schema_for_run,
+    validate_trace_envelope,
+)
 from data_incident_gym.diagnosis import (
     KERNEL_STRATEGIES,
     RUN_ID_PATTERN,
     DiagnosisRunResult,
+    DiagnosisRunResultAny,
+    DiagnosisRunResultV2,
+    DiagnosisTerminalTraceEvent,
     DiagnosisV2,
     DiagnosticStrategy,
     KernelStateTraceEvent,
@@ -64,7 +72,9 @@ INDEX_FILENAME = "index.json"
 # Versions whose archived attachments stay readable. v2 is retained so evidence
 # written before the health-claim strictness fix keeps loading; new attachments
 # always record the current version.
-KNOWN_EVALUATOR_VERSIONS = frozenset({"p1.evaluator.v2", EVALUATOR_VERSION})
+KNOWN_EVALUATOR_VERSIONS = frozenset(
+    {"p1.evaluator.v2", "p1.evaluator.v3", "p1.evaluator.v4"}
+)
 
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
 Digest = Annotated[StrictStr, Field(pattern=_DIGEST_PATTERN)]
@@ -226,6 +236,25 @@ class EvaluationInputBundle(BaseModel):
 
     def inputs_digest(self) -> str:
         return hashlib.sha256(self.semantic_json().encode("utf-8")).hexdigest()
+
+
+class EvaluationInputBundleV2(EvaluationInputBundle):
+    """Scoring inputs bound to the provenance-aware run and trace schemas."""
+
+    schema_version: Literal["p1.evaluation_inputs.v2"] = "p1.evaluation_inputs.v2"
+    diagnosis_run: DiagnosisRunResultV2
+
+    @model_validator(mode="after")
+    def validate_v2_evaluator(self) -> EvaluationInputBundleV2:
+        if self.original_evaluator.version != "p1.evaluator.v4":
+            raise ValueError("v2 evaluation-input bundle requires the v4 evaluator")
+        return self
+
+
+EvaluationInputBundleAny = Annotated[
+    EvaluationInputBundle | EvaluationInputBundleV2,
+    Field(discriminator="schema_version"),
+]
 
 
 class ScoringInputsIndex(BaseModel):
@@ -459,17 +488,35 @@ def build_evaluation_input_bundle(
     *,
     scenario: ScenarioSpec,
     verification: ScenarioVerification,
-    diagnosis_run: DiagnosisRunResult,
+    diagnosis_run: DiagnosisRunResultAny,
     recovery: RecoveryProof,
     artifact_dir: Path,
     budget: BudgetSummary,
     evaluator: EvaluatorIdentity,
-) -> EvaluationInputBundle:
+) -> EvaluationInputBundleAny:
     run_id = diagnosis_run.diagnosis.run_id
     if artifact_dir.name != run_id:
         _error("SCORING_INPUTS_INVALID", detail="artifact directory does not match run_id")
     if artifact_dir.is_symlink() or not artifact_dir.is_dir():
         _error("SCORING_INPUTS_INVALID", detail="artifact directory is not readable")
+    try:
+        trace_lines = (artifact_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+        trace_envelopes = tuple(
+            validate_trace_envelope(
+                _parse_json_object(line, "trace.jsonl"),
+                expected_schema_version=trace_schema_for_run(diagnosis_run),
+            )
+            for line in trace_lines
+            if line
+        )
+    except Exception:
+        _error("SCORING_INPUTS_INVALID", detail="trace version does not match diagnosis run")
+    if (
+        not trace_envelopes
+        or any(item.sequence != index for index, item in enumerate(trace_envelopes, start=1))
+        or not isinstance(trace_envelopes[-1].event, DiagnosisTerminalTraceEvent)
+    ):
+        _error("SCORING_INPUTS_INVALID", detail="trace envelope sequence is invalid")
     digests: list[ArtifactDigest] = []
     for name in ARTIFACT_FILENAMES:
         path = artifact_dir / name
@@ -477,7 +524,12 @@ def build_evaluation_input_bundle(
             _error("ARTIFACT_BUNDLE_INCOMPLETE", name)
         digests.append(ArtifactDigest(name=name, sha256=_file_sha256(path)))
     verification_payload = _verification_payload(verification)
-    return EvaluationInputBundle(
+    bundle_model = (
+        EvaluationInputBundleV2
+        if isinstance(diagnosis_run, DiagnosisRunResultV2)
+        else EvaluationInputBundle
+    )
+    return bundle_model(
         run_id=run_id,
         incident_case_id=scenario.incident_case_id,
         strategy=diagnosis_run.strategy,
@@ -517,7 +569,7 @@ def rename_directory_with_retry(temporary: Path, final: Path) -> None:
 
 def write_evaluation_input_bundle(
     project_root: Path,
-    bundle: EvaluationInputBundle,
+    bundle: EvaluationInputBundleAny,
     *,
     created_at: datetime,
 ) -> Path:
@@ -570,7 +622,7 @@ def write_evaluation_input_bundle(
 # ---------------------------------------------------------------------------
 
 
-def _restore_typed_kernel_state(run: DiagnosisRunResult) -> DiagnosisRunResult:
+def _restore_typed_kernel_state(run: DiagnosisRunResultAny) -> DiagnosisRunResultAny:
     if run.strategy not in KERNEL_STRATEGIES:
         if run.kernel_state is not None:
             _error("SCORING_INPUTS_INVALID", detail="static run must not carry kernel state")
@@ -591,9 +643,12 @@ def _restore_typed_kernel_state(run: DiagnosisRunResult) -> DiagnosisRunResult:
         for event in raw["trace"]
     )
     try:
-        return DiagnosisRunResult.model_validate(
-            {**raw, "kernel_state": state, "trace": trace}
+        run_model = (
+            DiagnosisRunResultV2
+            if isinstance(run, DiagnosisRunResultV2)
+            else DiagnosisRunResult
         )
+        return run_model.model_validate({**raw, "kernel_state": state, "trace": trace})
     except ValidationError:
         _error("SCORING_INPUTS_INVALID", detail="kernel state does not match the trace")
 
@@ -622,9 +677,16 @@ def _restore_typed_diagnosis(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _finalize_bundle(payload: dict[str, Any]) -> EvaluationInputBundle:
+def _finalize_bundle(payload: dict[str, Any]) -> EvaluationInputBundleAny:
+    schema_version = payload.get("schema_version")
+    if schema_version == "p1.evaluation_inputs.v1":
+        bundle_model = EvaluationInputBundle
+    elif schema_version == "p1.evaluation_inputs.v2":
+        bundle_model = EvaluationInputBundleV2
+    else:
+        _error("SCORING_INPUTS_INVALID", detail="unsupported bundle schema")
     try:
-        bundle = EvaluationInputBundle.model_validate(_restore_typed_diagnosis(payload))
+        bundle = bundle_model.model_validate(_restore_typed_diagnosis(payload))
     except ValidationError:
         _error("SCORING_INPUTS_INVALID", detail="bundle failed schema validation")
     require_known_evaluator(bundle.original_evaluator)
@@ -636,7 +698,7 @@ def _finalize_bundle(payload: dict[str, Any]) -> EvaluationInputBundle:
     return bundle
 
 
-def load_evaluation_input_bundle(project_root: Path, run_id: str) -> EvaluationInputBundle:
+def load_evaluation_input_bundle(project_root: Path, run_id: str) -> EvaluationInputBundleAny:
     run_dir = scoring_inputs_dir(project_root, run_id)
     if not run_dir.is_dir():
         _error("SCORING_INPUTS_MISSING", run_id)
@@ -669,7 +731,7 @@ def load_evaluation_input_bundle(project_root: Path, run_id: str) -> EvaluationI
 
 def load_archived_evaluation(
     project_root: Path,
-    bundle: EvaluationInputBundle,
+    bundle: EvaluationInputBundleAny,
 ) -> tuple[EvaluationResult | None, str | None]:
     """Return the archived ``EvaluationResult`` and a fixed unavailable reason."""
 
@@ -756,7 +818,7 @@ def export_scoring_inputs(project_root: Path, run_id: str, destination: Path) ->
     return target
 
 
-def load_scoring_inputs_export(path: Path) -> EvaluationInputBundle:
+def load_scoring_inputs_export(path: Path) -> EvaluationInputBundleAny:
     payload = _load_json_object(Path(path))
     if payload.get("schema_version") != SCORING_INPUTS_EXPORT_SCHEMA_VERSION:
         _error("SCORING_INPUTS_INVALID", detail="unsupported export schema")
@@ -787,6 +849,8 @@ __all__ = [
     "ArtifactInputStatus",
     "EvaluatorIdentity",
     "EvaluationInputBundle",
+    "EvaluationInputBundleAny",
+    "EvaluationInputBundleV2",
     "EvaluationInputsError",
     "INDEX_FILENAME",
     "INPUTS_FILENAME",

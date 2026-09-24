@@ -42,6 +42,8 @@ from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
+    DiagnosisRunResultAny,
+    DiagnosisRunResultV2,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
@@ -384,7 +386,7 @@ def _setup_failure_diagnosis(
     run_id: str,
     strategy: DiagnosticStrategy,
     stage_code: str = "RUN_SETUP_ERROR",
-) -> DiagnosisRunResult:
+) -> DiagnosisRunResultAny:
     identity: PolicyIdentity = (
         fixed_rule_policy_identity()
         if strategy is DiagnosticStrategy.FIXED_RULE
@@ -423,7 +425,12 @@ def _setup_failure_diagnosis(
             evidence_inventory=(),
         )
     )
-    return DiagnosisRunResult(
+    run_model = (
+        DiagnosisRunResultV2
+        if identity.controller_protocol_version == "p1.controller.v21"
+        else DiagnosisRunResult
+    )
+    return run_model(
         strategy=strategy,
         policy_identity=identity,
         diagnosis=diagnosis,

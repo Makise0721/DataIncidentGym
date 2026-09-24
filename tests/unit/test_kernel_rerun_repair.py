@@ -1388,7 +1388,7 @@ async def test_seq67_wrong_subject_declaration_is_corrected_on_retry(
     blocked = tuple(
         event
         for event in result.trace
-        if getattr(event, "event_type", None) == "TOOL_CALL"
+        if getattr(event, "event_type", None) in {"TOOL_CALL", "TOOL_CALL_V2"}
         and getattr(event, "error_code", None) == "RELATION_NOT_ALLOWED"
     )
     assert len(blocked) == 1

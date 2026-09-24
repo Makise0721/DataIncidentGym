@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from data_incident_gym.diagnosis import (
-    ToolTraceEvent,
     refusal_witnessed,
 )
 from data_incident_gym.evaluation import (
@@ -89,19 +88,18 @@ class SubmissionPolicy:
         submission: Any,
         records: tuple[Any, ...],
         trace: tuple[object, ...],
+        *,
+        diagnosis_run_schema_version: str = "p1.diagnosis.v1",
     ) -> GateRefusal | None:
         """Evaluate both gates; never raises, never accepts a broken check."""
 
         try:
             claims = tuple(getattr(submission, "claims", ()))
             unresolved = tuple(getattr(submission, "unresolved_evidence", ()))
-            tool_trace = tuple(
-                event for event in trace if isinstance(event, ToolTraceEvent)
-            )
             refusal = self._claim_support_refusal(claims, records)
             if refusal is not None:
                 return refusal
-            return self._gap_receipt_refusal(unresolved, tool_trace)
+            return self._gap_receipt_refusal(unresolved, trace, diagnosis_run_schema_version)
         except Exception:
             return GateRefusal(code=GATE_INTERNAL_ERROR, message=_GATE_INTERNAL_MESSAGE)
 
@@ -144,7 +142,8 @@ class SubmissionPolicy:
     def _gap_receipt_refusal(
         self,
         unresolved: tuple[Any, ...],
-        tool_trace: tuple[ToolTraceEvent, ...],
+        trace: tuple[object, ...],
+        diagnosis_run_schema_version: str,
     ) -> GateRefusal | None:
         contract = {
             (gap.gap_kind, gap.subject, gap.reason_code): gap.tool_name
@@ -156,11 +155,12 @@ class SubmissionPolicy:
             if tool_name is None:
                 continue
             if not refusal_witnessed(
-                tool_trace,
+                trace,
                 tool_name=tool_name,
                 target=item.subject,
                 code=item.reason_code,
-            ):
+                diagnosis_run_schema_version=diagnosis_run_schema_version,
+            ).witnessed:
                 return GateRefusal(code=GAP_RECEIPT_REQUIRED, message=_GAP_RECEIPT_MESSAGE)
         return None
 

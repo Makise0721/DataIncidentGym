@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
-    DiagnosisRunResult,
+    DiagnosisRunResultAny,
     EvidenceGateTraceEvent,
     RefusalAudit,
     RootCauseClaim,
@@ -97,7 +97,7 @@ def _dedup(codes: list[str]) -> tuple[str, ...]:
 
 
 def _verdict(
-    run: DiagnosisRunResult,
+    run: DiagnosisRunResultAny,
     trace_index: int,
     reason_code: str,
     status: RefusalReviewStatus,
@@ -207,7 +207,8 @@ def _review_i1(
 def _review_i2(
     audit: RefusalAudit,
     scenario: ScenarioSpec,
-    tool_prefix: tuple[ToolTraceEvent, ...],
+    trace_prefix: tuple[object, ...],
+    diagnosis_run_schema_version: str,
 ) -> tuple[RefusalReviewStatus, tuple[str, ...]]:
     contract = {
         (gap.gap_kind, gap.subject, gap.reason_code): gap.tool_name
@@ -223,11 +224,12 @@ def _review_i2(
         if tool_name is None:
             continue
         if not refusal_witnessed(
-            tool_prefix,
+            trace_prefix,
             tool_name=tool_name,
             target=item.subject,
             code=item.reason_code,
-        ):
+            diagnosis_run_schema_version=diagnosis_run_schema_version,
+        ).witnessed:
             violations.append(BASIS_GAP_WITHOUT_RECEIPT_ESTABLISHED)
     if audit.truncated_unresolved_count > 0 and not violations:
         blockers.append(BASIS_UNRESOLVED_TRUNCATED)
@@ -240,7 +242,7 @@ def _review_i2(
 
 
 def review_refusal_events(
-    run: DiagnosisRunResult,
+    run: DiagnosisRunResultAny,
     scenario: ScenarioSpec,
 ) -> tuple[RefusalReviewVerdict, ...]:
     """Re-derive a verdict for every refused gate event in one archived run."""
@@ -254,7 +256,7 @@ def review_refusal_events(
 
 
 def _review_event(
-    run: DiagnosisRunResult,
+    run: DiagnosisRunResultAny,
     scenario: ScenarioSpec,
     index: int,
     event: EvidenceGateTraceEvent,
@@ -293,8 +295,9 @@ def _review_event(
             audit.model_request_index, disagreements,
         )
 
+    trace_prefix = tuple(run.trace[:index])
     tool_prefix = tuple(
-        item for item in run.trace[:index] if isinstance(item, ToolTraceEvent)
+        item for item in trace_prefix if isinstance(item, ToolTraceEvent)
     )
     received = {item for event_tool in tool_prefix for item in event_tool.evidence_ids}
     records_at_time = tuple(
@@ -304,7 +307,7 @@ def _review_event(
     if audit.reason_code == "CLAIM_SUPPORT_REQUIRED":
         status, basis = _review_i1(audit, scenario, records_at_time)
     elif audit.reason_code == "GAP_RECEIPT_REQUIRED":
-        status, basis = _review_i2(audit, scenario, tool_prefix)
+        status, basis = _review_i2(audit, scenario, trace_prefix, run.schema_version)
     else:
         status, basis = RefusalReviewStatus.INDETERMINABLE, (BASIS_UNSUPPORTED_REASON_CODE,)
     return _verdict(

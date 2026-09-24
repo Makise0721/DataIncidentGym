@@ -15,7 +15,11 @@ from data_incident_gym.artifacts import (
     RecoveryStatus,
 )
 from data_incident_gym.config import PROJECT_ROOT, Settings
-from data_incident_gym.diagnosis import RUN_ID_PATTERN, DiagnosisRunResult, DiagnosticStrategy
+from data_incident_gym.diagnosis import (
+    RUN_ID_PATTERN,
+    DiagnosisRunResultAny,
+    DiagnosticStrategy,
+)
 from data_incident_gym.diagnostic_agent import (
     MODEL_REQUEST_LIMIT,
     OUTPUT_RETRY_LIMIT,
@@ -200,7 +204,7 @@ class EvaluationRunner:
         recovery_case: str | None = None
         recovery_fingerprint: str | None = None
         scenario_run: ScenarioRun | None = None
-        diagnosis_run: DiagnosisRunResult | None = None
+        diagnosis_run: DiagnosisRunResultAny | None = None
         primary_error_code: str | None = None
         stage = "INITIAL_RESET"
 
@@ -370,7 +374,7 @@ class EvaluationRunner:
         *,
         scenario: ScenarioSpec | None,
         verification: ScenarioVerification | None,
-        diagnosis_run: DiagnosisRunResult,
+        diagnosis_run: DiagnosisRunResultAny,
         recovery_case: str | None,
         recovery_succeeded: bool,
         recovery_fingerprint: str | None,

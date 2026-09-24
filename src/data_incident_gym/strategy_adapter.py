@@ -25,6 +25,7 @@ runner's own behaviour — diagnosis, counters, checks — is unchanged.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Literal
 
@@ -252,6 +253,24 @@ class ToolReceipt(BaseModel):
     target_refusals: tuple[TargetRefusal, ...] = ()
 
 
+@dataclass(frozen=True)
+class _SessionCallOutcome:
+    """Per-request dispatch facts kept inside the harness facade."""
+
+    receipt: ToolReceipt
+    dispatch_started: bool
+    records: tuple[EvidenceRecord, ...] = ()
+    backend_error: EvidenceToolError | None = None
+
+
+class _ProtocolGateSignal(StrategyProtocolError):
+    """A session rejected a request before entering the evidence backend."""
+
+
+class _ToolRuntimeSignal(StrategyProtocolError):
+    """A non-controlled exception occurred after backend dispatch began."""
+
+
 class FinalSubmission(BaseModel):
     """A strategy's terminal answer; the harness owns the run id."""
 
@@ -354,8 +373,6 @@ class StrategySession:
         self._final: Diagnosis | None = None
         self._cancellation: CancellationReason | None = None
         self._self_reported_usage: dict[str, Any] = {}
-        self._last_records: tuple[EvidenceRecord, ...] = ()
-        self._last_backend_error: BaseException | None = None
         self._model_requests_granted = 0
         self._output_retries_used = 0
 
@@ -398,6 +415,13 @@ class StrategySession:
     # -- operations -------------------------------------------------------
 
     def call_tool(self, request: ToolRequest) -> ToolReceipt:
+        """Public protocol call; dispatch facts stay internal to the facade."""
+
+        return self._call_tool_outcome(request).receipt
+
+    def _call_tool_outcome(self, request: ToolRequest) -> _SessionCallOutcome:
+        """Return this request's receipt and dispatch facts without shared state."""
+
         def receipt(
             *,
             accepted: bool,
@@ -425,40 +449,45 @@ class StrategySession:
             )
 
         if self._final is not None or self._cancellation is not None:
-            return receipt(accepted=False, code="SESSION_CLOSED")
+            return _SessionCallOutcome(receipt(accepted=False, code="SESSION_CLOSED"), False)
         if self._deadline_exceeded():
-            return receipt(accepted=False, code="DEADLINE_EXCEEDED")
+            return _SessionCallOutcome(receipt(accepted=False, code="DEADLINE_EXCEEDED"), False)
         if request.tool_name not in _TOOL_ARGUMENTS:
-            return receipt(accepted=False, code="UNKNOWN_TOOL")
+            return _SessionCallOutcome(receipt(accepted=False, code="UNKNOWN_TOOL"), False)
         if request.tool_name not in self._allowlist:
-            return receipt(accepted=False, code="TOOL_NOT_ALLOWLISTED")
+            return _SessionCallOutcome(receipt(accepted=False, code="TOOL_NOT_ALLOWLISTED"), False)
         self._attempts += 1
         if self._attempts > self._budget.tool_call_limit:
-            return receipt(accepted=False, code="TOOL_BUDGET_EXHAUSTED")
+            return _SessionCallOutcome(
+                receipt(accepted=False, code="TOOL_BUDGET_EXHAUSTED"), False
+            )
         expected = _TOOL_ARGUMENTS[request.tool_name]
         if set(request.arguments) != set(expected) or any(
             not isinstance(request.arguments[name], str) for name in expected
         ):
-            return receipt(
-                accepted=False,
-                code="TOOL_ARGUMENT_INVALID",
-                detail=f"expected arguments {', '.join(expected)}",
+            return _SessionCallOutcome(
+                receipt(
+                    accepted=False,
+                    code="TOOL_ARGUMENT_INVALID",
+                    detail=f"expected arguments {', '.join(expected)}",
+                ),
+                False,
             )
         for name in ("run_id",):
             if name in expected and request.arguments[name] != self._run_id:
-                return receipt(
-                    accepted=False,
-                    code="TOOL_ARGUMENT_INVALID",
-                    detail="run-scoped argument must match this session's run",
+                return _SessionCallOutcome(
+                    receipt(
+                        accepted=False,
+                        code="TOOL_ARGUMENT_INVALID",
+                        detail="run-scoped argument must match this session's run",
+                    ),
+                    False,
                 )
-        self._last_backend_error = None
-        self._last_records = ()
         try:
             records = self._dispatch(request.tool_name, request.arguments)
         except EvidenceToolError as error:
             # The refusal is the receipt: keep the backend's real error code and,
             # for v2 batch tools, the authoritative per-target detail.
-            self._last_backend_error = error
             detailed = tuple(
                 TargetRefusal(target=target, code=code)
                 for target, code in getattr(error, "target_refusals", ())
@@ -466,25 +495,27 @@ class StrategySession:
             result = receipt(
                 accepted=False, code=safe_error_code(error), target_refusals=detailed
             )
+            outcome = _SessionCallOutcome(result, True, backend_error=error)
         except Exception:
-            self._last_backend_error = None
             result = receipt(accepted=False, code="TOOL_BACKEND_ERROR")
+            outcome = _SessionCallOutcome(result, True)
         else:
-            self._last_records = tuple(records)
+            returned_records = tuple(records)
             duplicate = False
-            for record in records:
+            for record in returned_records:
                 if record.evidence_id in self._registered:
                     duplicate = True
                 else:
                     self._registered[record.evidence_id] = record
             result = receipt(
                 accepted=True,
-                evidence_ids=tuple(record.evidence_id for record in records),
-                evidence=tuple(records),
+                evidence_ids=tuple(record.evidence_id for record in returned_records),
+                evidence=returned_records,
                 duplicate=duplicate,
             )
+            outcome = _SessionCallOutcome(result, True, records=returned_records)
         self._receipts.append(result)
-        return result
+        return outcome
 
     def _dispatch(self, tool_name: str, arguments: dict[str, str]) -> tuple[EvidenceRecord, ...]:
         if tool_name == "get_dbt_run_results":
@@ -677,20 +708,23 @@ class ProtocolTools:
             tool_name=tool_name,
             arguments=arguments,
         )
-        receipt = self._session.call_tool(request)
+        outcome = self._session._call_tool_outcome(request)  # noqa: SLF001 - facade seam
+        receipt = outcome.receipt
         if receipt.accepted:
-            return self._session._last_records  # noqa: SLF001 - facade seam
+            return outcome.records
         error = receipt.error
-        backend_error = self._session._last_backend_error  # noqa: SLF001 - facade seam
+        backend_error = outcome.backend_error
         if (
             backend_error is not None
             and error is not None
             and error.code == safe_error_code(backend_error)
         ):
             raise backend_error
-        raise StrategyProtocolError(
-            error.code if error else "TOOL_BACKEND_ERROR", detail=getattr(error, "detail", None)
-        )
+        error_code = error.code if error else "TOOL_BACKEND_ERROR"
+        detail = getattr(error, "detail", None)
+        if outcome.dispatch_started:
+            raise _ToolRuntimeSignal(error_code, detail=detail)
+        raise _ProtocolGateSignal(error_code, detail=detail)
 
     def get_dbt_run_results(self, run_id: str) -> tuple[EvidenceRecord, ...]:
         return self._call("get_dbt_run_results", {"run_id": run_id})
