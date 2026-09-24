@@ -8,15 +8,15 @@
 
 ## 范围与来源
 
-本次读取的清单、ledger 与 run 文件位于以下已有审计副本：
+权威归档位于 `C:/Users/29913/codex_space/DataIncidentGym-v25-exec`。本次也检查了 `.dig/audit-qb` 中既有的复制批次，并将清单、ledger、doctor 文件以及 31 个 run 的全部六个归档文件与该归档逐字节比较：全部一致。main checkout 自身的顶层 `artifacts/<run_id>` 未包含这些 run，因此以下身份核对基于权威归档路径：
 
-- `.dig/audit-qb/config/benchmark/p1-formal-v29.json`，SHA-256：`138d790c7880fe1ebb7460b29561894df9ab3772acf100c67d3cbba283d7a34b`
-- `.dig/audit-qb/config/benchmark/p1-formal-v30.json`，SHA-256：`af5299be5903517f4897417aacb60d44011533422e6d91995a967defbb0cb5c9`
-- `.dig/audit-qb/artifacts/benchmarks/p1-formal-v29/ledger.jsonl`
-- `.dig/audit-qb/artifacts/benchmarks/p1-formal-v30/ledger.jsonl`
-- `.dig/audit-qb/artifacts/<run_id>/trace.jsonl` 及同目录的其他五个归档文件
+- `C:/Users/29913/codex_space/DataIncidentGym-v25-exec/config/benchmark/p1-formal-v29.json`，SHA-256：`138d790c7880fe1ebb7460b29561894df9ab3772acf100c67d3cbba283d7a34b`
+- `C:/Users/29913/codex_space/DataIncidentGym-v25-exec/config/benchmark/p1-formal-v30.json`，SHA-256：`af5299be5903517f4897417aacb60d44011533422e6d91995a967defbb0cb5c9`
+- `C:/Users/29913/codex_space/DataIncidentGym-v25-exec/artifacts/benchmarks/p1-formal-v29/ledger.jsonl`，SHA-256：`6e6254c55f5f713585a4410ca3387118ae64b030f67bb6a1017a83cd9a6575ba`
+- `C:/Users/29913/codex_space/DataIncidentGym-v25-exec/artifacts/benchmarks/p1-formal-v30/ledger.jsonl`，SHA-256：`1eb214894b02b021ac7101461f9afad5019fe5b325a1dd8430b77b1f07a3b58a`
+- `C:/Users/29913/codex_space/DataIncidentGym-v25-exec/artifacts/<run_id>/trace.jsonl` 及同目录的其他五个归档文件
 
-`.dig/audit-qb` 中的既有审计脚本将这两批描述为复制批次。main checkout 的顶层 `artifacts/<run_id>` 原始目录当前不存在，所以无法与这些副本逐字节比较；以下结论限定于上述完整副本。若副本与原始归档的差异以后被发现，对应 run 应重新判为不可判定。
+副本与上述权威归档文件逐字节一致；没有因产物缺失或身份不符而标记为不可判定的 run。
 
 检查单位是**终态 run**，不是错误事件总数。分母为 ledger 中有唯一 `STARTED` 和唯一终态记录、且与 manifest 对应的所有 run。逐 run 检查 trace 中 `event_type == "TOOL_CALL"` 且 `error_code == "NODE_ARGUMENT_NOT_PROVEN"` 的事件。完整性核对结果：v29 13 个、v30 18 个终态 run；每个 run 的 manifest/ledger/metadata 身份一致，六个归档文件齐全，trace 序号连续且唯一的 `DIAGNOSIS_TERMINAL` 位于末尾；未发现副本内身份不一致或缺件。
 
@@ -43,7 +43,7 @@
 | 没有后续工具调用且模型请求预算未耗尽 | 2/4 暴露 run |
 | 因 provider 错误或未继续而无法判断若继续运行是否恢复 | 2/4 暴露 run |
 
-`MODEL_TOOL_CALL_LIMIT` 与本次分类分开处理：判定“预算耗尽”时，逐 run 读取 trace/kernel state 的模型请求预算及工具调用预算，不把被拒绝的 lineage 调用本身误算成成功工具调用。四个暴露 run 均未达到工具调用预算上限；v30 seq 14/18 耗尽的是 **8/8 模型请求预算**。
+`MODEL_TOOL_CALL_LIMIT` 与本次分类分开处理：判定预算使用量时，逐 run 读取 trace/kernel state 的模型请求预算及工具调用预算，不把被拒绝的 lineage 调用本身误算成成功工具调用。四个暴露 run 均未达到工具调用预算上限；v30 seq 14/18 的模型请求用量达到 **8/8**，但这两格最终接受的是 `INSUFFICIENT_EVIDENCE`，不应称为 `MODEL_REQUEST_LIMIT` 终态，也不能把该终态归因于 lineage 拒绝。
 
 ## 边界
 
