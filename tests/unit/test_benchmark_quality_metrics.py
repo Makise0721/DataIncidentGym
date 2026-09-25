@@ -22,7 +22,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisClaim,
     DiagnosisMetrics,
     DiagnosisRunResult,
-    DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
@@ -647,7 +647,7 @@ def test_missing_citation_is_not_existence_and_not_support() -> None:
 
 
 def _run(diagnosis: Diagnosis, records: tuple[EvidenceRecord, ...]) -> DiagnosisRunResult:
-    return DiagnosisRunResultV2(
+    return DiagnosisRunResultV3(
         strategy=DiagnosticStrategy.STATIC_SKILL,
         policy_identity=policy_identity_for_strategy(DiagnosticStrategy.STATIC_SKILL),
         diagnosis=diagnosis,

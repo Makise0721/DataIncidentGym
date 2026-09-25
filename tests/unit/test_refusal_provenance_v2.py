@@ -172,8 +172,8 @@ def test_trace_schema_selection_uses_trusted_policy_identity() -> None:
     model_policy = policy_identity_for_strategy(DiagnosticStrategy.DIAGNOSTIC_KERNEL)
     planner_policy = evidence_planner_policy_identity()
 
-    assert model_policy.controller_protocol_version == "p1.controller.v21"
-    assert trace_schema_for_policy_identity(model_policy) == "p1.trace.v2"
+    assert model_policy.controller_protocol_version == "p1.controller.v22"
+    assert trace_schema_for_policy_identity(model_policy) == "p1.trace.v3"
     assert planner_policy.controller_protocol_version == "p1.planner_controller.v1"
     assert trace_schema_for_policy_identity(planner_policy) == "p1.trace.v1"
 

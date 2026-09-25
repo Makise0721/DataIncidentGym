@@ -45,6 +45,7 @@ from data_incident_gym.evaluation_inputs import (
     EvaluationInputBundle,
     EvaluationInputBundleAny,
     EvaluationInputBundleV2,
+    EvaluationInputBundleV3,
     EvaluationInputsError,
     EvaluatorIdentity,
     RecoveryProof,
@@ -187,6 +188,8 @@ def _load_bundle_for_analysis(payload: dict[str, Any]) -> EvaluationInputBundleA
         bundle_model = EvaluationInputBundle
     elif schema_version == "p1.evaluation_inputs.v2":
         bundle_model = EvaluationInputBundleV2
+    elif schema_version == "p1.evaluation_inputs.v3":
+        bundle_model = EvaluationInputBundleV3
     else:
         raise QualityBaselineError("unsupported scoring-input bundle schema")
     legacy = False

@@ -14,11 +14,12 @@ from data_incident_gym.diagnosis import (
     Diagnosis,
     DiagnosisMetrics,
     DiagnosisRunResult,
-    DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
     EvidenceGateTraceEvent,
+    EvidenceGateTraceEventV2,
     KernelStateTraceEvent,
     UnresolvedEvidence,
 )
@@ -145,13 +146,21 @@ class _SyntheticEvaluationRunner:
             successful_tool_calls=0,
             elapsed_ms=1000,
         )
-        trace: list[object] = [
+        gate_event = (
             EvidenceGateTraceEvent(
                 event_type="EVIDENCE_GATE",
                 reason_code=diagnosis.status.value,
                 accepted=True,
             )
-        ]
+            if fixed_rule
+            else EvidenceGateTraceEventV2(
+                schema_version="p1.evidence_gate.v2",
+                event_type="EVIDENCE_GATE",
+                reason_code=diagnosis.status.value,
+                accepted=True,
+            )
+        )
+        trace: list[object] = [gate_event]
         kernel_state = None
         if strategy in {
             DiagnosticStrategy.DIAGNOSTIC_KERNEL,
@@ -175,7 +184,7 @@ class _SyntheticEvaluationRunner:
                 evidence_inventory=(),
             )
         )
-        run_result_model = DiagnosisRunResult if fixed_rule else DiagnosisRunResultV2
+        run_result_model = DiagnosisRunResult if fixed_rule else DiagnosisRunResultV3
         diagnosis_run = run_result_model(
             strategy=strategy,
             policy_identity=policy,

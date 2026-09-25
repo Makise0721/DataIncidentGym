@@ -1109,9 +1109,11 @@ class BenchmarkReporter:
                 item for item in self._manifest.policies if item.strategy is strategy
             )
             trace_schema = trace_schema_for_policy_identity(policy.policy_identity)
-            diagnosis_run_schema = (
-                "p1.diagnosis_run.v2" if trace_schema == "p1.trace.v2" else "p1.diagnosis.v1"
-            )
+            diagnosis_run_schema = {
+                "p1.trace.v1": "p1.diagnosis.v1",
+                "p1.trace.v2": "p1.diagnosis_run.v2",
+                "p1.trace.v3": "p1.diagnosis_run.v3",
+            }[trace_schema]
             strategy_metrics[strategy.value] = {
                 "cells": len(items),
                 "completed": sum(item["ledger"].state == "COMPLETED" for item in items),

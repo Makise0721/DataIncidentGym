@@ -44,10 +44,11 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisRunResultAny,
     DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
-    EvidenceGateTraceEvent,
+    EvidenceGateTraceEventV2,
     KernelStateTraceEvent,
     PolicyIdentity,
 )
@@ -400,7 +401,8 @@ def _setup_failure_diagnosis(
         confidence=0.0,
     )
     trace: list[object] = [
-        EvidenceGateTraceEvent(
+        EvidenceGateTraceEventV2(
+            schema_version="p1.evidence_gate.v2",
             event_type="EVIDENCE_GATE",
             reason_code=stage_code,
             accepted=True,
@@ -426,7 +428,9 @@ def _setup_failure_diagnosis(
         )
     )
     run_model = (
-        DiagnosisRunResultV2
+        DiagnosisRunResultV3
+        if identity.controller_protocol_version == "p1.controller.v22"
+        else DiagnosisRunResultV2
         if identity.controller_protocol_version == "p1.controller.v21"
         else DiagnosisRunResult
     )

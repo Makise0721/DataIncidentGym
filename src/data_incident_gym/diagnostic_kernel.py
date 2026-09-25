@@ -194,6 +194,10 @@ class DiagnosticKernel:
         return tuple(self._records)
 
     @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    @property
     def allowed_root_cause_codes(self) -> tuple[str, ...]:
         return tuple(self._allowed_root_cause_codes)
 

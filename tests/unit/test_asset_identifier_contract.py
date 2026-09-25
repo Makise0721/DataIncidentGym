@@ -16,7 +16,7 @@ from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
     Diagnosis,
     DiagnosisMetrics,
-    DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     KernelStateTraceEvent,
@@ -577,7 +577,7 @@ def test_recovered_outcome_passes_the_evaluator_asset_check() -> None:
         recommended_actions=outcome.recommended_actions,
         confidence=outcome.confidence,
     )
-    run_result = DiagnosisRunResultV2(
+    run_result = DiagnosisRunResultV3(
         strategy=DiagnosticStrategy.DIAGNOSTIC_KERNEL,
         policy_identity=PolicyIdentity(
             strategy=DiagnosticStrategy.DIAGNOSTIC_KERNEL,

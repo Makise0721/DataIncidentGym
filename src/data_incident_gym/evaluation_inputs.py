@@ -51,6 +51,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisRunResult,
     DiagnosisRunResultAny,
     DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisTerminalTraceEvent,
     DiagnosisV2,
     DiagnosticStrategy,
@@ -73,7 +74,7 @@ INDEX_FILENAME = "index.json"
 # written before the health-claim strictness fix keeps loading; new attachments
 # always record the current version.
 KNOWN_EVALUATOR_VERSIONS = frozenset(
-    {"p1.evaluator.v2", "p1.evaluator.v3", "p1.evaluator.v4"}
+    {"p1.evaluator.v2", "p1.evaluator.v3", "p1.evaluator.v4", "p1.evaluator.v5"}
 )
 
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
@@ -251,8 +252,21 @@ class EvaluationInputBundleV2(EvaluationInputBundle):
         return self
 
 
+class EvaluationInputBundleV3(EvaluationInputBundle):
+    """Scoring inputs bound to the versioned kernel-refusal audit schemas."""
+
+    schema_version: Literal["p1.evaluation_inputs.v3"] = "p1.evaluation_inputs.v3"
+    diagnosis_run: DiagnosisRunResultV3
+
+    @model_validator(mode="after")
+    def validate_v3_evaluator(self) -> EvaluationInputBundleV3:
+        if self.original_evaluator.version != "p1.evaluator.v5":
+            raise ValueError("v3 evaluation-input bundle requires the v5 evaluator")
+        return self
+
+
 EvaluationInputBundleAny = Annotated[
-    EvaluationInputBundle | EvaluationInputBundleV2,
+    EvaluationInputBundle | EvaluationInputBundleV2 | EvaluationInputBundleV3,
     Field(discriminator="schema_version"),
 ]
 
@@ -525,7 +539,9 @@ def build_evaluation_input_bundle(
         digests.append(ArtifactDigest(name=name, sha256=_file_sha256(path)))
     verification_payload = _verification_payload(verification)
     bundle_model = (
-        EvaluationInputBundleV2
+        EvaluationInputBundleV3
+        if isinstance(diagnosis_run, DiagnosisRunResultV3)
+        else EvaluationInputBundleV2
         if isinstance(diagnosis_run, DiagnosisRunResultV2)
         else EvaluationInputBundle
     )
@@ -644,7 +660,9 @@ def _restore_typed_kernel_state(run: DiagnosisRunResultAny) -> DiagnosisRunResul
     )
     try:
         run_model = (
-            DiagnosisRunResultV2
+            DiagnosisRunResultV3
+            if isinstance(run, DiagnosisRunResultV3)
+            else DiagnosisRunResultV2
             if isinstance(run, DiagnosisRunResultV2)
             else DiagnosisRunResult
         )
@@ -683,6 +701,8 @@ def _finalize_bundle(payload: dict[str, Any]) -> EvaluationInputBundleAny:
         bundle_model = EvaluationInputBundle
     elif schema_version == "p1.evaluation_inputs.v2":
         bundle_model = EvaluationInputBundleV2
+    elif schema_version == "p1.evaluation_inputs.v3":
+        bundle_model = EvaluationInputBundleV3
     else:
         _error("SCORING_INPUTS_INVALID", detail="unsupported bundle schema")
     try:
@@ -851,6 +871,7 @@ __all__ = [
     "EvaluationInputBundle",
     "EvaluationInputBundleAny",
     "EvaluationInputBundleV2",
+    "EvaluationInputBundleV3",
     "EvaluationInputsError",
     "INDEX_FILENAME",
     "INPUTS_FILENAME",

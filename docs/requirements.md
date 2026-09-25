@@ -818,3 +818,11 @@ P2 优先参考 Correlator Demo 与 OpenLineage 官方教程，不复制许可�
 - 不得以“顺便实现”为由把 P1–P3 功能提前塞入 P0。
 - 需求文档批准后，再单独编写带确切文件路径、测试和命令的实施计划。
 - 实施计划批准后才开始代码开发。
+
+## 21. Kernel 合同拒绝离线复核
+
+后续新运行使用独立版本的拒绝审计合同：`p1.rejected_decision.v2`、`p1.evidence_gate.v2`、`p1.trace.v3`、`p1.diagnosis_run.v3`、`p1.evaluation_inputs.v3` 和 `p1.evaluator.v5`。新 controller 身份为 `p1.controller.v22`。这些版本必须严格配对读取；不得将新字段加入旧 v1/v2 模型并改变历史规范 JSON 或摘要。
+
+拒绝投影只保存 harness 计算的 decision/run 作用域布尔值，以及保留声明的 subject 首见等价编号。不得保存被拒 decision 的 run ID、脱敏 subject 原文、subject 哈希或可反查标识。离线读取器依次复核 `KERNEL_FINALIZED`、作用域和已实现的状态判据；状态无法回到拒绝时、声明截断或脱敏阻止证明时，结果必须为 `INDETERMINABLE`。相同首错码才可判为 `CORRECT`。
+
+旧归档继续按其原版本严格加载，v31 的七次历史拒绝保持 `INDETERMINABLE`。I1/I2 refusal review 和确定性评分语义不因新增投影而改变。该版本化实现不授权新的冻结、正式测量、真实模型请求或推送；这些仍需独立授权。

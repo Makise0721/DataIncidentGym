@@ -16,8 +16,9 @@ Every refusal gets exactly one of three verdicts:
   (an unregistered citation on an applicable claim, an unsupported claim, or
   a declared contract gap without a witnessed tool refusal);
 - ``FALSE_REFUSAL`` — the gate's own criteria, re-derived, all pass;
-- ``INDETERMINABLE`` — the audit is absent, truncated, redacted or
-  self-inconsistent. Indeterminable is never counted as correct.
+- ``INDETERMINABLE`` — the audit is absent, truncated, self-inconsistent, or
+  redacted in a way that could still satisfy the kernel contract. It is never
+  counted as correct.
 
 The audit's bounded projections (claims, unresolved gaps) are trusted as the
 refused submission's own record except where a cap dropped items; that is the
@@ -32,14 +33,32 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from data_incident_gym.diagnosis import (
+    KERNEL_STRATEGIES,
     AffectedAssetClaim,
     DiagnosisRunResultAny,
+    DiagnosisRunResultV3,
+    DiagnosisTerminalTraceEvent,
     EvidenceGateTraceEvent,
+    EvidenceGateTraceEventV2,
+    KernelStateTraceEvent,
     RefusalAudit,
+    RejectedDecisionSummaryV2,
     RootCauseClaim,
     ToolTraceEvent,
+    ToolTraceEventV2,
+    UnresolvedEvidence,
     derive_claim_recomputability,
     refusal_witnessed,
+)
+from data_incident_gym.diagnostic_contracts import (
+    EvidenceGapKind,
+    EvidenceGapStatus,
+    InvestigationState,
+    KernelError,
+)
+from data_incident_gym.diagnostic_validation import (
+    ValidationContext,
+    validate_unresolved_declarations,
 )
 from data_incident_gym.evaluation import (
     APPLICABLE_CLAIM_KINDS_BY_EXPECTED_STATUS,
@@ -66,6 +85,16 @@ BASIS_SUBJECT_UNAVAILABLE = "SUBJECT_UNAVAILABLE"
 BASIS_REASON_CODE_MISMATCH = "REASON_CODE_MISMATCH"
 BASIS_APPLICABLE_KINDS_MISMATCH = "APPLICABLE_KINDS_MISMATCH"
 BASIS_UNSUPPORTED_REASON_CODE = "UNSUPPORTED_REASON_CODE"
+BASIS_KERNEL_FINALIZED_ESTABLISHED = "KERNEL_FINALIZED_ESTABLISHED"
+BASIS_DECISION_SCOPE_MISMATCH_ESTABLISHED = "DECISION_SCOPE_MISMATCH_ESTABLISHED"
+BASIS_KERNEL_REASON_CODE_MISMATCH = "KERNEL_REASON_CODE_MISMATCH"
+BASIS_KERNEL_STATE_AT_REFUSAL_UNAVAILABLE = "KERNEL_STATE_AT_REFUSAL_UNAVAILABLE"
+BASIS_KERNEL_UNSUPPORTED_REASON = "UNSUPPORTED_KERNEL_REASON"
+BASIS_KERNEL_UNRESOLVED_DUPLICATE = "UNRESOLVED_DECLARATION_DUPLICATE"
+BASIS_KERNEL_UNRESOLVED_TRUNCATED = "KERNEL_UNRESOLVED_TRUNCATED"
+BASIS_KERNEL_SUBJECT_UNAVAILABLE = "KERNEL_SUBJECT_UNAVAILABLE"
+BASIS_KERNEL_GAP_OPEN_ESTABLISHED = "EVIDENCE_GAP_OPEN_ESTABLISHED"
+BASIS_KERNEL_UNRESOLVED_ESTABLISHED = "UNRESOLVED_EVIDENCE_UNBOUND_ESTABLISHED"
 
 
 class RefusalReviewStatus(StrEnum):
@@ -263,6 +292,14 @@ def _review_event(
 ) -> RefusalReviewVerdict:
     audit = event.refusal_audit
     if event.rejected_decision is not None:
+        if (
+            isinstance(run, DiagnosisRunResultV3)
+            and isinstance(event, EvidenceGateTraceEventV2)
+            and isinstance(event.rejected_decision, RejectedDecisionSummaryV2)
+        ):
+            return _review_kernel_rejection(
+                run, scenario, index, event, event.rejected_decision
+            )
         # The kernel-contract pathway archives a rejected_decision payload
         # whose criteria belong to the kernel's own contract; re-deriving
         # those is a separate pathway, not this gate review.
@@ -316,6 +353,309 @@ def _review_event(
     )
 
 
+def _kernel_state_at_refusal(
+    run: DiagnosisRunResultV3,
+    index: int,
+) -> InvestigationState | None:
+    """Return the final state only when the trace proves it matches refusal time."""
+
+    state_events = tuple(
+        (position, event.state)
+        for position, event in enumerate(run.trace)
+        if isinstance(event, KernelStateTraceEvent)
+    )
+    if len(state_events) != 1:
+        return None
+    state_index, raw_state = state_events[0]
+    if state_index <= index or run.trace[-2] != run.trace[state_index]:
+        return None
+    if any(isinstance(event, ToolTraceEvent) for event in run.trace[index + 1 : state_index]):
+        return None
+    try:
+        state = InvestigationState.model_validate(raw_state)
+    except Exception:
+        return None
+    record_ids = tuple(record.evidence_id for record in run.evidence_records)
+    receipt_ids = tuple(
+        evidence_id
+        for event in run.trace[:index]
+        if isinstance(event, ToolTraceEvent)
+        and event.error_code is None
+        for evidence_id in event.evidence_ids
+    )
+    prefix_tool_calls = sum(
+        isinstance(event, ToolTraceEvent) for event in run.trace[:index]
+    )
+    if (
+        state.run_id != run.diagnosis.run_id
+        or state.evidence_inventory != record_ids
+        or state.evidence_inventory != receipt_ids
+        or state.tool_calls_used != prefix_tool_calls
+    ):
+        return None
+    tool_events = tuple(event for event in run.trace if isinstance(event, ToolTraceEvent))
+    if any(type(event) is not ToolTraceEventV2 for event in tool_events):
+        return None
+    return state
+
+
+def _kernel_verdict(
+    run: DiagnosisRunResultV3,
+    index: int,
+    event: EvidenceGateTraceEventV2,
+    summary: RejectedDecisionSummaryV2,
+    status: RefusalReviewStatus,
+    basis: str,
+) -> RefusalReviewVerdict:
+    return _verdict(
+        run,
+        index,
+        event.reason_code,
+        status,
+        (basis,),
+        summary.model_request_index,
+    )
+
+
+def _review_kernel_rejection(
+    run: DiagnosisRunResultV3,
+    scenario: ScenarioSpec,
+    index: int,
+    event: EvidenceGateTraceEventV2,
+    summary: RejectedDecisionSummaryV2,
+) -> RefusalReviewVerdict:
+    """Replay the implemented kernel-finalize prefix in original first-error order."""
+
+    if run.strategy not in KERNEL_STRATEGIES:
+        return _kernel_verdict(
+            run, index, event, summary, RefusalReviewStatus.INDETERMINABLE,
+            BASIS_KERNEL_UNSUPPORTED_REASON,
+        )
+    state = _kernel_state_at_refusal(run, index)
+    if state is None:
+        return _kernel_verdict(
+            run, index, event, summary, RefusalReviewStatus.INDETERMINABLE,
+            BASIS_KERNEL_STATE_AT_REFUSAL_UNAVAILABLE,
+        )
+
+    accepted_before = any(
+        isinstance(candidate, EvidenceGateTraceEventV2) and candidate.accepted
+        for candidate in run.trace[:index]
+    )
+    accepted_after = any(
+        isinstance(candidate, EvidenceGateTraceEventV2) and candidate.accepted
+        for candidate in run.trace[index + 1 : -2]
+        if not isinstance(candidate, DiagnosisTerminalTraceEvent)
+        and not isinstance(candidate, KernelStateTraceEvent)
+    )
+    if accepted_before:
+        expected_finalized = True
+    elif accepted_after or state.final_status is None:
+        expected_finalized = False
+    else:
+        return _kernel_verdict(
+            run, index, event, summary, RefusalReviewStatus.INDETERMINABLE,
+            BASIS_KERNEL_STATE_AT_REFUSAL_UNAVAILABLE,
+        )
+    if expected_finalized:
+        status = (
+            RefusalReviewStatus.CORRECT
+            if event.reason_code == "KERNEL_FINALIZED"
+            else RefusalReviewStatus.FALSE_REFUSAL
+        )
+        return _kernel_verdict(
+            run, index, event, summary, status,
+            BASIS_KERNEL_FINALIZED_ESTABLISHED
+            if status is RefusalReviewStatus.CORRECT
+            else BASIS_KERNEL_REASON_CODE_MISMATCH,
+        )
+    if event.reason_code == "KERNEL_FINALIZED":
+        return _kernel_verdict(
+            run, index, event, summary, RefusalReviewStatus.FALSE_REFUSAL,
+            BASIS_KERNEL_REASON_CODE_MISMATCH,
+        )
+
+    if not summary.decision_scope_matches_run:
+        status = (
+            RefusalReviewStatus.CORRECT
+            if event.reason_code == "DECISION_SCOPE_MISMATCH"
+            else RefusalReviewStatus.FALSE_REFUSAL
+        )
+        return _kernel_verdict(
+            run, index, event, summary, status,
+            BASIS_DECISION_SCOPE_MISMATCH_ESTABLISHED
+            if status is RefusalReviewStatus.CORRECT
+            else BASIS_KERNEL_REASON_CODE_MISMATCH,
+        )
+    if event.reason_code == "DECISION_SCOPE_MISMATCH":
+        return _kernel_verdict(
+            run, index, event, summary, RefusalReviewStatus.FALSE_REFUSAL,
+            BASIS_KERNEL_REASON_CODE_MISMATCH,
+        )
+
+    open_gap = any(
+        gap.status in {EvidenceGapStatus.OPEN, EvidenceGapStatus.BLOCKED}
+        for gap in state.gaps
+    )
+    if event.reason_code == "EVIDENCE_GAP_OPEN":
+        if summary.status == "CONFIRMED" and len(state.hypotheses) < 2:
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.FALSE_REFUSAL,
+                BASIS_KERNEL_REASON_CODE_MISMATCH,
+            )
+        expected_gap_error = (
+            summary.status in {"CONFIRMED", "NO_INCIDENT"} and open_gap
+        )
+        status = (
+            RefusalReviewStatus.CORRECT
+            if expected_gap_error
+            else RefusalReviewStatus.FALSE_REFUSAL
+        )
+        return _kernel_verdict(
+            run, index, event, summary, status,
+            BASIS_KERNEL_GAP_OPEN_ESTABLISHED
+            if expected_gap_error
+            else BASIS_KERNEL_REASON_CODE_MISMATCH,
+        )
+
+    if event.reason_code == "UNRESOLVED_EVIDENCE_UNBOUND":
+        if summary.status != "INSUFFICIENT_EVIDENCE":
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.FALSE_REFUSAL,
+                BASIS_KERNEL_REASON_CODE_MISMATCH,
+            )
+        if len(state.hypotheses) < 2 or (
+            not open_gap and summary.total_unresolved == 0
+        ):
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.FALSE_REFUSAL,
+                BASIS_KERNEL_REASON_CODE_MISMATCH,
+            )
+        keys = tuple(
+            (item.evidence_kind, subject_id, item.reason_code)
+            for item, subject_id in zip(
+                summary.unresolved_evidence,
+                summary.unresolved_subject_equivalence,
+                strict=True,
+            )
+        )
+        if len(keys) != len(set(keys)):
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.FALSE_REFUSAL,
+                BASIS_KERNEL_UNRESOLVED_DUPLICATE,
+            )
+        if summary.truncated_unresolved_count:
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.INDETERMINABLE,
+                BASIS_KERNEL_UNRESOLVED_TRUNCATED,
+            )
+        visible = tuple(
+            UnresolvedEvidence(
+                evidence_kind=item.evidence_kind,
+                subject=item.subject,
+                reason_code=item.reason_code,
+            )
+            for item in summary.unresolved_evidence
+            if item.subject is not None
+        )
+        blocked = {
+            EvidenceGapKind.DISCRIMINATE_SCHEMA: frozenset(
+                (gap.subject, gap.error_code)
+                for gap in state.gaps
+                if gap.gap_kind is EvidenceGapKind.DISCRIMINATE_SCHEMA
+                and gap.status is EvidenceGapStatus.BLOCKED
+            ),
+            EvidenceGapKind.PROFILE_RELATION: frozenset(
+                (gap.subject, gap.error_code)
+                for gap in state.gaps
+                if gap.gap_kind is EvidenceGapKind.PROFILE_RELATION
+                and gap.status is EvidenceGapStatus.BLOCKED
+            ),
+            EvidenceGapKind.COMPARE_HISTORY: frozenset(
+                (gap.subject, gap.error_code)
+                for gap in state.gaps
+                if gap.gap_kind is EvidenceGapKind.COMPARE_HISTORY
+                and gap.status is EvidenceGapStatus.BLOCKED
+            ),
+        }
+        try:
+            validate_unresolved_declarations(
+                ValidationContext(
+                    incident_subjects=frozenset(scenario.incident_brief.subjects),
+                    health_target_subjects=frozenset(),
+                    incident_logical_observed_at=None,
+                    incident_observations=(),
+                    all_records=run.evidence_records,
+                ),
+                visible,
+                blocked_schema=blocked[EvidenceGapKind.DISCRIMINATE_SCHEMA],
+                blocked_profiles=blocked[EvidenceGapKind.PROFILE_RELATION],
+                blocked_histories=blocked[EvidenceGapKind.COMPARE_HISTORY],
+            )
+        except KernelError as error:
+            if error.code != "UNRESOLVED_EVIDENCE_UNBOUND":
+                return _kernel_verdict(
+                    run, index, event, summary, RefusalReviewStatus.INDETERMINABLE,
+                    BASIS_KERNEL_UNSUPPORTED_REASON,
+                )
+            if any(item.subject is None for item in summary.unresolved_evidence):
+                return _kernel_verdict(
+                    run, index, event, summary, RefusalReviewStatus.CORRECT,
+                    BASIS_KERNEL_UNRESOLVED_ESTABLISHED,
+                )
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.CORRECT,
+                BASIS_KERNEL_UNRESOLVED_ESTABLISHED,
+            )
+        except Exception:
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.INDETERMINABLE,
+                BASIS_KERNEL_UNSUPPORTED_REASON,
+            )
+        redacted = tuple(
+            item for item in summary.unresolved_evidence if item.subject is None
+        )
+        redacted_proven_unbound = False
+        for item in redacted:
+            if item.evidence_kind == "RELATION_SCHEMA":
+                candidates = blocked[EvidenceGapKind.DISCRIMINATE_SCHEMA]
+            elif item.evidence_kind == "RELATION_DATA_PROFILE":
+                candidates = blocked[EvidenceGapKind.PROFILE_RELATION]
+            elif item.evidence_kind == "RELATION_HISTORY":
+                candidates = blocked[EvidenceGapKind.COMPARE_HISTORY]
+            else:
+                # Other validator branches bind subjects only through
+                # incident_subjects or known evidence node IDs. The projection
+                # always exposes those sets, so a redacted subject cannot bind.
+                redacted_proven_unbound = True
+                break
+            if not any(reason == item.reason_code for _, reason in candidates):
+                # Relation declarations bind only to a blocked gap with the
+                # same reason code. Without any such gap, every hidden subject
+                # is provably unbound; with one, redaction may conceal a match.
+                redacted_proven_unbound = True
+                break
+        if redacted_proven_unbound:
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.CORRECT,
+                BASIS_KERNEL_UNRESOLVED_ESTABLISHED,
+            )
+        if redacted:
+            return _kernel_verdict(
+                run, index, event, summary, RefusalReviewStatus.INDETERMINABLE,
+                BASIS_KERNEL_SUBJECT_UNAVAILABLE,
+            )
+        return _kernel_verdict(
+            run, index, event, summary, RefusalReviewStatus.FALSE_REFUSAL,
+            BASIS_KERNEL_REASON_CODE_MISMATCH,
+        )
+
+    return _kernel_verdict(
+        run, index, event, summary, RefusalReviewStatus.INDETERMINABLE,
+        BASIS_KERNEL_UNSUPPORTED_REASON,
+    )
+
+
 __all__ = [
     "BASIS_ALL_APPLICABLE_CLAIMS_SUPPORTED",
     "BASIS_ALL_CONTRACT_GAPS_WITNESSED",
@@ -323,9 +663,19 @@ __all__ = [
     "BASIS_AUDIT_EVIDENCE_OUTSIDE_PREFIX",
     "BASIS_CLAIMS_TRUNCATED",
     "BASIS_COUNT_IDENTITY_VIOLATED",
+    "BASIS_DECISION_SCOPE_MISMATCH_ESTABLISHED",
     "BASIS_GATE_INTERNAL_ERROR",
     "BASIS_I1_NOT_APPLICABLE",
     "BASIS_KERNEL_CONTRACT_PATHWAY",
+    "BASIS_KERNEL_FINALIZED_ESTABLISHED",
+    "BASIS_KERNEL_GAP_OPEN_ESTABLISHED",
+    "BASIS_KERNEL_REASON_CODE_MISMATCH",
+    "BASIS_KERNEL_STATE_AT_REFUSAL_UNAVAILABLE",
+    "BASIS_KERNEL_SUBJECT_UNAVAILABLE",
+    "BASIS_KERNEL_UNRESOLVED_DUPLICATE",
+    "BASIS_KERNEL_UNRESOLVED_ESTABLISHED",
+    "BASIS_KERNEL_UNRESOLVED_TRUNCATED",
+    "BASIS_KERNEL_UNSUPPORTED_REASON",
     "BASIS_REASON_CODE_MISMATCH",
     "BASIS_SUBJECT_UNAVAILABLE",
     "BASIS_UNREGISTERED_REF_ESTABLISHED",

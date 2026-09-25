@@ -514,7 +514,9 @@ def refusal_witnessed(
     tool_name: str,
     target: str,
     code: str,
-    diagnosis_run_schema_version: Literal["p1.diagnosis.v1", "p1.diagnosis_run.v2"],
+    diagnosis_run_schema_version: Literal[
+        "p1.diagnosis.v1", "p1.diagnosis_run.v2", "p1.diagnosis_run.v3"
+    ],
 ) -> RefusalWitnessResult:
     """Return the unique refusal receipt under the trusted run schema.
 
@@ -837,6 +839,86 @@ class RejectedDecisionSummary(BaseModel):
     truncated: StrictBool = False
 
 
+class RejectedDecisionSummaryV2(RejectedDecisionSummary):
+    """Versioned, privacy-preserving projection for future kernel refusals."""
+
+    schema_version: Literal["p1.rejected_decision.v2"]
+    decision_scope_matches_run: StrictBool
+    unresolved_subject_equivalence: tuple[Annotated[StrictInt, Field(ge=0)], ...]
+
+    @model_validator(mode="after")
+    def validate_equivalence_projection(self) -> RejectedDecisionSummaryV2:
+        if len(self.unresolved_subject_equivalence) != len(self.unresolved_evidence):
+            raise ValueError("subject equivalence must align with retained unresolved evidence")
+        next_identifier = 0
+        seen: set[int] = set()
+        visible_subject_ids: dict[str, int] = {}
+        visible_subjects_by_id: dict[int, str] = {}
+        redacted_ids: set[int] = set()
+        for identifier in self.unresolved_subject_equivalence:
+            if identifier not in seen:
+                if identifier != next_identifier:
+                    raise ValueError("subject equivalence IDs must use canonical first-seen order")
+                seen.add(identifier)
+                next_identifier += 1
+        for item, identifier in zip(
+            self.unresolved_evidence,
+            self.unresolved_subject_equivalence,
+            strict=True,
+        ):
+            if item.subject is None:
+                redacted_ids.add(identifier)
+                continue
+            previous_id = visible_subject_ids.setdefault(item.subject, identifier)
+            previous_subject = visible_subjects_by_id.setdefault(identifier, item.subject)
+            if previous_id != identifier or previous_subject != item.subject:
+                raise ValueError("visible subjects must match their equivalence IDs")
+        if redacted_ids.intersection(visible_subjects_by_id):
+            raise ValueError("redacted and visible subjects cannot share an equivalence ID")
+        if self.unknown_subject_count != sum(
+            item.subject is None for item in self.unresolved_evidence
+        ):
+            raise ValueError("unknown_subject_count must match redacted retained subjects")
+        if (
+            len(self.assessments)
+            + self.unknown_hypothesis_count
+            + self.truncated_assessment_count
+            != self.total_assessments
+        ):
+            raise ValueError("assessment projection counts are inconsistent")
+        if len(self.claims) + self.truncated_claim_count != self.total_claims:
+            raise ValueError("claim projection counts are inconsistent")
+        if len(self.unresolved_evidence) + self.truncated_unresolved_count != self.total_unresolved:
+            raise ValueError("unresolved projection counts are inconsistent")
+        if any(
+            value < 0
+            for value in (
+                self.unknown_hypothesis_count,
+                self.unknown_claim_count,
+                self.unknown_evidence_count,
+                self.unknown_subject_count,
+                self.truncated_assessment_count,
+                self.truncated_claim_count,
+                self.truncated_unresolved_count,
+                self.truncated_evidence_count,
+                self.total_assessments,
+                self.total_claims,
+                self.total_unresolved,
+            )
+        ):
+            raise ValueError("projection counts must not be negative")
+        if self.truncated != any(
+            (
+                self.truncated_assessment_count,
+                self.truncated_claim_count,
+                self.truncated_unresolved_count,
+                self.truncated_evidence_count,
+            )
+        ):
+            raise ValueError("truncated flag must match projection truncation counts")
+        return self
+
+
 class EvidenceGateTraceEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -848,6 +930,13 @@ class EvidenceGateTraceEvent(BaseModel):
     # and whenever the gate refused a submission it could not project, which is
     # reported as indeterminable rather than as a zero count.
     refusal_audit: RefusalAudit | None = None
+
+
+class EvidenceGateTraceEventV2(EvidenceGateTraceEvent):
+    """Strict v2 evidence-gate event used by the v3 trace contract."""
+
+    schema_version: Literal["p1.evidence_gate.v2"]
+    rejected_decision: RejectedDecisionSummaryV2 | None = None
 
 
 class ModelCallShape(BaseModel):
@@ -1013,6 +1102,16 @@ TraceEventV2 = Annotated[
     Field(discriminator="event_type"),
 ]
 
+TraceEventV3 = Annotated[
+    ToolTraceEventV2
+    | EvidenceGateTraceEventV2
+    | ModelProtocolTraceEvent
+    | KernelStateTraceEvent
+    | DiagnosisTerminalTraceEvent
+    | PlanTraceEvent,
+    Field(discriminator="event_type"),
+]
+
 # The public pre-v2 name remains the v1 union so existing model fields and
 # callers keep their frozen parsing behavior. New generic runtime containers
 # should use the explicitly versioned union they own.
@@ -1065,14 +1164,23 @@ class DiagnosisRunResult(BaseModel):
     def validate_contract(self) -> DiagnosisRunResult:
         if self.policy_identity.strategy is not self.strategy:
             raise ValueError("policy identity strategy must match diagnosis strategy")
-        if self.schema_version == "p1.diagnosis.v1" and (
-            self.policy_identity.controller_protocol_version == "p1.controller.v21"
+        legacy_schema_controllers = {
+            "p1.controller.v21",
+            "p1.controller.v22",
+        }
+        if (
+            self.schema_version == "p1.diagnosis.v1"
+            and self.policy_identity.controller_protocol_version in legacy_schema_controllers
         ):
-            raise ValueError("v2 controller identity requires the v2 diagnosis-run schema")
+            raise ValueError("v2+ controller identity requires a versioned diagnosis-run schema")
         if self.schema_version == "p1.diagnosis_run.v2" and (
             self.policy_identity.controller_protocol_version != "p1.controller.v21"
         ):
             raise ValueError("v2 diagnosis-run schema requires the v2 controller identity")
+        if self.schema_version == "p1.diagnosis_run.v3" and (
+            self.policy_identity.controller_protocol_version != "p1.controller.v22"
+        ):
+            raise ValueError("v3 diagnosis-run schema requires the v3 controller identity")
         if self.schema_version == "p1.diagnosis_run.v2" and self.strategy not in {
             DiagnosticStrategy.STATIC_SKILL,
             DiagnosticStrategy.DIAGNOSTIC_KERNEL,
@@ -1081,6 +1189,14 @@ class DiagnosisRunResult(BaseModel):
             DiagnosticStrategy.KERNEL_NO_SCHEMA,
         }:
             raise ValueError("v2 diagnosis-run schema is reserved for built-in model strategies")
+        if self.schema_version == "p1.diagnosis_run.v3" and self.strategy not in {
+            DiagnosticStrategy.STATIC_SKILL,
+            DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+            DiagnosticStrategy.NO_TOOL,
+            DiagnosticStrategy.KERNEL_NO_LINEAGE,
+            DiagnosticStrategy.KERNEL_NO_SCHEMA,
+        }:
+            raise ValueError("v3 diagnosis-run schema is reserved for built-in model strategies")
         if self.diagnosis.run_id != self._run_id_from_records():
             raise ValueError("diagnosis run_id must match evidence records")
         evidence_ids = tuple(record.evidence_id for record in self.evidence_records)
@@ -1147,7 +1263,14 @@ class DiagnosisRunResultV2(DiagnosisRunResult):
     trace: tuple[TraceEventV2, ...]
 
 
+class DiagnosisRunResultV3(DiagnosisRunResult):
+    """Aggregate run result for the versioned kernel-refusal audit trace."""
+
+    schema_version: Literal["p1.diagnosis_run.v3"] = "p1.diagnosis_run.v3"
+    trace: tuple[TraceEventV3, ...]
+
+
 DiagnosisRunResultAny = Annotated[
-    DiagnosisRunResult | DiagnosisRunResultV2,
+    DiagnosisRunResult | DiagnosisRunResultV2 | DiagnosisRunResultV3,
     Field(discriminator="schema_version"),
 ]

@@ -89,6 +89,13 @@ def _policy_identity(strategy: DiagnosticStrategy) -> PolicyIdentity:
     )
 
 
+def _evaluator_for(run: DiagnosisRunResultAny):
+    identity = default_evaluator_identity()
+    if isinstance(run, DiagnosisRunResultV2):
+        return identity.model_copy(update={"version": "p1.evaluator.v4"})
+    return identity
+
+
 def _metrics() -> DiagnosisMetrics:
     return DiagnosisMetrics(
         provider="synthetic",
@@ -321,7 +328,7 @@ def _prepared_bundle(project_root: Path) -> EvaluationInputBundle:
         recovery=_recovery_proof(scenario),
         artifact_dir=artifact_dir,
         budget=_budget(),
-        evaluator=default_evaluator_identity(),
+        evaluator=_evaluator_for(run),
     )
 
 
@@ -347,7 +354,7 @@ def _prepare_project(
         recovery=_recovery_proof(scenario),
         artifact_dir=artifact_dir,
         budget=_budget(),
-        evaluator=default_evaluator_identity(),
+        evaluator=_evaluator_for(run),
     )
     write_evaluation_input_bundle(project_root, bundle, created_at=CREATED_AT)
     return bundle
@@ -520,7 +527,7 @@ def test_v2_bundle_rejects_v1_trace_envelope(tmp_path: Path) -> None:
             recovery=_recovery_proof(scenario),
             artifact_dir=artifact_dir,
             budget=_budget(),
-            evaluator=default_evaluator_identity(),
+            evaluator=_evaluator_for(run),
         )
 
     assert error.value.code == "SCORING_INPUTS_INVALID"
@@ -533,7 +540,7 @@ def test_a_v1_diagnosis_keeps_the_frozen_contract(tmp_path: Path) -> None:
 
     assert type(loaded.diagnosis_run.diagnosis) is Diagnosis
     assert loaded.diagnosis_run.diagnosis.schema_version == "p1.diagnosis.v1"
-    assert bundle.original_evaluator.version == "p1.evaluator.v4"
+    assert bundle.original_evaluator.version == "p1.evaluator.v5"
 
 
 def test_round_trip_preserves_inputs_and_classifies_re_scorable(tmp_path: Path) -> None:

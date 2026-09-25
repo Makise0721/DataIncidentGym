@@ -34,10 +34,12 @@ from data_incident_gym.diagnosis import (
     DiagnosisMetrics,
     DiagnosisRunResult,
     DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
     EvidenceGateTraceEvent,
+    EvidenceGateTraceEventV2,
     RootCauseClaim,
 )
 from data_incident_gym.diagnostic_agent import P1_ROOT_CAUSE_CODES, policy_identity_for_strategy
@@ -137,14 +139,27 @@ def _write_fixture(
             summary="MODEL_RUNTIME_ERROR",
             confidence=0.0,
         )
+        policy_identity = (
+            fixed_rule_policy_identity()
+            if cell.strategy is DiagnosticStrategy.FIXED_RULE
+            else policy_identity_for_strategy(cell.strategy)
+        )
         kernel_state = None
-        trace = [
-            EvidenceGateTraceEvent(
+        gate_event = (
+            EvidenceGateTraceEventV2(
+                schema_version="p1.evidence_gate.v2",
                 event_type="EVIDENCE_GATE",
                 reason_code="MODEL_RUNTIME_ERROR",
                 accepted=True,
             )
-        ]
+            if policy_identity.controller_protocol_version == "p1.controller.v22"
+            else EvidenceGateTraceEvent(
+                event_type="EVIDENCE_GATE",
+                reason_code="MODEL_RUNTIME_ERROR",
+                accepted=True,
+            )
+        )
+        trace = [gate_event]
         if cell.strategy in {
             DiagnosticStrategy.DIAGNOSTIC_KERNEL,
             DiagnosticStrategy.KERNEL_NO_LINEAGE,
@@ -169,13 +184,10 @@ def _write_fixture(
                 evidence_inventory=(),
             )
         )
-        policy_identity = (
-            fixed_rule_policy_identity()
-            if cell.strategy is DiagnosticStrategy.FIXED_RULE
-            else policy_identity_for_strategy(cell.strategy)
-        )
         run_model = (
-            DiagnosisRunResultV2
+            DiagnosisRunResultV3
+            if policy_identity.controller_protocol_version == "p1.controller.v22"
+            else DiagnosisRunResultV2
             if policy_identity.controller_protocol_version == "p1.controller.v21"
             else DiagnosisRunResult
         )
@@ -466,10 +478,10 @@ def test_reporter_independently_rejects_tool_outside_strategy_allowlist(
         "schema_version": envelopes[0]["schema_version"],
         "sequence": 1,
         "event": {
-            "event_type": (
-                "TOOL_CALL_V2"
-                if envelopes[0]["schema_version"] == "p1.trace.v2"
-                else "TOOL_CALL"
+                "event_type": (
+                    "TOOL_CALL_V2"
+                    if envelopes[0]["schema_version"] in {"p1.trace.v2", "p1.trace.v3"}
+                    else "TOOL_CALL"
             ),
             "tool_name": "get_dbt_run_results",
             "arguments": {"run_id": no_tool_cell.run_id},
@@ -479,8 +491,8 @@ def test_reporter_independently_rejects_tool_outside_strategy_allowlist(
             "elapsed_ms": 0,
             **(
                 {"outcome_origin": "EVIDENCE_BACKEND"}
-                if envelopes[0]["schema_version"] == "p1.trace.v2"
-                else {}
+                    if envelopes[0]["schema_version"] in {"p1.trace.v2", "p1.trace.v3"}
+                    else {}
             ),
         },
     }

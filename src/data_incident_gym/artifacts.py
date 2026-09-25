@@ -31,12 +31,14 @@ from data_incident_gym.diagnosis import (
     DiagnosisMetrics,
     DiagnosisRunResultAny,
     DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisV2,
     DiagnosticStrategy,
     KernelStateTraceEvent,
     PolicyIdentity,
     TraceEvent,
     TraceEventV2,
+    TraceEventV3,
 )
 from data_incident_gym.diagnostic_agent import (
     MODEL_REQUEST_LIMIT,
@@ -114,34 +116,50 @@ class TraceEnvelopeV2(BaseModel):
     event: TraceEventV2
 
 
+class TraceEnvelopeV3(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal["p1.trace.v3"]
+    sequence: Annotated[StrictInt, Field(ge=1)]
+    event: TraceEventV3
+
+
 TraceEnvelopeAny = Annotated[
-    TraceEnvelope | TraceEnvelopeV2,
+    TraceEnvelope | TraceEnvelopeV2 | TraceEnvelopeV3,
     Field(discriminator="schema_version"),
 ]
 
 
-def trace_envelope_model(schema_version: str) -> type[TraceEnvelope] | type[TraceEnvelopeV2]:
+def trace_envelope_model(
+    schema_version: str,
+) -> type[TraceEnvelope] | type[TraceEnvelopeV2] | type[TraceEnvelopeV3]:
     if schema_version == "p1.trace.v1":
         return TraceEnvelope
     if schema_version == "p1.trace.v2":
         return TraceEnvelopeV2
+    if schema_version == "p1.trace.v3":
+        return TraceEnvelopeV3
     raise ValueError("unsupported trace envelope schema")
 
 
 def trace_schema_for_run(diagnosis_run: DiagnosisRunResultAny) -> Literal[
-    "p1.trace.v1", "p1.trace.v2"
+    "p1.trace.v1", "p1.trace.v2", "p1.trace.v3"
 ]:
+    if isinstance(diagnosis_run, DiagnosisRunResultV3):
+        return "p1.trace.v3"
     if isinstance(diagnosis_run, DiagnosisRunResultV2):
         return "p1.trace.v2"
     return "p1.trace.v1"
 
 
 def trace_schema_for_policy_identity(policy_identity: PolicyIdentity) -> Literal[
-    "p1.trace.v1", "p1.trace.v2"
+    "p1.trace.v1", "p1.trace.v2", "p1.trace.v3"
 ]:
     """Select the trace reader from the trusted policy protocol identity."""
 
     version = policy_identity.controller_protocol_version
+    if version == "p1.controller.v22":
+        return "p1.trace.v3"
     if version == "p1.controller.v21":
         return "p1.trace.v2"
     if version.startswith("p1.controller.v"):
@@ -159,7 +177,7 @@ def trace_schema_for_policy_identity(policy_identity: PolicyIdentity) -> Literal
 
 def validate_trace_envelope(
     payload: dict[str, Any], *, expected_schema_version: str | None = None
-) -> TraceEnvelope | TraceEnvelopeV2:
+) -> TraceEnvelope | TraceEnvelopeV2 | TraceEnvelopeV3:
     schema_version = payload.get("schema_version")
     if expected_schema_version is not None and schema_version != expected_schema_version:
         raise ValueError("trace envelope version does not match its run identity")
@@ -601,6 +619,7 @@ __all__ = [
     "TraceEnvelope",
     "TraceEnvelopeAny",
     "TraceEnvelopeV2",
+    "TraceEnvelopeV3",
     "trace_envelope_model",
     "trace_schema_for_policy_identity",
     "trace_schema_for_run",

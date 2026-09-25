@@ -1,6 +1,8 @@
-# 未来 Kernel 合同拒绝的最小审计投影（方案 2 已批准，待实施）
+# 未来 Kernel 合同拒绝的最小审计投影（方案 2 已批准并实施）
 
 依据：[v31 七次拒绝的只读可行性报告](../reports/2026-09-25-v31-kernel-refusal-readonly-feasibility.md)。所有者于 2026-09-25 批准方案 2：为未来运行实施版本化安全投影与离线验收。**该批准不重写 v31，也不放行新冻结、真实模型测量或推送。**
+
+实施结果与验证记录见[实现报告](../reports/2026-09-25-kernel-refusal-audit-projection-implementation.md)。
 
 ## 已证明的缺口
 

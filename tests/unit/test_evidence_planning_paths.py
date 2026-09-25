@@ -28,7 +28,7 @@ from data_incident_gym.diagnosis import (
     AffectedAssetClaim,
     Diagnosis,
     DiagnosisMetrics,
-    DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
@@ -279,7 +279,7 @@ def _evaluate(seq: int, kernel: DiagnosticKernel, decision: KernelDecision, log:
             evidence_inventory=inventory,
         )
     )
-    result = DiagnosisRunResultV2(
+    result = DiagnosisRunResultV3(
         strategy=DiagnosticStrategy.DIAGNOSTIC_KERNEL,
         policy_identity=policy_identity_for_strategy(DiagnosticStrategy.DIAGNOSTIC_KERNEL),
         diagnosis=diagnosis,

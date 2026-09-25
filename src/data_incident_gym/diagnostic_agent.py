@@ -45,11 +45,11 @@ from data_incident_gym.diagnosis import (
     AuditUnresolvedSummary,
     Diagnosis,
     DiagnosisMetrics,
-    DiagnosisRunResultV2,
+    DiagnosisRunResultV3,
     DiagnosisStatus,
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
-    EvidenceGateTraceEvent,
+    EvidenceGateTraceEventV2,
     HealthStateClaim,
     KernelStateTraceEvent,
     ModelCallShape,
@@ -58,13 +58,13 @@ from data_incident_gym.diagnosis import (
     RefusalAudit,
     RejectedAssessmentSummary,
     RejectedClaimSummary,
-    RejectedDecisionSummary,
+    RejectedDecisionSummaryV2,
     RejectedUnresolvedSummary,
     RootCauseClaim,
     TargetRefusal,
     ToolTraceEvent,
     ToolTraceEventV2,
-    TraceEventV2,
+    TraceEventV3,
     derive_claim_recomputability,
 )
 from data_incident_gym.diagnostic_config import (
@@ -116,7 +116,7 @@ BASE_PROMPT_VERSION = "p1.base.v1"
 KERNEL_PROMPT_VERSION = "p1.kernel.v18"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
-CONTROLLER_PROTOCOL_VERSION = "p1.controller.v21"
+CONTROLLER_PROTOCOL_VERSION = "p1.controller.v22"
 
 # The model submits one of three terminal-shaped payloads. The name and the
 # description are part of the model-visible contract, so both are recorded in
@@ -1284,7 +1284,7 @@ def _submission_gate_refusal(
         submission,
         records=records,
         trace=tuple(state.trace),
-        diagnosis_run_schema_version="p1.diagnosis_run.v2",
+        diagnosis_run_schema_version="p1.diagnosis_run.v3",
     )
 
 
@@ -1478,7 +1478,7 @@ def _rejected_decision_summary(
     decision: KernelDecision,
     kernel: DiagnosticKernel,
     model_request_index: int,
-) -> RejectedDecisionSummary:
+) -> RejectedDecisionSummaryV2:
     """Project a rejected kernel decision onto bounded, known-only fields.
 
     Only registered hypothesis IDs, ontology root codes, public node/relation
@@ -1578,7 +1578,14 @@ def _rejected_decision_summary(
     unknown_subject_count = 0
     public_subjects = known_nodes | known_relations
     truncated_unresolved_count = _overflow(decision.unresolved_evidence, _MAX_SUMMARY_ITEMS)
-    for item in decision.unresolved_evidence[:_MAX_SUMMARY_ITEMS]:
+    retained_unresolved = decision.unresolved_evidence[:_MAX_SUMMARY_ITEMS]
+    subject_ids: dict[str, int] = {}
+    unresolved_subject_equivalence: list[int] = []
+    for item in retained_unresolved:
+        if item.subject not in subject_ids:
+            subject_ids[item.subject] = len(subject_ids)
+        unresolved_subject_equivalence.append(subject_ids[item.subject])
+    for item in retained_unresolved:
         subject = item.subject if item.subject in public_subjects else None
         if subject is None:
             unknown_subject_count += 1
@@ -1590,9 +1597,18 @@ def _rejected_decision_summary(
             )
         )
 
-    return RejectedDecisionSummary(
+    try:
+        kernel_run_id = kernel.run_id
+    except AttributeError:
+        raise ValueError(
+            "kernel.run_id is required to project refusal decision scope"
+        ) from None
+    return RejectedDecisionSummaryV2(
+        schema_version="p1.rejected_decision.v2",
         model_request_index=model_request_index,
         status=decision.status,
+        decision_scope_matches_run=decision.run_id == kernel_run_id,
+        unresolved_subject_equivalence=tuple(unresolved_subject_equivalence),
         selected_hypothesis_id=(
             decision.selected_hypothesis_id
             if decision.selected_hypothesis_id in registered
@@ -2375,9 +2391,11 @@ def _build_policy_surface(
             "strategy": strategy.value,
             "protocol_version": CONTROLLER_PROTOCOL_VERSION,
             "trace_contract": {
-                "trace_schema": "p1.trace.v2",
-                "run_schema": "p1.diagnosis_run.v2",
+                "trace_schema": "p1.trace.v3",
+                "run_schema": "p1.diagnosis_run.v3",
                 "tool_event_schema": ToolTraceEventV2.model_json_schema(),
+                "evidence_gate_schema": EvidenceGateTraceEventV2.model_json_schema(),
+                "rejected_decision_schema": RejectedDecisionSummaryV2.model_json_schema(),
                 "outcome_origins": [
                     "CONTROLLER_PRECHECK",
                     "EVIDENCE_BACKEND",
@@ -2911,7 +2929,8 @@ class DiagnosisRunner:
                     current.current_output_details = None
                     current.current_output_tool = _kernel_output_tool_for(output)
                     current.trace.append(
-                        EvidenceGateTraceEvent(
+                        EvidenceGateTraceEventV2(
+                            schema_version="p1.evidence_gate.v2",
                             event_type="EVIDENCE_GATE",
                             reason_code=refusal.code,
                             accepted=False,
@@ -2952,7 +2971,8 @@ class DiagnosisRunner:
                     except Exception:
                         rejected_decision = None
                     current.trace.append(
-                        EvidenceGateTraceEvent(
+                        EvidenceGateTraceEventV2(
+                            schema_version="p1.evidence_gate.v2",
                             event_type="EVIDENCE_GATE",
                             reason_code=error.code,
                             accepted=False,
@@ -2964,7 +2984,8 @@ class DiagnosisRunner:
                     ) from None
                 current.outcome = outcome
                 current.trace.append(
-                    EvidenceGateTraceEvent(
+                    EvidenceGateTraceEventV2(
+                        schema_version="p1.evidence_gate.v2",
                         event_type="EVIDENCE_GATE",
                         reason_code=outcome.status.value,
                         accepted=True,
@@ -3005,7 +3026,8 @@ class DiagnosisRunner:
             if refusal is not None:
                 current.last_refusal_was_gate = True
                 current.trace.append(
-                    EvidenceGateTraceEvent(
+                    EvidenceGateTraceEventV2(
+                        schema_version="p1.evidence_gate.v2",
                         event_type="EVIDENCE_GATE",
                         reason_code=refusal.code,
                         accepted=False,
@@ -3019,7 +3041,8 @@ class DiagnosisRunner:
                 raise ModelRetry(f"{refusal.code}: {refusal.message}") from None
             current.static_diagnosis = Diagnosis.model_validate(output.model_dump(mode="json"))
             current.trace.append(
-                EvidenceGateTraceEvent(
+                EvidenceGateTraceEventV2(
+                    schema_version="p1.evidence_gate.v2",
                     event_type="EVIDENCE_GATE",
                     reason_code=output.status.value,
                     accepted=True,
@@ -3072,7 +3095,7 @@ class DiagnosisRunner:
             )
         return receipt.diagnosis
 
-    def _result(self, state: _RunState) -> DiagnosisRunResultV2:
+    def _result(self, state: _RunState) -> DiagnosisRunResultV3:
         if _is_kernel_strategy(state.strategy):
             if state.outcome is None or state.kernel is None:
                 raise RuntimeError("diagnosis outcome is missing")
@@ -3103,7 +3126,7 @@ class DiagnosisRunner:
                 evidence_inventory=tuple(record.evidence_id for record in evidence_records),
             )
         )
-        return DiagnosisRunResultV2(
+        return DiagnosisRunResultV3(
             strategy=self._strategy,
             policy_identity=self._policy_identity,
             diagnosis=diagnosis,
@@ -3124,7 +3147,7 @@ class DiagnosisRunner:
             kernel_state=kernel_state,
         )
 
-    def _model_error_result(self, state: _RunState, reason: str) -> DiagnosisRunResultV2:
+    def _model_error_result(self, state: _RunState, reason: str) -> DiagnosisRunResultV3:
         if reason not in _MODEL_ERROR_REASONS:
             reason = "MODEL_RUNTIME_ERROR"
         if _is_kernel_strategy(state.strategy):
@@ -3133,7 +3156,8 @@ class DiagnosisRunner:
             if state.outcome is None:
                 state.outcome = state.kernel.terminate_model_error(reason)
                 state.trace.append(
-                    EvidenceGateTraceEvent(
+                    EvidenceGateTraceEventV2(
+                        schema_version="p1.evidence_gate.v2",
                         event_type="EVIDENCE_GATE",
                         reason_code=reason,
                         accepted=True,
@@ -3147,7 +3171,8 @@ class DiagnosisRunner:
                 confidence=0.0,
             )
             state.trace.append(
-                EvidenceGateTraceEvent(
+                EvidenceGateTraceEventV2(
+                    schema_version="p1.evidence_gate.v2",
                     event_type="EVIDENCE_GATE",
                     reason_code=reason,
                     accepted=True,
@@ -3156,7 +3181,7 @@ class DiagnosisRunner:
         self._close_session("STRATEGY_TIMEOUT" if reason == "MODEL_TIMEOUT" else "RUN_FAILED")
         return self._result(state)
 
-    async def diagnose(self) -> DiagnosisRunResultV2:
+    async def diagnose(self) -> DiagnosisRunResultV3:
         try:
             try:
                 return await self._diagnose_once()
@@ -3170,14 +3195,14 @@ class DiagnosisRunner:
                 with suppress(Exception):
                     await self._owned_model_client.close()
 
-    def _safe_terminal_result(self) -> DiagnosisRunResultV2:
+    def _safe_terminal_result(self) -> DiagnosisRunResultV3:
         diagnosis = Diagnosis(
             status=DiagnosisStatus.MODEL_ERROR,
             run_id=self._run_id,
             summary="MODEL_RUNTIME_ERROR",
             confidence=0.0,
         )
-        trace: tuple[TraceEventV2, ...] = ()
+        trace: tuple[TraceEventV3, ...] = ()
         kernel_state: InvestigationState | None = None
         if _is_kernel_strategy(self._strategy):
             kernel_state = InvestigationState(
@@ -3215,7 +3240,7 @@ class DiagnosisRunner:
         )
         # Construction or teardown failures also close the session.
         self._close_session("RUN_FAILED")
-        return DiagnosisRunResultV2(
+        return DiagnosisRunResultV3(
             strategy=self._strategy,
             policy_identity=self._policy_identity,
             diagnosis=diagnosis,
@@ -3234,7 +3259,7 @@ class DiagnosisRunner:
             kernel_state=kernel_state,
         )
 
-    async def _diagnose_once(self) -> DiagnosisRunResultV2:
+    async def _diagnose_once(self) -> DiagnosisRunResultV3:
         kernel = (
             self._kernel(self._context)
             if _is_kernel_strategy(self._strategy)

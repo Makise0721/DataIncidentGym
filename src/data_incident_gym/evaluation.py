@@ -48,7 +48,7 @@ from data_incident_gym.scenarios import (
     deleted_payment_rows,
 )
 
-EVALUATOR_VERSION = "p1.evaluator.v4"
+EVALUATOR_VERSION = "p1.evaluator.v5"
 
 # Claim kinds the evaluator has deterministic support rules for.
 ALL_CLAIM_KINDS = frozenset({"ROOT_CAUSE", "AFFECTED_ASSET", "HEALTH_STATE"})

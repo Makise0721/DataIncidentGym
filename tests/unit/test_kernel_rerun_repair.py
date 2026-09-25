@@ -1199,7 +1199,7 @@ async def test_seq50_rejected_confirm_recovers_with_corrected_citation(
     assert any("missing a category of record" in text for text in retry_text)
     summary = rejected[0].rejected_decision
     assert summary is not None
-    assert summary.schema_version == "p1.rejected_decision.v1"
+    assert summary.schema_version == "p1.rejected_decision.v2"
     assert summary.status == "CONFIRMED"
     root = next(claim for claim in summary.claims if claim.kind == "ROOT_CAUSE")
     assert root.known_value == "SOURCE_PAYMENT_INGESTION_LOSS"
@@ -1621,7 +1621,7 @@ def test_rejected_decision_summary_filters_unknown_content_and_truncates() -> No
     )
     summary = _rejected_decision_summary(decision, kernel, model_request_index=3)
 
-    assert summary.schema_version == "p1.rejected_decision.v1"
+    assert summary.schema_version == "p1.rejected_decision.v2"
     assert summary.model_request_index == 3
     assert summary.truncated is True
     assert summary.total_claims == 18
@@ -1735,6 +1735,10 @@ class _StubKernel:
             SimpleNamespace(evidence_id=evidence_id, content=SimpleNamespace())
             for evidence_id in evidence_ids
         )
+
+    @property
+    def run_id(self) -> str:
+        return RUN_IDS[50]
 
     @property
     def evidence_records(self) -> tuple[SimpleNamespace, ...]:
