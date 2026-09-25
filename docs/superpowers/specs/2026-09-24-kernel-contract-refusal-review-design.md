@@ -2,6 +2,8 @@
 
 状态：审计侧设计；不改变当前评分或运行合同。依据 v31 暂停前缀的 7 次 Kernel 合同拒绝，以及 `refusal_review` 目前对 `rejected_decision` 一律返回 `INDETERMINABLE/KERNEL_CONTRACT_PATHWAY` 的实现。
 
+2026-09-25 可行性结论：见 [只读报告](../reports/2026-09-25-v31-kernel-refusal-readonly-feasibility.md)。v31 七次拒绝全部缺少被拒 decision 的 `run_id`，无法独立排除排在首位的 `DECISION_SCOPE_MISMATCH`；seq36 另缺两条脱敏 subject 的重复等价关系。按本文的完整首错标准，七次均为 `INDETERMINABLE`。在决定是否扩展**未来**归档的安全投影前，不把条件性复算写成七次已确认正确，也不以修改旧归档来补证。
+
 ## 目标与范围
 
 逐次判断 Kernel `finalize` 拒绝是否符合**当时版本**的第一条适用判据，输出 `CORRECT`、`FALSE_REFUSAL` 或 `INDETERMINABLE` 与固定原因码。只审带 `rejected_decision` 的 `EVIDENCE_GATE(accepted=false)`；I1/I2 已有的 `refusal_audit` 复核路径保持原样。最终诊断是否通过、同格稍后是否被接受，都不能替代对这一次拒绝的判断。
