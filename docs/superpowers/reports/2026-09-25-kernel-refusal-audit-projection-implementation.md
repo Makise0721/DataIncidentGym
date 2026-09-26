@@ -29,7 +29,7 @@
 - `git diff --check`：通过。
 - `uv run pytest tests/unit -q`：**1149 passed, 5 skipped**（98.09 秒）。
 - `uv run pytest tests/e2e/test_benchmark_synthetic_orchestration.py -q`：**3 passed**（22.13 秒）。
-- `uv run pytest tests/e2e -m 'not real_model' -q`：未完成。该集合包含多轮 dbt 重放；在长时间 dbt 子流程中手动停止，没有把中断结果作为通过或失败。受本次 schema/artifact 变更直接影响的 synthetic orchestration E2E 已单独通过。
+- `uv run pytest tests/e2e -m 'not real_model' -q`：首次尝试在长时间 dbt 子流程中手动停止，该次不计为通过或失败。随后在独立干净 worktree `C:\Users\29913\codex_space\DataIncidentGym-e2e-9ffc66b`（HEAD `9ffc66b4a010995faaaa597f73d56178d6c5a477`）完整重跑，**47 passed, 10 deselected in 5750.79s (1:35:50)**。本地复核 `run1.log` 的汇总逐字相同，文件 SHA-256 为 `9be8aa949c6d43b952ad3c21a23c22aebb66c038e46529d75f61666bce56a150`；`10 deselected` 为 `real_model` 标记用例。运行包装脚本记录 `START=2026-09-25T22:22:05+08:00`、`END=2026-09-25T23:57:58+08:00`、`EXIT_CODE=0`、墙钟 `5753.5s`，并在 pytest 后读取 `$LASTEXITCODE` 原样退出；退出码来自执行方提供的包装器 stdout 记录，本地已核对脚本逻辑及 Tee 捕获的 pytest 日志。
 
 ## v31 只读兼容核对
 
