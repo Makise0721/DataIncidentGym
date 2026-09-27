@@ -280,8 +280,7 @@ async def test_kernel_contract_rejection_archives_and_reviews_offline(
     assert kernel_state.final_status is KernelFinalStatus.MODEL_ERROR
 
     # Offline first-error review re-derives the verdict from the archive alone.
-    scenario = load_scenario_spec(SCENARIO_ID, project_root)
-    verdicts = review_refusal_events(run, scenario)
+    verdicts = review_refusal_events(run, bundle.scenario)
     assert len(verdicts) == 1
     verdict = verdicts[0]
     assert verdict.status is RefusalReviewStatus.CORRECT
