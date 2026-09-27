@@ -200,7 +200,7 @@ def test_manifest_path_rejects_unversioned_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
         manifest_path_for("p2-formal-v1")
     with pytest.raises(BenchmarkManifestError):
-        manifest_path_for("p1-formal-v32")
+        manifest_path_for("p1-formal-v33")
 
 
 def test_build_manifest_accepts_approved_rerun_identities() -> None:
@@ -235,6 +235,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
         "p1-formal-v29",
         "p1-formal-v30",
         "p1-formal-v31",
+        "p1-formal-v32",
     ):
         manifest = build_manifest(
             "b" * 40,
@@ -249,7 +250,7 @@ def test_build_manifest_accepts_approved_rerun_identities() -> None:
 
 def test_build_manifest_rejects_unapproved_identity() -> None:
     with pytest.raises(BenchmarkManifestError):
-        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v32")
+        build_manifest("b" * 40, project_root=PROJECT_ROOT, manifest_id="p1-formal-v33")
 
 
 def test_both_approved_model_pairings_build_the_same_schedule() -> None:
