@@ -23,7 +23,11 @@ import pytest
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from data_incident_gym.diagnosis import DiagnosisStatus, DiagnosticStrategy
+from data_incident_gym.diagnosis import (
+    DiagnosisStatus,
+    DiagnosticStrategy,
+    EvidenceGateTraceEventV2,
+)
 from data_incident_gym.diagnostic_agent import (
     KERNEL_PROMPT,
     STATIC_PROMPT,
@@ -39,6 +43,7 @@ from data_incident_gym.diagnostic_kernel import (
     EvidenceGapStatus,
     InvestigationIntent,
 )
+from data_incident_gym.evaluation import EvaluationStatus
 from data_incident_gym.evidence import EvidenceRecord
 from data_incident_gym.run_context import IncidentBrief
 
@@ -336,7 +341,11 @@ class _SilentTools:
         return tuple(sorted(subject for subject in subjects if subject.startswith("seed.")))
 
 
-def _write_silent_context(project_root: Path) -> None:
+def _write_silent_context(
+    project_root: Path,
+    *,
+    schema_relations: tuple[str, ...] = ("raw_payments",),
+) -> None:
     run_root = project_root / ".dig" / "lab" / "runs" / SILENT_RUN_ID
     run_root.mkdir(parents=True, exist_ok=True)
     brief = json.loads((FIXTURES / "seq50_brief.json").read_text(encoding="utf-8"))
@@ -364,7 +373,7 @@ def _write_silent_context(project_root: Path) -> None:
             "incident_brief": "incident_brief.json",
         },
         "observable_relations": {
-            "schema": ["raw_payments"],
+            "schema": list(schema_relations),
             "profile": ["raw_payments", "raw_orders"],
             "history": ["raw_payments", "raw_orders"],
         },
@@ -380,6 +389,64 @@ def _ledger_from_instructions(agent_info: AgentInfo) -> dict[str, object]:
     return json.loads(instructions[start:].splitlines()[1])
 
 
+def _confirmed_payload() -> dict[str, object]:
+    """The silent-family CONFIRMED decision over the five decisive records."""
+
+    lineage = _silent_record("DBT_LINEAGE")
+    assets = tuple(
+        sorted(
+            node.node_id
+            for node in lineage.content.related_nodes  # type: ignore[union-attr]
+            if node.resource_type == "model"
+        )
+    )
+    root_evidence = [
+        record.evidence_id
+        for record in (
+            _silent_record("DBT_RUN_RESULTS"),
+            _silent_record("RELATION_DATA_PROFILE", "raw_payments"),
+            _silent_record("RELATION_DATA_PROFILE", "raw_orders"),
+            _silent_record("RELATION_HISTORY", "raw_payments"),
+            _silent_record("RELATION_HISTORY", "raw_orders"),
+        )
+    ]
+    return {
+        "schema_version": "p1.kernel_decision.v1",
+        "run_id": SILENT_RUN_ID,
+        "selected_hypothesis_id": "h_loss",
+        "assessments": [
+            {
+                "hypothesis_id": "h_loss",
+                "verdict": "SUPPORTED",
+                "evidence_ids": root_evidence,
+            },
+            {
+                "hypothesis_id": "h_decline",
+                "verdict": "REFUTED",
+                "evidence_ids": [lineage.evidence_id],
+            },
+        ],
+        "claims": [
+            {
+                "kind": "ROOT_CAUSE",
+                "value": CODES[0],
+                "evidence_ids": root_evidence,
+            },
+            *(
+                {
+                    "kind": "AFFECTED_ASSET",
+                    "value": asset,
+                    "evidence_ids": [lineage.evidence_id],
+                }
+                for asset in assets
+            ),
+        ],
+        "summary": "SYNTHETIC: settled payment volume is missing source events.",
+        "recommended_actions": [],
+        "confidence": 0.9,
+    }
+
+
 def _playbook_script(captured: list[dict[str, object]]) -> FunctionModel:
     def call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
         return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
@@ -393,7 +460,12 @@ def _playbook_script(captured: list[dict[str, object]]) -> FunctionModel:
         }
         ledger = _ledger_from_instructions(agent_info)
         captured.append(
-            {"schema_uncollected": ledger["uncollected_relations"]["get_relation_schema"]}
+            {
+                "schema_uncollected": ledger["uncollected_relations"][
+                    "get_relation_schema"
+                ],
+                "model_requests_remaining": ledger["model_requests_remaining"],
+            }
         )
         registration = {
             "kernel_hypothesis_ids": [],
@@ -444,61 +516,12 @@ def _playbook_script(captured: list[dict[str, object]]) -> FunctionModel:
                 },
                 "c7",
             )
-        # The decision turn: the schema opportunity has been consumed.
+        # The decision turn: the schema opportunity has been consumed, and the
+        # last model request is reserved for the decision itself — no
+        # corroboration batch rides it.
         assert captured[-1]["schema_uncollected"] == []
-        lineage = _silent_record("DBT_LINEAGE")
-        assets = tuple(
-            sorted(
-                node.node_id
-                for node in lineage.content.related_nodes  # type: ignore[union-attr]
-                if node.resource_type == "model"
-            )
-        )
-        root_evidence = [
-            record.evidence_id
-            for record in (
-                _silent_record("DBT_RUN_RESULTS"),
-                _silent_record("RELATION_DATA_PROFILE", "raw_payments"),
-                _silent_record("RELATION_DATA_PROFILE", "raw_orders"),
-                _silent_record("RELATION_HISTORY", "raw_payments"),
-                _silent_record("RELATION_HISTORY", "raw_orders"),
-            )
-        ]
-        payload = {
-            "schema_version": "p1.kernel_decision.v1",
-            "run_id": SILENT_RUN_ID,
-            "selected_hypothesis_id": "h_loss",
-            "assessments": [
-                {
-                    "hypothesis_id": "h_loss",
-                    "verdict": "SUPPORTED",
-                    "evidence_ids": root_evidence,
-                },
-                {
-                    "hypothesis_id": "h_decline",
-                    "verdict": "REFUTED",
-                    "evidence_ids": [lineage.evidence_id],
-                },
-            ],
-            "claims": [
-                {
-                    "kind": "ROOT_CAUSE",
-                    "value": CODES[0],
-                    "evidence_ids": root_evidence,
-                },
-                *(
-                    {
-                        "kind": "AFFECTED_ASSET",
-                        "value": asset,
-                        "evidence_ids": [lineage.evidence_id],
-                    }
-                    for asset in assets
-                ),
-            ],
-            "summary": "SYNTHETIC: settled payment volume is missing source events.",
-            "recommended_actions": [],
-            "confidence": 0.9,
-        }
+        assert captured[-1]["model_requests_remaining"] == 1
+        payload = _confirmed_payload()
         return ModelResponse(
             parts=[ToolCallPart(agent_info.output_tools[1].name, payload, tool_call_id="d1")]
         )
@@ -551,3 +574,441 @@ async def test_kernel_profile_schema_playbook_runs_over_the_real_runner(
     # consumed by the same session's schema call, exactly once.
     assert captured[0]["schema_uncollected"] == ["raw_payments"]
     assert captured[-1]["schema_uncollected"] == []
+    # Collection completeness is not citation completeness: the corroboration
+    # record exists but no claim stuffs it in, and the ROOT_CAUSE claim keeps
+    # its exact citation set.
+    schema_record = next(
+        record
+        for record in result.evidence_records
+        if record.content.kind == "RELATION_SCHEMA"
+    )
+    assert all(
+        schema_record.evidence_id not in claim.evidence_ids
+        for claim in result.diagnosis.claims
+    )
+
+
+# ----------------------- scripted boundary regressions (design rows 3, 5, 6, 7)
+
+
+def _kernel_runner(
+    run_id: str,
+    project_root: Path,
+    model: FunctionModel,
+    tools: object,
+    strategy: DiagnosticStrategy = DiagnosticStrategy.DIAGNOSTIC_KERNEL,
+) -> DiagnosisRunner:
+    return DiagnosisRunner.for_run(
+        run_id,
+        SimpleNamespace(
+            model_base_url=MODEL_BASE_URL,
+            model_name="synthetic-model",
+            model_api_key=SimpleNamespace(get_secret_value=lambda: "synthetic-key"),
+        ),
+        strategy,
+        project_root,
+        model=model,
+        tools=tools,  # type: ignore[arg-type]
+        model_identity=ModelIdentity("synthetic", "synthetic-model"),
+    )
+
+
+def _silent_script_without_schema(
+    captured: list[dict[str, object]],
+) -> FunctionModel:
+    """The silent playbook with the corroboration step unavailable: the script
+    never calls schema, never fabricates a substitute, and still reaches the
+    unchanged CONFIRMED terminal over the decisive evidence."""
+
+    def call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        sent = {
+            part.tool_call_id
+            for message in messages
+            for part in message.parts
+            if isinstance(part, ToolCallPart)
+        }
+        ledger = _ledger_from_instructions(agent_info)
+        captured.append(ledger)
+        registration = {
+            "kernel_hypothesis_ids": [],
+            "kernel_new_hypotheses": [
+                {"hypothesis_id": "h_loss", "root_cause_code": CODES[0]},
+                {"hypothesis_id": "h_decline", "root_cause_code": CODES[1]},
+            ],
+        }
+        serving = {"kernel_hypothesis_ids": ["h_loss", "h_decline"]}
+        if "c1" not in sent:
+            return call(
+                "get_dbt_run_results", {"run_id": SILENT_RUN_ID, **registration}, "c1"
+            )
+        if "c2" not in sent:
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_payments", **serving},
+                "c2",
+            )
+        if "c3" not in sent:
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_orders", **serving},
+                "c3",
+            )
+        if "c4" not in sent:
+            return call(
+                "get_relation_history",
+                {"relation_name": "raw_payments", **serving},
+                "c4",
+            )
+        if "c5" not in sent:
+            return call(
+                "get_relation_history", {"relation_name": "raw_orders", **serving}, "c5"
+            )
+        if "c6" not in sent:
+            return call(
+                "get_dbt_lineage",
+                {
+                    "node_id": "seed.jaffle_shop.raw_payments",
+                    "direction": "downstream",
+                    **serving,
+                },
+                "c6",
+            )
+        # The decision turn: the target schema was never collected (disabled
+        # tool) and the corroboration skip did not create or force anything.
+        assert captured[-1]["model_requests_remaining"] == 2
+        payload = _confirmed_payload()
+        return ModelResponse(
+            parts=[ToolCallPart(agent_info.output_tools[1].name, payload, tool_call_id="d1")]
+        )
+
+    return FunctionModel(scripted)
+
+
+@pytest.mark.asyncio
+async def test_no_schema_ablation_skips_corroboration_without_new_gaps(
+    tmp_path: Path,
+) -> None:
+    _write_silent_context(tmp_path)
+    captured: list[dict[str, object]] = []
+    result = await _kernel_runner(
+        SILENT_RUN_ID,
+        tmp_path,
+        _silent_script_without_schema(captured),
+        _SilentTools(),
+        DiagnosticStrategy.KERNEL_NO_SCHEMA,
+    ).diagnose()
+
+    # Existing terminal rules unchanged: the disabled schema is not a reason
+    # to abstain, and the confirmation path over decisive evidence still works.
+    assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
+    assert result.diagnosis.root_cause_code == CODES[0]
+    # No schema call and no auto-created schema gap anywhere in the run.
+    assert not [
+        event
+        for event in result.trace
+        if getattr(event, "tool_name", None) == "get_relation_schema"
+    ]
+    assert all(
+        gap.gap_kind is not EvidenceGapKind.DISCRIMINATE_SCHEMA
+        for gap in result.kernel_state.gaps
+    )
+    assert result.metrics.tool_call_attempts == 6
+
+
+def _seq59_abstaining_script(
+    captured: list[dict[str, object]],
+    run_id: str,
+) -> FunctionModel:
+    """Schema-change family (seq59, coupon b): the target relation raw_orders
+    is not readable by the schema tool and other relations' schemas are
+    available — the script collects none of them, adds no probe, and abstains
+    with only the independent-fact declaration."""
+
+    def call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        sent = {
+            part.tool_call_id
+            for message in messages
+            for part in message.parts
+            if isinstance(part, ToolCallPart)
+        }
+        ledger = _ledger_from_instructions(agent_info)
+        captured.append(
+            {
+                "provable_schema": ledger["provable_relations"]["get_relation_schema"],
+                "schema_uncollected": ledger["uncollected_relations"][
+                    "get_relation_schema"
+                ],
+            }
+        )
+        registration = {
+            "kernel_hypothesis_ids": [],
+            "kernel_new_hypotheses": [
+                {
+                    "hypothesis_id": "h_schema_col_type",
+                    "root_cause_code": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                },
+                {
+                    "hypothesis_id": "h_transform_cast",
+                    "root_cause_code": "TRANSFORMATION_COLUMN_CAST_CHANGED",
+                },
+            ],
+        }
+        serving = {"kernel_hypothesis_ids": ["h_schema_col_type", "h_transform_cast"]}
+        if "c1" not in sent:
+            return call(
+                "get_dbt_run_results", {"run_id": run_id, **registration}, "c1"
+            )
+        if "c2" not in sent:
+            return call(
+                "get_dbt_node_error",
+                {
+                    "run_id": run_id,
+                    "node_id": "model.jaffle_shop.customers",
+                    **serving,
+                },
+                "c2",
+            )
+        if "c3" not in sent:
+            return call(
+                "get_dbt_lineage",
+                {
+                    "node_id": "model.jaffle_shop.customers",
+                    "direction": "upstream",
+                    **serving,
+                },
+                "c3",
+            )
+        if "c4" not in sent:
+            # The corroboration target is not on the schema tool's whitelist;
+            # other relations are, but their schemas must not be swept as
+            # substitutes.
+            assert sorted(captured[-1]["provable_schema"]) == [
+                "raw_customers",
+                "raw_payments",
+            ]
+            assert "raw_orders" not in captured[-1]["provable_schema"]
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_orders", **serving},
+                "c4",
+            )
+        if "c5" not in sent:
+            return call(
+                "get_relation_history",
+                {"relation_name": "raw_orders", **serving},
+                "c5",
+            )
+        if "c6" not in sent:
+            # The target is unreadable: under the EXISTING boundary rule the
+            # single permitted probe records the real refusal receipt that the
+            # abstention contract needs. The new corroboration rule neither
+            # removes nor replaces this probe.
+            return call(
+                "get_relation_schema",
+                {"relation_name": "raw_orders", **serving},
+                "c6",
+            )
+        # The decision turn: the probe receipt is reused, the observed
+        # OTHER-relation schemas are not a health baseline or a proof of
+        # change, and no substitute corroboration call was made.
+        assert sorted(captured[-1]["provable_schema"]) == [
+            "raw_customers",
+            "raw_payments",
+        ]
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    {
+                        "schema_version": "p1.kernel_decision.v1",
+                        "run_id": run_id,
+                        "assessments": [],
+                        "unresolved_evidence": [
+                            {
+                                "evidence_kind": "TRANSFORMATION_DEFINITION",
+                                "subject": "model.jaffle_shop.stg_orders",
+                            },
+                        ],
+                        "summary": (
+                            "The raw_orders schema and the transformation "
+                            "definition are unavailable."
+                        ),
+                        "recommended_actions": [],
+                        "confidence": 0.2,
+                    },
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    return FunctionModel(scripted)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_target_is_not_probed_and_other_schemas_not_substituted(
+    tmp_path: Path,
+) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_kernel_rerun_repair as seq59
+
+    seq59._write_context(tmp_path, 59)
+    captured: list[dict[str, object]] = []
+    result = await _kernel_runner(
+        seq59.RUN_IDS[59],
+        tmp_path,
+        _seq59_abstaining_script(captured, seq59.RUN_IDS[59]),
+        seq59._SchemaBTools(include_history=True),
+    ).diagnose()
+
+    # Exactly one schema interaction: the boundary probe for the unreadable
+    # target, refused with a real receipt. No substitute corroboration call
+    # for the readable other relations.
+    schema_events = [
+        event
+        for event in result.trace
+        if getattr(event, "tool_name", None) == "get_relation_schema"
+    ]
+    assert len(schema_events) == 1
+    assert schema_events[0].arguments == {"relation_name": "raw_orders"}
+    assert schema_events[0].error_code == "RELATION_NOT_ALLOWED"
+    # The only schema-typed gap is the real probe receipt, not an auto gap.
+    schema_gaps = [
+        gap
+        for gap in result.kernel_state.gaps
+        if gap.gap_kind is EvidenceGapKind.DISCRIMINATE_SCHEMA
+    ]
+    assert len(schema_gaps) == 1
+    assert schema_gaps[0].status is EvidenceGapStatus.BLOCKED
+    assert schema_gaps[0].error_code == "RELATION_NOT_ALLOWED"
+    # The terminal stays abstention with only the legitimate declaration; no
+    # confirmation was forced or derived from the observed other-relation
+    # schemas.
+    gates = [
+        event for event in result.trace if isinstance(event, EvidenceGateTraceEventV2)
+    ]
+    assert [event.reason_code for event in gates if not event.accepted] == []
+    assert "CONFIRMED" not in {event.reason_code for event in gates}
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+    evaluation = seq59._evaluate(59, result)
+    assert evaluation.status is EvaluationStatus.PASSED
+
+
+def _distractor_script(captured: list[dict[str, object]]) -> FunctionModel:
+    """Both relations carry profiles; the schema check targets only the
+    root-cause relation and never sweeps the distractor."""
+
+    def call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        sent = {
+            part.tool_call_id
+            for message in messages
+            for part in message.parts
+            if isinstance(part, ToolCallPart)
+        }
+        ledger = _ledger_from_instructions(agent_info)
+        captured.append(
+            {
+                "schema_uncollected": ledger["uncollected_relations"][
+                    "get_relation_schema"
+                ]
+            }
+        )
+        registration = {
+            "kernel_hypothesis_ids": [],
+            "kernel_new_hypotheses": [
+                {"hypothesis_id": "h_loss", "root_cause_code": CODES[0]},
+                {"hypothesis_id": "h_decline", "root_cause_code": CODES[1]},
+            ],
+        }
+        serving = {"kernel_hypothesis_ids": ["h_loss", "h_decline"]}
+        if "c1" not in sent:
+            return call(
+                "get_dbt_run_results", {"run_id": SILENT_RUN_ID, **registration}, "c1"
+            )
+        if "c2" not in sent:
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_payments", **serving},
+                "c2",
+            )
+        if "c3" not in sent:
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_orders", **serving},
+                "c3",
+            )
+        if "c4" not in sent:
+            # Both relations are readable and uncollected; only the root-cause
+            # relation is corroborated.
+            assert sorted(captured[-1]["schema_uncollected"]) == [
+                "raw_orders",
+                "raw_payments",
+            ]
+            return call(
+                "get_relation_schema", {"relation_name": "raw_payments", **serving}, "c4"
+            )
+        if "c5" not in sent:
+            return call(
+                "get_relation_history",
+                {"relation_name": "raw_payments", **serving},
+                "c5",
+            )
+        if "c6" not in sent:
+            return call(
+                "get_relation_history", {"relation_name": "raw_orders", **serving}, "c6"
+            )
+        if "c7" not in sent:
+            return call(
+                "get_dbt_lineage",
+                {
+                    "node_id": "seed.jaffle_shop.raw_payments",
+                    "direction": "downstream",
+                    **serving,
+                },
+                "c7",
+            )
+        # The decision turn: the distractor relation was never collected and
+        # stays listed; the target was consumed.
+        assert captured[-1]["schema_uncollected"] == ["raw_orders"]
+        payload = _confirmed_payload()
+        return ModelResponse(
+            parts=[ToolCallPart(agent_info.output_tools[1].name, payload, tool_call_id="d1")]
+        )
+
+    return FunctionModel(scripted)
+
+
+@pytest.mark.asyncio
+async def test_schema_check_targets_only_the_root_cause_relation(
+    tmp_path: Path,
+) -> None:
+    _write_silent_context(tmp_path, schema_relations=("raw_payments", "raw_orders"))
+    captured: list[dict[str, object]] = []
+    result = await _kernel_runner(
+        SILENT_RUN_ID,
+        tmp_path,
+        _distractor_script(captured),
+        _SilentTools(),
+    ).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
+    schema_events = [
+        event
+        for event in result.trace
+        if getattr(event, "tool_name", None) == "get_relation_schema"
+    ]
+    assert len(schema_events) == 1
+    assert schema_events[0].arguments == {"relation_name": "raw_payments"}
+    assert schema_events[0].error_code is None
+    assert sorted(captured[0]["schema_uncollected"]) == ["raw_orders", "raw_payments"]
+    assert captured[-1]["schema_uncollected"] == ["raw_orders"]

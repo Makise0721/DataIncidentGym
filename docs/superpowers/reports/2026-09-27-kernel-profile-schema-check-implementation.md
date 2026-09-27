@@ -24,21 +24,25 @@
 
 ## 2. 离线验收（设计 §5.1，真实 Kernel 路径）
 
-`test_kernel_profile_schema_check.py`（10 项，全部入库）：
+`test_kernel_profile_schema_check.py`（13 项，全部入库）。设计表格逐行映射
+（审计修订 2026-09-27：初版 §2 声称"覆盖行 1–6、行 7 由领域验证器承担"超出
+实际测试，已按下列映射补齐并逐行更正）：
 
-- **机制护栏**（kernel 级）：profile 或其它关系的 schema 不清除目标关系的
-  schema 未采项（账本按工具×类型相减，跨类型/跨关系不替代）；已记录的 schema
-  拒绝收据（RELATION_NOT_ALLOWED）保留为 BLOCKED gap、同参重调
-  `DUPLICATE_TOOL_CALL`、无伪造成功记录；工具预算耗尽后 `TOOL_CALL_LIMIT`
-  原码不变，model_requests_used=8 时 remaining=0。
-- **runner 级剧本**（真实 `DiagnosisRunner.for_run` + FunctionModel + 假工具，
-  seq50 公开 fixture）：账本第 1–3 回合列出目标 schema 未采项 → 第 3 回合按新
-  规则补采同关系 schema（一次，成功）→ 第 4 回合起账本移除该项 → 提交
-  CONFIRMED 终态；全程 8 请求 / 7 工具调用，schema 收据进入同一会话证据清单，
-  唯一且晚于 profile。
-- 预算与权限断言覆盖设计表格行 1–6；行 7（schema/profile 列不一致）由既有
-  领域验证器（root-cause 证据校验）承担，本切片无新逻辑。**这些脚本只证明
-  约定路径可执行、权限/计数/归档正确，不证明真实模型会作这些选择。**
+| 设计行 | 覆盖测试与验证内容 |
+| --- | --- |
+| 1 补采与账本移除 | runner 级剧本（seq50 fixture + 假工具 + FunctionModel 走真实 `DiagnosisRunner.for_run`）：账本第 1–3 回合列出目标 schema 未采项 → 第 3 回合补采同关系 schema（一次、成功）→ 第 4 回合起账本移除 → 8 请求 / 7 工具 CONFIRMED；收据进入同一会话证据清单 |
+| 2 复用与不冒充 | kernel 级：同关系 profile 与**其它关系**的 schema 都不清除目标未采项（跨类型/跨关系不替代）；runner 级剧本补充：已采 schema 的目标在决策回合不再列示 |
+| 3 NO_SCHEMA／不可读 | runner 级 NO_SCHEMA 消融（`test_no_schema_ablation_skips_corroboration_without_new_gaps`）：无 schema 调用、无自动创建的 DISCRIMINATE_SCHEMA gap、CONFIRMED 终态规则不变；runner 级 seq59（`test_unreadable_target_is_not_probed_and_other_schemas_not_substituted`）：目标不可读时仅既有边界探针一次（真实收据），其它可读关系的 schema 不被当作替代调用 |
+| 4 已有失败/阻断 | kernel 级：真实 RELATION_NOT_ALLOWED 收据保留为 BLOCKED gap、同参重调 `DUPLICATE_TOOL_CALL`、无伪造成功记录 |
+| 5 预算只够决定性取证／最后请求 | kernel 级：决定性取证耗尽工具预算后 schema 调用 `TOOL_CALL_LIMIT`、失败码不变；runner 级剧本决策回合断言 `model_requests_remaining == 1`（最后一个请求保留给决策，不搭载补采批次）；NO_SCHEMA 消融同时证明跳过补采不改变终态 |
+| 6 干扰关系不扫描 | runner 级（`test_schema_check_targets_only_the_root_cause_relation`）：两个关系都有 profile 且都可读，schema 调用恰一次、参数恰为目标（root-cause）关系；干扰关系从未被采集、决策回合仍留在未采清单 |
+| 7 列不一致／不作变化证明 | runner 级 seq59：其它关系的当前 schema 在账本可见，脚本不据此确认"类型变化"、不把它当健康基线，终态保持 INSUFFICIENT_EVIDENCE 且评估 PASSED；runner 级剧本断言补采收据**不进入任何 claim**（采集完整性 ≠ 逐 claim 引用完整性） |
+
+机制补充说明（来自行 3/7 用例的实现）：seq59 所在 coupon_b 场景的评估合同要求
+schema 缺口声明，而该声明只能由真实边界探针收据派生——新提示的"不要求边界
+探针"不解除评估对声明的要求，两者并存（探针走既有边界规则，核对走新策略段）。
+**所有脚本只证明约定路径可执行、权限/计数/归档正确，不证明真实模型会作这些
+选择；目标选择的"正确性"由脚本按公开账本执行来演示，不是模型泛化验证。**
 
 ## 3. 五格本地归档分析（设计 §5.2，只读严格加载）
 
@@ -59,8 +63,12 @@ run_id（14/25/29/66/70）：`6ff8c6aa…`、`61bf8e27…`、`e102710c…`、
 
 ## 4. 验证记录（设计 §5.3）
 
-- 定向回归：新用例 10 项 + 身份/提示/Kernel runner/重放/投影批次共 **190 passed**。
-- 收口：**完整单测 1159 passed / 5 skipped**（exit 0，2:15）。
+- 初版定向回归（审计前）：10 项新用例 + 身份/提示/Kernel runner/重放/投影批次
+  共 190 passed；完整单测 1159 passed / 5 skipped（exit 0）。
+- 审计修订（2026-09-27，两项 P2）：设计稿单独入库（提交 `6166a6f`，状态行如实
+  记录批准情况）；新增 3 个 runner 级边界用例并扩展剧本断言（新用例文件
+  13 项全绿）。
+- 审计后收口：**完整单测 1162 passed / 5 skipped**（exit 0，2:03）。
 - `uv run ruff check .` 通过；`uv lock --check` 通过；`git diff --check` 干净。
 - 按设计未重跑 integration/E2E（纯 prompt+版本变更，不触数据库与归档写入）。
 
