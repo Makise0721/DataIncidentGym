@@ -591,6 +591,27 @@ async def test_kernel_profile_schema_playbook_runs_over_the_real_runner(
 # ----------------------- scripted boundary regressions (design rows 3, 5, 6, 7)
 
 
+class _SilentBothDirectionsTools(_SilentTools):
+    """Silent tools whose lineage returns a distinct record per direction, so
+    an upstream lineage call is a legal non-duplicate collection."""
+
+    def get_dbt_lineage(self, _node_id: str, direction: str):
+        base = _silent_record("DBT_LINEAGE")
+        if direction == "upstream":
+            content = base.content.model_copy(update={"direction": "upstream"})
+            return (
+                EvidenceRecord.create(
+                    run_id=SILENT_RUN_ID,
+                    evidence_type=base.evidence_type,
+                    source=base.source,
+                    subject=base.subject,
+                    observed_at=base.observed_at,
+                    content=content,
+                ),
+            )
+        return (base,)
+
+
 def _kernel_runner(
     run_id: str,
     project_root: Path,
@@ -631,7 +652,18 @@ def _silent_script_without_schema(
             if isinstance(part, ToolCallPart)
         }
         ledger = _ledger_from_instructions(agent_info)
-        captured.append(ledger)
+        captured.append(
+            {
+                "schema_uncollected": ledger["uncollected_relations"][
+                    "get_relation_schema"
+                ],
+                "history_uncollected": ledger["uncollected_relations"][
+                    "get_relation_history"
+                ],
+                "provable_schema": ledger["provable_relations"]["get_relation_schema"],
+                "model_requests_remaining": ledger["model_requests_remaining"],
+            }
+        )
         registration = {
             "kernel_hypothesis_ids": [],
             "kernel_new_hypotheses": [
@@ -1012,3 +1044,484 @@ async def test_schema_check_targets_only_the_root_cause_relation(
     assert schema_events[0].error_code is None
     assert sorted(captured[0]["schema_uncollected"]) == ["raw_orders", "raw_payments"]
     assert captured[-1]["schema_uncollected"] == ["raw_orders"]
+
+
+def _last_request_skip_script(captured: list[dict[str, object]]) -> FunctionModel:
+    """Design row 5, last-request branch: the corroboration opportunity is
+    still open (target schema uncollected, tool enabled, relation allowed)
+    when only the final model request remains — the script submits directly
+    instead of riding a corroboration batch on it."""
+
+    def call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        sent = {
+            part.tool_call_id
+            for message in messages
+            for part in message.parts
+            if isinstance(part, ToolCallPart)
+        }
+        ledger = _ledger_from_instructions(agent_info)
+        captured.append(
+            {
+                "schema_uncollected": ledger["uncollected_relations"][
+                    "get_relation_schema"
+                ],
+                "history_uncollected": ledger["uncollected_relations"][
+                    "get_relation_history"
+                ],
+                "provable_schema": ledger["provable_relations"]["get_relation_schema"],
+                "model_requests_remaining": ledger["model_requests_remaining"],
+            }
+        )
+        registration = {
+            "kernel_hypothesis_ids": [],
+            "kernel_new_hypotheses": [
+                {"hypothesis_id": "h_loss", "root_cause_code": CODES[0]},
+                {"hypothesis_id": "h_decline", "root_cause_code": CODES[1]},
+            ],
+        }
+        serving = {"kernel_hypothesis_ids": ["h_loss", "h_decline"]}
+        if "c1" not in sent:
+            return call(
+                "get_dbt_run_results", {"run_id": SILENT_RUN_ID, **registration}, "c1"
+            )
+        if "c2" not in sent:
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_payments", **serving},
+                "c2",
+            )
+        if "c3" not in sent:
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_orders", **serving},
+                "c3",
+            )
+        if "c4" not in sent:
+            return call(
+                "get_relation_history",
+                {"relation_name": "raw_payments", **serving},
+                "c4",
+            )
+        if "c5" not in sent:
+            return call(
+                "get_relation_history", {"relation_name": "raw_orders", **serving}, "c5"
+            )
+        if "c6" not in sent:
+            return call(
+                "get_dbt_lineage",
+                {
+                    "node_id": "seed.jaffle_shop.raw_payments",
+                    "direction": "downstream",
+                    **serving,
+                },
+                "c6",
+            )
+        if "c7" not in sent:
+            # A legal upstream-lineage collection occupies the seventh slot,
+            # putting the run on its last model request with the target
+            # opportunity still open.
+            return call(
+                "get_dbt_lineage",
+                {
+                    "node_id": "seed.jaffle_shop.raw_payments",
+                    "direction": "upstream",
+                    **serving,
+                },
+                "c7",
+            )
+        # The decision turn on the LAST model request: the target's
+        # corroboration opportunity is genuinely open and skipped, not already
+        # satisfied.
+        assert captured[-1]["schema_uncollected"] == ["raw_payments"]
+        assert captured[-1]["provable_schema"] == ["raw_payments"]
+        assert captured[-1]["model_requests_remaining"] == 1
+        payload = _confirmed_payload()
+        return ModelResponse(
+            parts=[ToolCallPart(agent_info.output_tools[1].name, payload, tool_call_id="d1")]
+        )
+
+    return FunctionModel(scripted)
+
+
+@pytest.mark.asyncio
+async def test_open_opportunity_is_skipped_when_only_the_last_request_remains(
+    tmp_path: Path,
+) -> None:
+    _write_silent_context(tmp_path)
+    captured: list[dict[str, object]] = []
+    result = await _kernel_runner(
+        SILENT_RUN_ID,
+        tmp_path,
+        _last_request_skip_script(captured),
+        _SilentBothDirectionsTools(),
+    ).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
+    # The opportunity was open the whole run and no schema call ever happened.
+    assert not [
+        event
+        for event in result.trace
+        if getattr(event, "tool_name", None) == "get_relation_schema"
+    ]
+    assert captured[0]["schema_uncollected"] == ["raw_payments"]
+    assert captured[-1]["schema_uncollected"] == ["raw_payments"]
+    assert result.metrics.model_requests == 8
+
+
+def _history_first_skip_script(captured: list[dict[str, object]]) -> FunctionModel:
+    """Design row 5, decisive-history branch: after the target profile is
+    accepted the corroboration opportunity is open, but the remaining budget
+    is exactly enough for the still-needed decisive history plus the final
+    decision — the script skips the schema check rather than displacing the
+    history."""
+
+    def call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        sent = {
+            part.tool_call_id
+            for message in messages
+            for part in message.parts
+            if isinstance(part, ToolCallPart)
+        }
+        ledger = _ledger_from_instructions(agent_info)
+        captured.append(
+            {
+                "schema_uncollected": ledger["uncollected_relations"][
+                    "get_relation_schema"
+                ],
+                "history_uncollected": ledger["uncollected_relations"][
+                    "get_relation_history"
+                ],
+                "provable_schema": ledger["provable_relations"]["get_relation_schema"],
+                "model_requests_remaining": ledger["model_requests_remaining"],
+            }
+        )
+        registration = {
+            "kernel_hypothesis_ids": [],
+            "kernel_new_hypotheses": [
+                {"hypothesis_id": "h_loss", "root_cause_code": CODES[0]},
+                {"hypothesis_id": "h_decline", "root_cause_code": CODES[1]},
+            ],
+        }
+        serving = {"kernel_hypothesis_ids": ["h_loss", "h_decline"]}
+        if "c1" not in sent:
+            return call(
+                "get_dbt_run_results", {"run_id": SILENT_RUN_ID, **registration}, "c1"
+            )
+        if "c2" not in sent:
+            # The target profile is accepted here: the opportunity opens with
+            # two decisive collections still pending.
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_payments", **serving},
+                "c2",
+            )
+        if "c3" not in sent:
+            # Opportunity open, yet the decisive histories come first.
+            assert captured[-1]["schema_uncollected"] == ["raw_payments"]
+            assert sorted(captured[-1]["history_uncollected"]) == [
+                "raw_orders",
+                "raw_payments",
+            ]
+            assert captured[-1]["model_requests_remaining"] == 6
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_orders", **serving},
+                "c3",
+            )
+        if "c4" not in sent:
+            return call(
+                "get_relation_history",
+                {"relation_name": "raw_payments", **serving},
+                "c4",
+            )
+        if "c5" not in sent:
+            return call(
+                "get_dbt_lineage",
+                {
+                    "node_id": "seed.jaffle_shop.raw_payments",
+                    "direction": "downstream",
+                    **serving,
+                },
+                "c5",
+            )
+        if "c6" not in sent:
+            return call(
+                "get_dbt_lineage",
+                {
+                    "node_id": "seed.jaffle_shop.raw_payments",
+                    "direction": "upstream",
+                    **serving,
+                },
+                "c6",
+            )
+        if "c7" not in sent:
+            # Two requests remain: exactly the decisive history plus the final
+            # decision. Adding the schema check here would displace one of
+            # them, so the corroboration is skipped.
+            assert captured[-1]["schema_uncollected"] == ["raw_payments"]
+            assert captured[-1]["history_uncollected"] == ["raw_orders"]
+            assert captured[-1]["model_requests_remaining"] == 2
+            return call(
+                "get_relation_history", {"relation_name": "raw_orders", **serving}, "c7"
+            )
+        # The decision turn: the history was collected, the schema was not.
+        assert captured[-1]["schema_uncollected"] == ["raw_payments"]
+        assert captured[-1]["history_uncollected"] == []
+        assert captured[-1]["model_requests_remaining"] == 1
+        payload = _confirmed_payload()
+        return ModelResponse(
+            parts=[ToolCallPart(agent_info.output_tools[1].name, payload, tool_call_id="d1")]
+        )
+
+    return FunctionModel(scripted)
+
+
+@pytest.mark.asyncio
+async def test_budget_reserved_for_decisive_history_skips_the_schema_check(
+    tmp_path: Path,
+) -> None:
+    _write_silent_context(tmp_path)
+    captured: list[dict[str, object]] = []
+    result = await _kernel_runner(
+        SILENT_RUN_ID,
+        tmp_path,
+        _history_first_skip_script(captured),
+        _SilentBothDirectionsTools(),
+    ).diagnose()
+
+    assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
+    assert not [
+        event
+        for event in result.trace
+        if getattr(event, "tool_name", None) == "get_relation_schema"
+    ]
+    # The decisive history was collected before the final decision; the schema
+    # opportunity stayed open and unexercised through the whole run.
+    assert captured[2]["model_requests_remaining"] == 6
+    assert captured[6]["model_requests_remaining"] == 2
+    assert captured[-1]["schema_uncollected"] == ["raw_payments"]
+    assert result.metrics.model_requests == 8
+
+
+def _same_relation_inconsistency_script(
+    captured: list[dict[str, object]],
+    run_id: str,
+) -> FunctionModel:
+    """Design row 7: the same relation's schema AND profile are both accepted,
+    with manifestly inconsistent column sets. The script re-judges from the
+    public evidence instead of confirming a historical change from the current
+    schema or guessing a fix, and abstains with only the independent fact."""
+
+    def call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
+        return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
+
+    def scripted(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        sent = {
+            part.tool_call_id
+            for message in messages
+            for part in message.parts
+            if isinstance(part, ToolCallPart)
+        }
+        ledger = _ledger_from_instructions(agent_info)
+        captured.append(
+            {
+                "schema_uncollected": ledger["uncollected_relations"][
+                    "get_relation_schema"
+                ],
+                "history_uncollected": ledger["uncollected_relations"][
+                    "get_relation_history"
+                ],
+                "provable_schema": ledger["provable_relations"]["get_relation_schema"],
+                "model_requests_remaining": ledger["model_requests_remaining"],
+            }
+        )
+        registration = {
+            "kernel_hypothesis_ids": [],
+            "kernel_new_hypotheses": [
+                {
+                    "hypothesis_id": "h_schema_col_type",
+                    "root_cause_code": "SOURCE_SCHEMA_COLUMN_TYPE_CHANGED",
+                },
+                {
+                    "hypothesis_id": "h_transform_cast",
+                    "root_cause_code": "TRANSFORMATION_COLUMN_CAST_CHANGED",
+                },
+            ],
+        }
+        serving = {"kernel_hypothesis_ids": ["h_schema_col_type", "h_transform_cast"]}
+        if "c1" not in sent:
+            return call(
+                "get_dbt_run_results", {"run_id": run_id, **registration}, "c1"
+            )
+        if "c2" not in sent:
+            return call(
+                "get_dbt_node_error",
+                {"run_id": run_id, "node_id": "model.jaffle_shop.customers", **serving},
+                "c2",
+            )
+        if "c3" not in sent:
+            return call(
+                "get_dbt_lineage",
+                {
+                    "node_id": "model.jaffle_shop.customers",
+                    "direction": "upstream",
+                    **serving,
+                },
+                "c3",
+            )
+        if "c4" not in sent:
+            # The target relation is readable and uncollected: the corroboration
+            # call is permitted, and its result is the accepted schema.
+            assert "raw_customers" in captured[-1]["provable_schema"]
+            return call(
+                "get_relation_schema",
+                {"relation_name": "raw_customers", **serving},
+                "c4",
+            )
+        if "c5" not in sent:
+            return call(
+                "get_relation_data_profile",
+                {"relation_name": "raw_customers", **serving},
+                "c5",
+            )
+        if "c6" not in sent:
+            # The unreadable relation takes its single boundary probe under the
+            # EXISTING rule; the corroboration rule neither removes nor
+            # replaces it.
+            return call(
+                "get_relation_schema",
+                {"relation_name": "raw_orders", **serving},
+                "c6",
+            )
+        return ModelResponse(
+            parts=[
+                ToolCallPart(
+                    agent_info.output_tools[0].name,
+                    {
+                        "schema_version": "p1.kernel_decision.v1",
+                        "run_id": run_id,
+                        "assessments": [],
+                        "unresolved_evidence": [
+                            {
+                                "evidence_kind": "TRANSFORMATION_DEFINITION",
+                                "subject": "model.jaffle_shop.stg_orders",
+                            },
+                        ],
+                        "summary": (
+                            "The raw_customers schema and profile disagree on "
+                            "their columns; without a trusted baseline the "
+                            "current schema is not evidence of a change."
+                        ),
+                        "recommended_actions": [],
+                        "confidence": 0.2,
+                    },
+                    tool_call_id="final",
+                )
+            ]
+        )
+
+    return FunctionModel(scripted)
+
+
+@pytest.mark.asyncio
+async def test_same_relation_schema_profile_column_conflict_rejudges_to_abstention(
+    tmp_path: Path,
+) -> None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_kernel_rerun_repair as seq59_fixtures
+
+    seq59_fixtures._write_context(tmp_path, 59)
+    base_profile = seq59_fixtures._record_by(
+        "RELATION_DATA_PROFILE", "raw_orders", run_id=seq59_fixtures.RUN_IDS[59]
+    )
+    content = base_profile.content.model_copy(
+        update={
+            "relation_name": "raw_customers",
+            "snapshot": base_profile.content.snapshot.model_copy(
+                update={"relation_name": "raw_customers"}
+            ),
+        }
+    )
+    inconsistent_profile = EvidenceRecord.create(
+        run_id=seq59_fixtures.RUN_IDS[59],
+        evidence_type=base_profile.evidence_type,
+        source=base_profile.source,
+        subject=base_profile.subject,
+        observed_at=base_profile.observed_at,
+        content=content,
+    )
+
+    class _SameRelationTools(seq59_fixtures._SchemaBTools):
+        def get_relation_schema(self, relation_name: str):
+            # The base seq59 tools answer schema reads with nothing; this
+            # variant returns the scenario's own raw_customers schema record so
+            # the corroboration call is accepted.
+            if relation_name == "raw_customers":
+                return (
+                    seq59_fixtures._record_by(
+                        "RELATION_SCHEMA", "raw_customers", run_id=seq59_fixtures.RUN_IDS[59]
+                    ),
+                )
+            return super().get_relation_schema(relation_name)
+
+        def get_relation_data_profile(self, relation_name: str):
+            if relation_name == "raw_customers":
+                return (inconsistent_profile,)
+            return super().get_relation_data_profile(relation_name)
+
+    captured: list[dict[str, object]] = []
+    result = await _kernel_runner(
+        seq59_fixtures.RUN_IDS[59],
+        tmp_path,
+        _same_relation_inconsistency_script(captured, seq59_fixtures.RUN_IDS[59]),
+        _SameRelationTools(include_history=True),
+    ).diagnose()
+
+    # Both same-relation records were accepted into the inventory.
+    schema_record = next(
+        record
+        for record in result.evidence_records
+        if record.content.kind == "RELATION_SCHEMA"
+    )
+    profile_record = next(
+        record
+        for record in result.evidence_records
+        if record.content.kind == "RELATION_DATA_PROFILE"
+        and record.content.relation_name == "raw_customers"
+    )
+    assert schema_record.content.relation_name == "raw_customers"
+    assert profile_record.content.relation_name == "raw_customers"
+    # The inconsistency is real: each side names columns the other lacks.
+    schema_columns = {column.name for column in schema_record.content.columns}
+    profile_columns = {
+        column.column_name for column in profile_record.content.snapshot.columns
+    }
+    assert {"first_name", "last_name"} - profile_columns
+    assert {"user_id", "order_date", "status"} - schema_columns
+    # The re-judged terminal is abstention — no confirmation, no claims, and
+    # the existing boundary/contract rules unchanged.
+    assert result.diagnosis.status is DiagnosisStatus.INSUFFICIENT_EVIDENCE
+    assert result.diagnosis.claims == ()
+    gates = [
+        event for event in result.trace if isinstance(event, EvidenceGateTraceEventV2)
+    ]
+    assert [event.reason_code for event in gates if not event.accepted] == []
+    assert "CONFIRMED" not in {event.reason_code for event in gates}
+    # Budget boundary, recorded honestly: the 8-request budget fits the pair,
+    # the probe (which costs a retry round) and the run's own essentials, but
+    # NOT the b-variant's full decisive set — the contract therefore answers
+    # REQUIRED_EVIDENCE_TYPES_PRESENT. The test verifies the re-judgment path;
+    # it does not register a passing cell.
+    evaluation = seq59_fixtures._evaluate(59, result)
+    assert evaluation.status is EvaluationStatus.FAILED
+    assert "REQUIRED_EVIDENCE_TYPES_PRESENT" in (
+        str(code) for code in evaluation.failed_check_codes
+    )
