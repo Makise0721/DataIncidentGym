@@ -35,7 +35,7 @@
 | 2 复用与不冒充 | kernel 级：同关系 profile 与**其它关系**的 schema 都不清除目标未采项（跨类型/跨关系不替代）；runner 级剧本补充：已采 schema 的目标在决策回合不再列示 |
 | 3 NO_SCHEMA／不可读 | runner 级 NO_SCHEMA 消融（`test_no_schema_ablation_skips_corroboration_without_new_gaps`）：无 schema 调用、无自动创建的 DISCRIMINATE_SCHEMA gap、CONFIRMED 终态规则不变；runner 级 seq59（`test_unreadable_target_is_not_probed_and_other_schemas_not_substituted`）：目标不可读时仅既有边界探针一次（真实收据），其它可读关系的 schema 不被当作替代调用 |
 | 4 已有失败/阻断 | kernel 级：真实 RELATION_NOT_ALLOWED 收据保留为 BLOCKED gap、同参重调 `DUPLICATE_TOOL_CALL`、无伪造成功记录 |
-| 5 预算只够决定性取证／最后请求 | runner 级两个专门用例（二次审计补充）：`test_open_opportunity_is_skipped_when_only_the_last_request_remains`——目标 schema 未采、工具启用且关系允许、机会真实开放，第 7 次业务调用后仅剩最后一个模型请求，脚本直接提交（账本断言 remaining==1 且 schema_uncollected 非空），全程零 schema 调用；`test_budget_reserved_for_decisive_history_skips_the_schema_check`——目标 profile 接受后机会即开放，但剩余预算恰好只够尚未采集的决定性 history 加最终提交（账本断言 remaining==2、两者均未采），脚本先采 history、跳过核对，终局仍 CONFIRMED。kernel 级补充：决定性取证耗尽工具预算后 schema 调用 `TOOL_CALL_LIMIT`、失败码不变 |
+| 5 预算只够决定性取证／最后请求 | runner 级两个专门用例（二次审计补充，三次审计收紧 history 分支算术）：`test_open_opportunity_is_skipped_when_only_the_last_request_remains`——目标 schema 未采、工具启用且关系允许、机会真实开放，第 7 次业务调用后仅剩最后一个模型请求，脚本直接提交（账本断言 remaining==1 且 schema_uncollected 非空），全程零 schema 调用；`test_budget_reserved_for_decisive_history_skips_the_schema_check`——前六个请求完成 **7 次业务调用**（其一为协议允许的独立调用双批），跳过回合账本为剩余 2 次模型请求、**剩余 1 次工具调用**，history(raw_orders) 与目标 schema(raw_payments) 均未采——批处理也无法创造第二个工具额度，唯一额度用于 history，终局 CONFIRMED（8 请求 / 8 次调用，其中一次为其它关系的核对）。kernel 级补充：决定性取证耗尽工具预算后 schema 调用 `TOOL_CALL_LIMIT`、失败码不变 |
 | 6 干扰关系不扫描 | runner 级（`test_schema_check_targets_only_the_root_cause_relation`）：两个关系都有 profile 且都可读，schema 调用恰一次、参数恰为目标（root-cause）关系；干扰关系从未被采集、决策回合仍留在未采清单 |
 | 7 列不一致／不作变化证明 | runner 级同关系对（`test_same_relation_schema_profile_column_conflict_rejudges_to_abstention`，二次审计补充）：**同一关系（raw_customers）的 profile 与 schema 均被接受入库**，列集经断言确认互不一致（schema 声明 first_name/last_name 而 profile 覆盖 user_id/order_date/status）；脚本按约定重新判断——不把当前 schema 当变化证明或基线、不猜测修正，终态保持 INSUFFICIENT_EVIDENCE（零 claim、无 CONFIRMED gate）。预算边界如实记录：8 请求内容不下"该对 + 探针（探针拒绝占一次重试回合）+ b-variant 完整决定性集"，评估按合同给出 `REQUIRED_EVIDENCE_TYPES_PRESENT`——合同在正确起作用，测试只验证重判路径，不登记通过格。引用完整性由 runner 剧本补充断言：补采收据不进入任何 claim（采集完整性 ≠ 逐 claim 引用完整性） |
 
@@ -71,7 +71,12 @@ run_id（14/25/29/66/70）：`6ff8c6aa…`、`61bf8e27…`、`e102710c…`、
   1162 passed / 5 skipped。
 - 二次审计修订（2026-09-27，预算与列不一致两处 P2）：新增 3 个 runner 用例
   （最后请求跳过、预算留给决定性 history、同关系列不一致重判），新用例文件
-  16 项全绿；完整单测 **1165 passed / 5 skipped**（exit 0，1:41）。
+  16 项全绿；完整单测 1165 passed / 5 skipped。
+- 三次审计修订（2026-09-27，history 分支预算算术收紧）：跳过回合改为"剩余
+  2 次模型请求、1 次工具调用、history 与目标 schema 均未采"——前置安排一次
+  双调用批处理使 6 请求完成 7 次业务调用，唯一工具额度物理上只够一个调用，
+  批处理无法创造第二个额度；脚本将额度用于 history，终局 CONFIRMED。完整
+  单测 **1165 passed / 5 skipped**（exit 0，2:16）。
 - `uv run ruff check .` 通过；`uv lock --check` 通过；`git diff --check` 干净。
 - 按设计未重跑 integration/E2E（纯 prompt+版本变更，不触数据库与归档写入）。
 

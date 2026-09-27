@@ -591,9 +591,11 @@ async def test_kernel_profile_schema_playbook_runs_over_the_real_runner(
 # ----------------------- scripted boundary regressions (design rows 3, 5, 6, 7)
 
 
-class _SilentBothDirectionsTools(_SilentTools):
-    """Silent tools whose lineage returns a distinct record per direction, so
-    an upstream lineage call is a legal non-duplicate collection."""
+class _SilentAugmentedTools(_SilentTools):
+    """Silent tools with two extensions: lineage returns a distinct record per
+    direction (an upstream call is a legal non-duplicate collection), and the
+    OTHER relation's schema is answerable so a corroboration of it can occupy
+    a tool slot while the target stays uncollected."""
 
     def get_dbt_lineage(self, _node_id: str, direction: str):
         base = _silent_record("DBT_LINEAGE")
@@ -610,6 +612,22 @@ class _SilentBothDirectionsTools(_SilentTools):
                 ),
             )
         return (base,)
+
+    def get_relation_schema(self, relation_name: str):
+        if relation_name == "raw_orders":
+            base = _silent_record("RELATION_SCHEMA", "raw_payments")
+            content = base.content.model_copy(update={"relation_name": "raw_orders"})
+            return (
+                EvidenceRecord.create(
+                    run_id=SILENT_RUN_ID,
+                    evidence_type=base.evidence_type,
+                    source=base.source,
+                    subject=base.subject,
+                    observed_at=base.observed_at,
+                    content=content,
+                ),
+            )
+        return (_silent_record("RELATION_SCHEMA", relation_name),)
 
 
 def _kernel_runner(
@@ -662,6 +680,7 @@ def _silent_script_without_schema(
                 ],
                 "provable_schema": ledger["provable_relations"]["get_relation_schema"],
                 "model_requests_remaining": ledger["model_requests_remaining"],
+                "tool_calls_remaining": ledger["tool_calls_remaining"],
             }
         )
         registration = {
@@ -1073,6 +1092,7 @@ def _last_request_skip_script(captured: list[dict[str, object]]) -> FunctionMode
                 ],
                 "provable_schema": ledger["provable_relations"]["get_relation_schema"],
                 "model_requests_remaining": ledger["model_requests_remaining"],
+                "tool_calls_remaining": ledger["tool_calls_remaining"],
             }
         )
         registration = {
@@ -1156,7 +1176,7 @@ async def test_open_opportunity_is_skipped_when_only_the_last_request_remains(
         SILENT_RUN_ID,
         tmp_path,
         _last_request_skip_script(captured),
-        _SilentBothDirectionsTools(),
+        _SilentAugmentedTools(),
     ).diagnose()
 
     assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
@@ -1172,11 +1192,11 @@ async def test_open_opportunity_is_skipped_when_only_the_last_request_remains(
 
 
 def _history_first_skip_script(captured: list[dict[str, object]]) -> FunctionModel:
-    """Design row 5, decisive-history branch: after the target profile is
-    accepted the corroboration opportunity is open, but the remaining budget
-    is exactly enough for the still-needed decisive history plus the final
-    decision — the script skips the schema check rather than displacing the
-    history."""
+    """Design row 5, decisive-history branch: after six business calls the run
+    is on its last business turn with exactly ONE tool slot left, while the
+    decisive history and the target corroboration are BOTH uncollected —
+    batching cannot create a second slot, so the slot goes to the decisive
+    history and the corroboration is displaced by the budget."""
 
     def call(name: str, arguments: dict[str, object], call_id: str) -> ModelResponse:
         return ModelResponse(parts=[ToolCallPart(name, arguments, tool_call_id=call_id)])
@@ -1199,6 +1219,7 @@ def _history_first_skip_script(captured: list[dict[str, object]]) -> FunctionMod
                 ],
                 "provable_schema": ledger["provable_relations"]["get_relation_schema"],
                 "model_requests_remaining": ledger["model_requests_remaining"],
+                "tool_calls_remaining": ledger["tool_calls_remaining"],
             }
         )
         registration = {
@@ -1214,43 +1235,45 @@ def _history_first_skip_script(captured: list[dict[str, object]]) -> FunctionMod
                 "get_dbt_run_results", {"run_id": SILENT_RUN_ID, **registration}, "c1"
             )
         if "c2" not in sent:
-            # The target profile is accepted here: the opportunity opens with
-            # two decisive collections still pending.
+            # The target profile is accepted here: the corroboration
+            # opportunity opens with decisive collections still pending.
             return call(
                 "get_relation_data_profile",
                 {"relation_name": "raw_payments", **serving},
                 "c2",
             )
         if "c3" not in sent:
-            # Opportunity open, yet the decisive histories come first.
-            assert captured[-1]["schema_uncollected"] == ["raw_payments"]
-            assert sorted(captured[-1]["history_uncollected"]) == [
-                "raw_orders",
-                "raw_payments",
-            ]
+            # Opportunity open, yet the decisive profile of the comparison
+            # relation comes first.
+            assert "raw_payments" in captured[-1]["schema_uncollected"]
             assert captured[-1]["model_requests_remaining"] == 6
             return call(
                 "get_relation_data_profile",
                 {"relation_name": "raw_orders", **serving},
                 "c3",
             )
-        if "c4" not in sent:
-            return call(
-                "get_relation_history",
-                {"relation_name": "raw_payments", **serving},
-                "c4",
+        if "c4a" not in sent:
+            # One batched turn of two independent calls keeps the run on
+            # schedule: seven business calls over six requests.
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "get_relation_history",
+                        {"relation_name": "raw_payments", **serving},
+                        tool_call_id="c4a",
+                    ),
+                    ToolCallPart(
+                        "get_dbt_lineage",
+                        {
+                            "node_id": "seed.jaffle_shop.raw_payments",
+                            "direction": "downstream",
+                            **serving,
+                        },
+                        tool_call_id="c4b",
+                    ),
+                ]
             )
         if "c5" not in sent:
-            return call(
-                "get_dbt_lineage",
-                {
-                    "node_id": "seed.jaffle_shop.raw_payments",
-                    "direction": "downstream",
-                    **serving,
-                },
-                "c5",
-            )
-        if "c6" not in sent:
             return call(
                 "get_dbt_lineage",
                 {
@@ -1258,19 +1281,28 @@ def _history_first_skip_script(captured: list[dict[str, object]]) -> FunctionMod
                     "direction": "upstream",
                     **serving,
                 },
-                "c6",
+                "c5",
+            )
+        if "c6" not in sent:
+            # The OTHER relation's corroboration occupies the seventh slot; the
+            # target schema stays uncollected.
+            return call(
+                "get_relation_schema", {"relation_name": "raw_orders", **serving}, "c6"
             )
         if "c7" not in sent:
-            # Two requests remain: exactly the decisive history plus the final
-            # decision. Adding the schema check here would displace one of
-            # them, so the corroboration is skipped.
+            # Two requests remain but only ONE tool slot: the decisive history
+            # and the target corroboration are both uncollected, and batching
+            # cannot create a second slot. The slot goes to the decisive
+            # history; the corroboration is displaced by the budget.
             assert captured[-1]["schema_uncollected"] == ["raw_payments"]
             assert captured[-1]["history_uncollected"] == ["raw_orders"]
             assert captured[-1]["model_requests_remaining"] == 2
+            assert captured[-1]["tool_calls_remaining"] == 1
             return call(
                 "get_relation_history", {"relation_name": "raw_orders", **serving}, "c7"
             )
-        # The decision turn: the history was collected, the schema was not.
+        # The decision turn: the history was collected with the last slot, the
+        # schema was not.
         assert captured[-1]["schema_uncollected"] == ["raw_payments"]
         assert captured[-1]["history_uncollected"] == []
         assert captured[-1]["model_requests_remaining"] == 1
@@ -1286,27 +1318,36 @@ def _history_first_skip_script(captured: list[dict[str, object]]) -> FunctionMod
 async def test_budget_reserved_for_decisive_history_skips_the_schema_check(
     tmp_path: Path,
 ) -> None:
-    _write_silent_context(tmp_path)
+    _write_silent_context(tmp_path, schema_relations=("raw_payments", "raw_orders"))
     captured: list[dict[str, object]] = []
     result = await _kernel_runner(
         SILENT_RUN_ID,
         tmp_path,
         _history_first_skip_script(captured),
-        _SilentBothDirectionsTools(),
+        _SilentAugmentedTools(),
     ).diagnose()
 
     assert result.diagnosis.status is DiagnosisStatus.CONFIRMED
-    assert not [
+    # The target schema was never collected: the single remaining tool slot
+    # went to the decisive history, and batching could not create a second one.
+    schema_events = [
         event
         for event in result.trace
         if getattr(event, "tool_name", None) == "get_relation_schema"
     ]
-    # The decisive history was collected before the final decision; the schema
-    # opportunity stayed open and unexercised through the whole run.
-    assert captured[2]["model_requests_remaining"] == 6
+    assert len(schema_events) == 1
+    assert schema_events[0].arguments == {"relation_name": "raw_orders"}
+    assert schema_events[0].error_code is None
+    assert sorted(captured[1]["schema_uncollected"]) == ["raw_orders", "raw_payments"]
+    assert captured[6]["schema_uncollected"] == ["raw_payments"]
+    assert captured[6]["history_uncollected"] == ["raw_orders"]
     assert captured[6]["model_requests_remaining"] == 2
+    assert captured[6]["tool_calls_remaining"] == 1
     assert captured[-1]["schema_uncollected"] == ["raw_payments"]
     assert result.metrics.model_requests == 8
+    # Seven business calls before the skip turn plus the decisive history:
+    # eight attempts over eight requests, the batch having saved one turn.
+    assert result.metrics.tool_call_attempts == 8
 
 
 def _same_relation_inconsistency_script(
@@ -1339,6 +1380,7 @@ def _same_relation_inconsistency_script(
                 ],
                 "provable_schema": ledger["provable_relations"]["get_relation_schema"],
                 "model_requests_remaining": ledger["model_requests_remaining"],
+                "tool_calls_remaining": ledger["tool_calls_remaining"],
             }
         )
         registration = {
