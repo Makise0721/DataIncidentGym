@@ -113,7 +113,7 @@ from data_incident_gym.strategy_adapter import (
 from data_incident_gym.submission_policy import GateRefusal, SubmissionPolicy
 
 BASE_PROMPT_VERSION = "p1.base.v1"
-KERNEL_PROMPT_VERSION = "p1.kernel.v18"
+KERNEL_PROMPT_VERSION = "p1.kernel.v19"
 STATIC_PROMPT_VERSION = "p1.static.v5"
 NO_TOOL_PROMPT_VERSION = "p1.no-tool.v1"
 CONTROLLER_PROTOCOL_VERSION = "p1.controller.v22"

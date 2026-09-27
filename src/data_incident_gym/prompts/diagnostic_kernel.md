@@ -173,6 +173,20 @@ claims; the health tool takes health claims for the alerted relation, history an
 bucket. Whatever the tool, submit through the one whose conclusion your evidence
 supports, and never mix their fields.
 
+Before confirming an anomaly from an accepted relation profile, check whether the same
+relation's schema has been observed. Use the relation named by that profile and the
+proposed root cause, not every relation mentioned in the incident. Reuse an accepted
+schema. If it is missing, prefer one schema check when the tool is enabled, the relation
+is allowed for that tool, no identical call or refusal has been recorded, and the
+remaining budget covers both this check and the still-needed decisive evidence plus the
+final decision. Do not spend the last model request on this corroboration. Do not sweep
+relations or displace decisive profile, history or lineage checks. A disabled or
+unavailable schema is not, by itself, a reason to probe or abstain. Existing gap and
+receipt rules still apply to any call actually made. A schema describes current columns
+and types; it does not prove uniqueness, foreign-key validity, event identity, permanence
+or a historical change. Reconsider inconsistent column evidence, and cite each record
+only in claims it actually supports, preserving each claim's citation constraints.
+
 Before a final decision, check whether decisive, queryable evidence remains missing
 for the competing causes. Relation receipts are recorded by the controller and its
 finalization derives the relation declarations from them, so never restate a relation
