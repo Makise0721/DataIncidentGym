@@ -4,8 +4,9 @@
   失败后的修复路径（归档回执→三树 build→重新授权续跑）经 owner 裁定「同意」。
   方案 v2（`docs/superpowers/plans/2026-09-28-kernel-v19-expanded-confirmation-proposal.md`，
   `d34fdac`）；冻结证据 `2026-09-28-v39-v42-freeze.md`（`215acfd`）。
-- 执行：B1(v39) → A1(v40) → A2(v41) → B2(v42) 各恰一次 preflight/run
-  （A1 为归档失败回执后经重新授权的第二次 preflight）。四段 **52/52 终态**，
+- 执行：B1(v39) → A1(v40) → A2(v41) → B2(v42) 各恰一次 run；B1、A2、B2
+  各一次 preflight，A1 首次失败后归档回执，经重新授权执行第二次并通过，
+  合计五次 preflight。四段 **52/52 终态**，
   段内 stop_reason 均 NONE；GATE_INTERNAL_ERROR 四段合计 0；传输错误 **0**；
   恢复失败 0；F0 指纹初始与每段后共五次核验全部恒等
   （`e5c7848e…`）；跨段人工门三次检查（5/12、3/12、5/12）均未触发。
@@ -20,9 +21,10 @@
   停止并经 owner 裁定后修复续跑；B1 的 13 格未重跑。
 - 严格核对：臂身份守卫通过（A1/A2 全部 v18、B1/B2 全部 v19，归档
   policy_identity 断言）；52 格 bundle 严格加载成功；recovery 全 HEALTHY；
-  evaluator 重算与归档 failed_check_codes 逐格一致（52/52）；完整性问题
-  NONE。分析脚本 `codex_space/v39v42-blocked-analysis.py`（只读、预登记、
-  含臂守卫与显式配对绑定）。
+  分析脚本核对 evaluator 重算与归档 failed_check_codes 逐格一致（52/52）。
+  独立复核进一步比对完整 `EvaluationResult`、manifest 格身份、ledger 终态和
+  controller 门，52 格均一致；完整性问题 NONE。分析脚本
+  `codex_space/v39v42-blocked-analysis.py` 只读，含臂守卫与显式配对绑定。
 
 ## 1. 主指标（端到端整格通过）
 
@@ -64,25 +66,25 @@
    silent_b 触发反转条件**不满足**。→ **不满足晋级条件**。
 4. 结论：按预登记判据，本轮为**质量负面结果：不建议将 v19 作为默认策略
    采用**，且不为改判追加样本。与 9-28 轮（24 对、coupon-join 目标
-   B−A=+6）合并解读：v19 的收益集中在 coupon-join 机制族，在新扩的
-   schema 型变与必填空值机制上无增益且 rn_a 退化——机制特异性明显，
-   不支持默认采用。是否回 prompt 开发线迭代（M25 纪律）由 owner 决定。
+   B−A=+6）并排解读：前轮目标组观察到净增，本轮新扩的 schema 型变
+   组持平、必填空值组退化。两轮的场景机制与结果不同，现有证据不支持
+   默认采用或一般化收益表述。是否回 prompt 开发线迭代（M25 纪律）由 owner 决定。
    本结论仍限于两轮设计（dev 场景、50 对合计、BAAB 分块）之内，不构成
    生产或泛化表述。
 
 ## 4. 机制观察（描述性）
 
-- **rn_a 两臂败格同型**：B 的两个败格（seq45 早、seq6 晚）均为
+- **rn_a 的两个 B 臂败格同型**：seq45 早、seq6 晚均为
   CONFIRMED 终态 + `REQUIRED_EVIDENCE_TYPES_PRESENT` 失败 + **未采同关系
   schema**（A 六格全部采集 raw_orders schema）。v19 的"接受 profile 后
   核对 schema"条件在 rn_a 上未促成采集——该族 profile 被接受后规则没有
   转化为 schema 采集。
-- **stc_a**：两臂 6/6 且全部采集 raw_customers+raw_orders schema——该族
-  不依赖 v19 规则也稳定。
+- **stc_a**：两臂本轮均为 6/6，且全部采集 raw_customers 与 raw_orders
+  schema；v18 在这六格也完成了所需采集。
 - schema 接受格数（各臂 26 格）：A 19、B 18——本轮 v19 未增加 schema
   采集量（与 9-28 轮 coupon 目标上 B 15 > A 6 形成对照）。
-- 不足对照组"错误确认"计数：两臂均为 0（b 变体败格均为应弃未弃的
-  INSUFFICIENCY_EVIDENCE 终态 + 检查失败，非错误确认）。
+- 不足对照组"错误确认"计数：两臂均为 0（b 变体败格均为
+  `INSUFFICIENT_EVIDENCE` 终态但相关检查失败，并非错误确认）。
 - 预算：两臂均 0 格触及 8/8 请求上限；tool 触顶各 1 格。
 - P-1 复核（52 格）：拒绝事件 7（B1 1、A1 2、A2 3、B2 1），裁决
   6 CORRECT + 1 INDETERMINABLE（A1），**零 FALSE_REFUSAL**。
