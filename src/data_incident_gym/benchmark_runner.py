@@ -82,6 +82,12 @@ from data_incident_gym.evaluation_runner import (
 from data_incident_gym.fixed_rule import FixedRuleRunner, fixed_rule_policy_identity
 from data_incident_gym.lab import IncidentLab
 from data_incident_gym.planner_agent import EvidencePlannerRunner
+from data_incident_gym.planner_comparison_manifest import (
+    APPROVED_EXPERIMENT_IDS,
+    PlannerComparisonManifest,
+    experiment_manifest_path_for,
+    verify_experiment_manifest,
+)
 from data_incident_gym.scenarios import load_scenario_spec
 
 _DIGEST_PATTERN = r"^[0-9a-f]{64}$"
@@ -293,6 +299,33 @@ def _bind_manifest_model_configuration(
     )
 
 
+#: Either frozen contract the runner accepts; the v1 behavior is unchanged,
+#: the experiment contract dispatches to its own registry/verifier/path.
+AnyBenchmarkManifest = BenchmarkManifest | PlannerComparisonManifest
+
+
+def _manifest_identity_approved(manifest: AnyBenchmarkManifest) -> bool:
+    if isinstance(manifest, PlannerComparisonManifest):
+        return manifest.manifest_id in APPROVED_EXPERIMENT_IDS
+    return manifest.manifest_id in APPROVED_MANIFEST_IDS
+
+
+def _verify_manifest_for(
+    manifest: AnyBenchmarkManifest,
+    *,
+    project_root: Path,
+) -> AnyBenchmarkManifest:
+    if isinstance(manifest, PlannerComparisonManifest):
+        return verify_experiment_manifest(manifest, project_root=project_root)
+    return verify_manifest(manifest, project_root=project_root)
+
+
+def _manifest_relpath_for(manifest: AnyBenchmarkManifest) -> Path:
+    if isinstance(manifest, PlannerComparisonManifest):
+        return experiment_manifest_path_for(manifest.manifest_id)
+    return manifest_path_for(manifest.manifest_id)
+
+
 def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
@@ -480,7 +513,7 @@ class _ExclusiveSuiteLock:
 class BenchmarkRunner:
     def __init__(
         self,
-        manifest: BenchmarkManifest,
+        manifest: AnyBenchmarkManifest,
         *,
         project_root: Path = PROJECT_ROOT,
         doctor_factory: DoctorFactory,
@@ -491,7 +524,7 @@ class BenchmarkRunner:
         checkout_revision_reader: CheckoutRevisionReader | None = None,
         cell_selector: BenchmarkCellSelector | None = None,
     ) -> None:
-        if manifest.manifest_id not in APPROVED_MANIFEST_IDS:
+        if not _manifest_identity_approved(manifest):
             raise BenchmarkRunnerError("manifest_id is not an approved formal identity")
         if cell_selector is not None and cell_selector.manifest_id != manifest.manifest_id:
             raise BenchmarkRunnerError("cell selector is bound to another manifest")
@@ -510,7 +543,7 @@ class BenchmarkRunner:
     @classmethod
     def for_project(
         cls,
-        manifest: BenchmarkManifest,
+        manifest: AnyBenchmarkManifest,
         *,
         project_root: Path = PROJECT_ROOT,
         settings: Settings | None = None,
@@ -635,8 +668,8 @@ class BenchmarkRunner:
         except OSError as exc:
             raise BenchmarkRunnerError("cannot write benchmark subset marker") from exc
 
-    def _verify_checkout(self, manifest: BenchmarkManifest) -> None:
-        verify_manifest(manifest, project_root=self._project_root)
+    def _verify_checkout(self, manifest: AnyBenchmarkManifest) -> None:
+        _verify_manifest_for(manifest, project_root=self._project_root)
         revision = self._git_output(["rev-parse", "HEAD"])
         status = self._git_output(["status", "--porcelain"])
         if status:
@@ -662,7 +695,7 @@ class BenchmarkRunner:
         changed = self._git_output(
             ["diff", "--name-only", f"{manifest.implementation_revision}..{revision}"]
         ).splitlines()
-        if changed != [manifest_path_for(manifest.manifest_id).as_posix()]:
+        if changed != [_manifest_relpath_for(manifest).as_posix()]:
             raise BenchmarkRunnerError("formal checkout contains paths beyond the manifest")
 
     def _git_output(self, arguments: Sequence[str]) -> str:
