@@ -45,6 +45,7 @@ from data_incident_gym.diagnosis import (
     DiagnosisTerminalTraceEvent,
     DiagnosticStrategy,
     EvidenceGateTraceEvent,
+    ModelProtocolTraceEvent,
     PlanObligationRecord,
     PlanTraceEvent,
     ToolTraceEvent,
@@ -55,6 +56,7 @@ from data_incident_gym.diagnostic_agent import (
     PLANNER_PROMPT,
     TIMEOUT_SECONDS,
     ModelIdentity,
+    _transport_diagnostic,
     load_base_prompt,
 )
 from data_incident_gym.diagnostic_config import (
@@ -303,18 +305,25 @@ class EvidencePlannerRunner:
                         usage_limits=UsageLimits(request_limit=MODEL_REQUEST_LIMIT),
                     )
         except TimeoutError:
+            # The run-level watchdog, not a provider transport fact: the
+            # terminal carries no transport diagnostic (proposal §2.4 — never
+            # guess transport from a timeout summary alone).
             return self._terminal("MODEL_TIMEOUT", started_at, started, deps, usage)
         except UsageLimitExceeded as error:
             return self._terminal(_usage_limit_reason(error), started_at, started, deps, usage)
-        except UnexpectedModelBehavior:
+        except UnexpectedModelBehavior as error:
             reason = (
                 "MODEL_OUTPUT_RETRY_EXHAUSTED"
                 if deps.last_refusal_was_gate
                 else "MODEL_PROTOCOL_ERROR"
             )
-            return self._terminal(reason, started_at, started, deps, usage)
-        except Exception:
-            return self._terminal("MODEL_RUNTIME_ERROR", started_at, started, deps, usage)
+            return self._terminal(
+                reason, started_at, started, deps, usage, provider_error=error
+            )
+        except Exception as error:
+            return self._terminal(
+                "MODEL_RUNTIME_ERROR", started_at, started, deps, usage, provider_error=error
+            )
 
         if self._accepted is None:
             # The run ended without the validator ever accepting a submission.
@@ -328,6 +337,7 @@ class EvidencePlannerRunner:
         started: float,
         deps: PlannerDeps,
         usage: RunUsage,
+        provider_error: BaseException | None = None,
     ) -> DiagnosisRunResult:
         if reason not in MODEL_ERROR_REASONS:
             reason = "MODEL_RUNTIME_ERROR"
@@ -339,7 +349,9 @@ class EvidencePlannerRunner:
             summary=reason,
             confidence=0.0,
         )
-        return self._result(diagnosis, started_at, started, deps, usage)
+        return self._result(
+            diagnosis, started_at, started, deps, usage, provider_error=provider_error
+        )
 
     def _tool_trace_events(self) -> tuple[ToolTraceEvent, ...]:
         """The live tool trace, shared by the gate and the archived result."""
@@ -365,12 +377,37 @@ class EvidencePlannerRunner:
         started: float,
         deps: PlannerDeps,
         usage: RunUsage,
+        provider_error: BaseException | None = None,
     ) -> DiagnosisRunResult:
         del started_at
         records: tuple[EvidenceRecord, ...] = self._session.registered_evidence()
         trace: list[Any] = list(self._tool_trace_events())
         plan_snapshot = self._controller.snapshot()
         trace.extend(_plan_events(deps))
+        # Sanitized transport classification for provider-origin failures only
+        # (M23 vocabulary; no exception text/headers/bodies). Non-classifiable
+        # failures add no protocol event, so nothing is guessed from counts.
+        if provider_error is not None:
+            transport = _transport_diagnostic(provider_error)
+            if transport is not None:
+                error_name = type(provider_error).__name__
+                trace.append(
+                    ModelProtocolTraceEvent(
+                        event_type="MODEL_PROTOCOL",
+                        stage="PROVIDER_RESPONSE",
+                        tool_name=None,
+                        category="PROVIDER_PROTOCOL_FAILURE",
+                        error_reason=(diagnosis.summary,) if diagnosis.summary else (),
+                        model_request_index=int(usage.requests),
+                        error_type=(
+                            "MODEL_API_ERROR"
+                            if error_name in ("ModelHTTPError", "ModelAPIError")
+                            else "OTHER"
+                        ),
+                        error_origin="PROVIDER",
+                        transport_diagnostic=transport,
+                    )
+                )
         trace.append(
             PlanTraceEvent(
                 kind="STATE",
