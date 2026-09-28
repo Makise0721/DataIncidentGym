@@ -51,6 +51,17 @@ from data_incident_gym.evaluation_rescore import (
 )
 from data_incident_gym.evaluation_runner import EvaluationRunner, EvaluationWorkflowError
 from data_incident_gym.lab import IncidentLab, LabError
+from data_incident_gym.planner_comparison_manifest import (
+    APPROVED_EXPERIMENT_IDS,
+    EXPERIMENT_MANIFEST_ID,
+    EXPERIMENT_MANIFEST_PATH,
+    EXPERIMENT_MODEL,
+    build_experiment_manifest,
+    experiment_manifest_path_for,
+    freeze_experiment_manifest,
+    load_experiment_manifest,
+    verify_experiment_manifest,
+)
 from data_incident_gym.run_context import RunContextError, resolve_active_run
 from data_incident_gym.scenario_admission import (
     ADMISSIONS_DIRNAME,
@@ -74,10 +85,12 @@ pipeline_app = typer.Typer(help="构建并检查 dbt 数据管道。")
 lab_app = typer.Typer(help="重置、注入并复现固定数据故障。")
 eval_app = typer.Typer(help="运行确定性评测与报告闭环。")
 benchmark_app = typer.Typer(help="冻结、验证或执行正式 P1 benchmark。")
+experiment_app = typer.Typer(help="规划器对照实验清单的冻结、验证与执行。")
 app.add_typer(pipeline_app, name="pipeline")
 app.add_typer(lab_app, name="lab")
 app.add_typer(eval_app, name="eval")
 app.add_typer(benchmark_app, name="benchmark")
+app.add_typer(experiment_app, name="experiment")
 
 
 class CliStrategy(StrEnum):
@@ -793,3 +806,179 @@ def lab_build(case_id: str) -> None:
     typer.echo(f"run_id: {result.run_id}")
     typer.echo(f"dbt_exit_code: {result.dbt_exit_code}")
     typer.echo(f"artifacts: {result.artifact_dir}")
+
+
+def _canonical_experiment_manifest_path(path: Path) -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    if candidate.is_symlink():
+        raise BenchmarkManifestError("experiment manifest path must not be a symlink")
+    resolved = candidate.resolve(strict=False)
+    approved = {
+        (PROJECT_ROOT / experiment_manifest_path_for(manifest_id)).resolve(strict=False)
+        for manifest_id in APPROVED_EXPERIMENT_IDS
+    }
+    if resolved not in approved:
+        raise BenchmarkManifestError(
+            "experiment manifest path must be config/benchmark/<approved-experiment-id>.json"
+        )
+    return resolved
+
+
+def _confirmed_experiment_manifest(path: Path, confirm_sha256: str):
+    manifest_path = _canonical_experiment_manifest_path(path)
+    actual_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    if confirm_sha256 != actual_sha256:
+        raise BenchmarkRunnerError("manifest SHA-256 confirmation does not match file")
+    loaded = load_experiment_manifest(manifest_path)
+    if manifest_path.stem != loaded.manifest_id:
+        raise BenchmarkManifestError("manifest file name must match its manifest_id")
+    return manifest_path, loaded
+
+
+EXPERIMENT_ID_OPTION = typer.Option(EXPERIMENT_MANIFEST_ID, "--manifest-id")
+EXPERIMENT_OUTPUT_OPTION = typer.Option(EXPERIMENT_MANIFEST_PATH, "--output")
+EXPERIMENT_MODEL_OPTION = typer.Option(EXPERIMENT_MODEL, "--model")
+
+
+@experiment_app.command("freeze")
+def experiment_freeze(
+    manifest_id: str = EXPERIMENT_ID_OPTION,
+    implementation_revision: str = IMPLEMENTATION_REVISION_OPTION,
+    output: Path = EXPERIMENT_OUTPUT_OPTION,
+    model: str = EXPERIMENT_MODEL_OPTION,
+) -> None:
+    """生成一次性的规划器对照实验 Manifest；不会发起模型请求。"""
+    try:
+        base_url = FORMAL_MODEL_BASE_URLS.get(model)
+        if base_url is None:
+            raise BenchmarkManifestError(
+                "experiment model must be one of the approved pairings: "
+                + ", ".join(FORMAL_MODEL_BASE_URLS)
+            )
+        manifest = build_experiment_manifest(
+            implementation_revision,
+            project_root=PROJECT_ROOT,
+            manifest_id=manifest_id,
+            model_name=model,
+            model_base_url=base_url,
+        )
+        verify_experiment_manifest(manifest, project_root=PROJECT_ROOT)
+        path = freeze_experiment_manifest(manifest, output, project_root=PROJECT_ROOT)
+    except (BenchmarkManifestError, ValueError) as exc:
+        typer.echo(f"实验 manifest 冻结失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"manifest: {path}")
+    typer.echo(f"sha256: {manifest.digest()}")
+    typer.echo("cells: 108; model_backed: 108; fixed_rule: 0")
+
+
+@experiment_app.command("verify")
+def experiment_verify(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+) -> None:
+    """验证实验 Manifest 与当前结果输入；不会发起模型请求。"""
+    try:
+        manifest_path = _canonical_experiment_manifest_path(manifest)
+        loaded = load_experiment_manifest(manifest_path)
+        verify_experiment_manifest(loaded, project_root=PROJECT_ROOT)
+    except (BenchmarkManifestError, ValueError) as exc:
+        typer.echo(f"实验 manifest 验证失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"manifest: {manifest_path}")
+    typer.echo(f"sha256: {loaded.digest()}")
+    typer.echo("verified: 17 catalog scenarios; 12 formal scenarios; 108 cells; 108 model-backed")
+
+
+@experiment_app.command("preflight")
+def experiment_preflight(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+) -> None:
+    """执行与完整 108 格赛程绑定的 doctor；不会创建 cell 或 ledger。"""
+    try:
+        _, loaded = _confirmed_experiment_manifest(manifest, confirm_sha256)
+        runner_obj = create_benchmark_runner(loaded)
+        receipt = asyncio.run(runner_obj.preflight())
+        acceptable = is_receipt_acceptable(receipt)
+    except (
+        BenchmarkManifestError,
+        BenchmarkRunnerError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"实验 preflight 失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"status: {'PASSED' if acceptable else 'FAILED'}")
+    typer.echo(f"doctor_status: {receipt.result.status.value}")
+    typer.echo(f"model_probe_required: {receipt.model_probe_required}")
+    typer.echo(
+        "receipt: "
+        f"{PROJECT_ROOT / 'artifacts' / 'benchmarks' / loaded.manifest_id / 'doctor.json'}"
+    )
+    typer.echo("started_cells: 0")
+    if not acceptable:
+        raise typer.Exit(code=1)
+
+
+@experiment_app.command("run")
+def experiment_run(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+) -> None:
+    """执行完整 108 格实验赛程；无重试、子集或扩展样本选项。"""
+    try:
+        _, loaded = _confirmed_experiment_manifest(manifest, confirm_sha256)
+        runner_obj = create_benchmark_runner(loaded)
+        result = asyncio.run(runner_obj.run())
+    except (
+        BenchmarkManifestError,
+        BenchmarkRunnerError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"实验执行失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"status: {result.status}")
+    typer.echo(f"cells: {result.terminal_cells}/{result.total_cells}")
+    typer.echo(f"subset: {result.subset}")
+    typer.echo(f"model_probe_required: {result.model_probe_required}")
+    typer.echo(f"stop_reason: {result.stop_reason}")
+    typer.echo(f"ledger: {result.ledger_path}")
+    if result.status != "COMPLETED":
+        raise typer.Exit(code=1)
+
+
+@experiment_app.command("partial")
+def experiment_partial(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+) -> None:
+    """只读分析未完成的实验 suite；不产出正式报告。"""
+    try:
+        _, loaded = _confirmed_experiment_manifest(manifest, confirm_sha256)
+        suite_root = PROJECT_ROOT / "artifacts" / "benchmarks" / loaded.manifest_id
+        result = analyze_partial_suite(loaded, suite_root)
+    except (
+        BenchmarkManifestError,
+        BenchmarkReportError,
+        BenchmarkRunnerError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"实验部分分析失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    reliability = result["reliability"]
+    typer.echo(f"protocol: {reliability['protocol_version']}")
+    typer.echo(
+        f"groups: {reliability['groups_complete']} complete / "
+        f"{reliability['groups_incomplete']} incomplete"
+    )
+    macro = reliability["macro_pass_hat"]
+    for key in ("1", "2", "3"):
+        metric = macro[key]
+        value = "n/a" if metric["value"] is None else f"{metric['value']:.3f}"
+        typer.echo(
+            f"macro pass^{key}: {value} ({metric['groups']} groups / {metric['trials']} trials)"
+        )
