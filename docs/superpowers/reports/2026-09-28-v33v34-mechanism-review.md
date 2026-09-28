@@ -20,7 +20,7 @@
 | 格 | A(v18) 机制 | B(v19) 机制 | 判定 |
 | --- | --- | --- | --- |
 | seq15 orphan_b | run→**schema 采**→profile→lineage；只声明 WATERMARK → `GAP_DECLARED` | run→profile→**两次 history 边界探针均拒**（收据）→声明两条 RELATION_HISTORY 收据 + WATERMARK，**未采 schema** → `GAP_DECLARED`+`REQUIRED` | **机制改变**：B 走了 history 边界探针路线但漏掉 schema 核对，失败构成不同 |
-| seq28 duplicate_b | run→lineage→profile 拒→声明 profile 收据+IDENTITY → `REQUIRED` | run→**schema 采**→profile 拒→同样声明 → `REQUIRED` | 同形失败，B 按新提示多采 schema、无害；均正确弃答 |
+| seq28 duplicate_b | run→lineage→profile 拒→声明 profile 收据+IDENTITY → `REQUIRED` | run→**schema 采**→profile 拒→同样声明 → `REQUIRED` | 失败码同形，但采集集不同（B 多 schema、缺 lineage）；均正确弃答，**无害与否不能判定** |
 | seq32 orphan_b | run→schema→profile→lineage；WATERMARK → `GAP_DECLARED` | run→profile→schema→lineage；**同一声明、同一失败** | **完全相同**（仅 schema/profile 调用顺序互换） |
 
 对照组的 3 个 MODEL_ERROR（seq40/67/71）全部为 `transport=CONNECTION_ERROR`
@@ -43,9 +43,9 @@ TYPES_PRESENT` 恰包含这一缺采；且该格 B 的 profile 调用被拒（sc
 
 Q1（seq70）：提示未执行（遗漏），非预算取舍——执行率 5/6，非产品缺陷。
 Q2（对照机制）：seq15 机制改变（B 走 history 探针收据路线、漏 schema）、
-seq28 同形失败但采集集不同、seq32 完全相同；B 的额外 schema 采集在对照格
-未产生错误确认（0/0）。
-Q3（挤占）：**未见硬预算挤占（零触顶、history/lineage 计数未见减少，唯
-transport 中断格例外）；取证选择替换不能被排除**（seq28 为待解释样本）。
+seq28 同形失败码但**缺采内容发生变化**（B 多 schema、缺 lineage）、seq32
+完全相同（仅顺序互换）；B 的额外 schema 采集在对照格未产生错误确认（0/0）。
+Q3（挤占）：**未见硬预算耗尽（零触顶）；缺采内容发生变化（seq28 B 缺
+lineage），不能判断无害、也不能排除取证替换**（seq28 为待解释样本）。
 三个问题均未指向需要修复的产品机制；按 owner 指令提出确认性测量方案 v2
 （分块可执行版），暂不改 prompt。
