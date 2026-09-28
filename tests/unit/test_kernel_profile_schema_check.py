@@ -1,10 +1,11 @@
-"""Kernel profile-then-schema corroboration slice (2026-09-27 design, section 5.1).
+"""Historical Kernel profile-then-schema candidate and shared mechanics tests.
 
 The prompt-only strategy change asks the model to check the same relation's
 schema before confirming an anomaly from an accepted profile. These tests
-pin the mechanism and identity boundaries: the version bump, the unchanged
-non-kernel surfaces, the ledger semantics that make the playbook executable,
-and one runner-level scripted pass over the real kernel path.
+pin the mechanism and identity boundaries, the ledger semantics that make the
+playbook executable, and runner-level scripted passes over the real kernel path.
+The measured v19 prompt remains available in its frozen checkouts; the active
+Kernel prompt was restored to v18 after the adoption round.
 
 FunctionModel scripts prove only that the agreed path is executable with
 correct permissions, counts and bookkeeping; they never prove a real model
@@ -76,11 +77,11 @@ def _sha256(text: str) -> str:
         DiagnosticStrategy.KERNEL_NO_SCHEMA,
     ),
 )
-def test_kernel_family_shares_the_v19_prompt_and_its_file_digest(
+def test_kernel_family_restores_the_frozen_v18_prompt_identity(
     strategy: DiagnosticStrategy,
 ) -> None:
     surface = policy_surface_for_strategy(strategy)
-    assert surface.strategy_prompt_version == "p1.kernel.v19"
+    assert surface.strategy_prompt_version == "p1.kernel.v18"
     assert surface.strategy_prompt_sha256 == _sha256(
         (PROMPTS_DIR / "diagnostic_kernel.md").read_text(encoding="utf-8")
     )
@@ -88,6 +89,17 @@ def test_kernel_family_shares_the_v19_prompt_and_its_file_digest(
         (PROMPTS_DIR / "base_safety.md").read_text(encoding="utf-8")
     )
     assert surface.policy_identity.controller_protocol_version == "p1.controller.v22"
+    sealed = json.loads(
+        (PROMPTS_DIR.parents[2] / "config" / "benchmark" / "p1-formal-v32.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    expected = next(
+        policy["policy_identity"]
+        for policy in sealed["policies"]
+        if policy["strategy"] == strategy.value
+    )
+    assert surface.policy_identity.model_dump(mode="json") == expected
 
 
 @pytest.mark.parametrize(
@@ -110,23 +122,11 @@ def test_non_kernel_strategy_prompt_identities_unchanged(
     assert surface.policy_identity.controller_protocol_version == "p1.controller.v22"
 
 
-def test_schema_check_paragraph_precedes_the_final_decision_paragraph() -> None:
-    # The prompt file hard-wraps its paragraphs; compare on normalized text.
+def test_restored_prompt_excludes_the_v19_schema_check_paragraph() -> None:
     flat = " ".join(KERNEL_PROMPT.split())
     marker = "Before confirming an anomaly from an accepted relation profile"
-    assert marker in flat
-    assert flat.index(marker) < flat.index(
-        "Before a final decision, check whether decisive, queryable evidence"
-    )
-    for fragment in (
-        "Reuse an accepted schema.",
-        "Do not spend the last model request on this corroboration.",
-        "Do not sweep relations or displace decisive profile, history or lineage checks.",
-        "A disabled or unavailable schema is not, by itself, a reason to probe or abstain.",
-        "preserving each claim's citation constraints",
-    ):
-        assert fragment in flat
-    # Static guidance must not leak the kernel-only rule.
+    assert marker not in flat
+    assert "Before a final decision, check whether decisive, queryable evidence" in flat
     assert marker not in " ".join(STATIC_PROMPT.split())
 
 

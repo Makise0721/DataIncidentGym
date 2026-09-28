@@ -393,17 +393,13 @@ def test_frozen_v22_policy_surfaces_still_match_the_current_tree() -> None:
     v19 -> v20 intentionally re-binds the controller protocol payload for the
     five model strategies, so those two fields are compared for *expected*
     drift (v19 before, v20 now) and excluded from the equality assertion.
-    M25 (2026-09-27) kernel strategy-prompt revision: the shared kernel prompt
-    v18 -> v19 intentionally re-binds ``strategy_prompt_version`` /
-    ``strategy_prompt_sha256`` for the three kernel strategies only; those two
-    fields are excluded from the equality assertion for the kernel family and
-    compared for *expected* drift, while every non-kernel strategy's prompt
-    fields must still match the sealed values byte for byte.
+    After the v19 adoption round, the shared Kernel prompt was restored to
+    the sealed v18 identity. Every strategy-prompt version and digest must
+    match the frozen v22 surface again; only controller identity drift remains.
     ``FIXED_RULE`` binds its own ``p1.fixed-rule.v1`` and must not move at all.
     """
 
     _CONTROLLER_IDENTITY_KEYS = {"controller_protocol_version", "controller_protocol_sha256"}
-    _KERNEL_PROMPT_KEYS = {"strategy_prompt_version", "strategy_prompt_sha256"}
     _KERNEL_STRATEGIES = {"DIAGNOSTIC_KERNEL", "KERNEL_NO_LINEAGE", "KERNEL_NO_SCHEMA"}
 
     frozen = json.loads(
@@ -424,10 +420,6 @@ def test_frozen_v22_policy_surfaces_still_match_the_current_tree() -> None:
                     key: value
                     for key, value in policy["policy_identity"].items()
                     if key not in _CONTROLLER_IDENTITY_KEYS
-                    and not (
-                        policy["policy_identity"]["strategy"] in _KERNEL_STRATEGIES
-                        and key in _KERNEL_PROMPT_KEYS
-                    )
                 },
             }
             for policy in policies
@@ -456,11 +448,11 @@ def test_frozen_v22_policy_surfaces_still_match_the_current_tree() -> None:
         if policy["policy_identity"]["strategy_prompt_version"]
         != sealed["policy_identity"]["strategy_prompt_version"]
     }
-    assert prompt_drift == _KERNEL_STRATEGIES
+    assert prompt_drift == set()
     for policy, sealed in zip(current, frozen["policies"], strict=True):
         if policy["policy_identity"]["strategy"] in _KERNEL_STRATEGIES:
             assert sealed["policy_identity"]["strategy_prompt_version"] == "p1.kernel.v18"
-            assert policy["policy_identity"]["strategy_prompt_version"] == "p1.kernel.v19"
+            assert policy["policy_identity"]["strategy_prompt_version"] == "p1.kernel.v18"
         else:
             assert (
                 policy["policy_identity"]["strategy_prompt_version"]

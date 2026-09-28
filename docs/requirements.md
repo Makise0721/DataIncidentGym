@@ -43,6 +43,8 @@
 
 > M25 修订（2026-09-27 依据 Kernel 提交前 schema 核对设计 `docs/superpowers/specs/2026-09-27-kernel-profile-schema-check-design.md` 批准实施——策略提示修订，**偏好而非硬门**）：Kernel 家族（DIAGNOSTIC_KERNEL / KERNEL_NO_LINEAGE / KERNEL_NO_SCHEMA）共享提示新增「依据已接受的 relation profile 确认异常前，优先核对同一关系的 schema」策略段（置于既有 "Before a final decision" 段之前），并升版 `KERNEL_PROMPT_VERSION` `p1.kernel.v18` → **`p1.kernel.v19`**（三个 Kernel 策略的 strategy prompt 摘要随之进入身份载荷）。规则要点：目标关系取自公开事实（该 profile 与拟确认根因所属关系），不按 case 名或白名单扫描；已有同关系 schema 则复用，其它关系的 schema 与其它类型证据不替代；仅当 schema 工具启用、关系在其 provable_relations 内、无同参调用或拒绝收据、且预算同时覆盖本次核对、仍需的决定性取证与最终提交时优先补采一次，**不把最后一个模型请求花在此核对上**；工具禁用/不可读/预算不足时沿用既有公开证据与终态规则，该策略本身不要求边界探针、不自动生成缺口、不强制弃答；取证失败按既有内核规则记录，不能被本策略撤销或绕过 finalize；schema 与 profile 列不一致时重新判断公开证据是否足够，不得把当前 schema 当健康基线或变化证明；各 claim 引用义务不变，**采集完整性不等于逐 claim 引用完整性**。**边界**：控制器/工具/输出 schema、账本结构、evaluator v5、归档版本、8/8/2/300 预算、滚动暂停与两道提交门均不变；Static、NO_TOOL、REFERENCE_ANALYST、EVIDENCE_PLANNER 不增加规则且身份逐字段不变；模型遵守率与副作用（history 被挤掉、超预算、过度弃答、多余查询）属后续真实测量观察项，FunctionModel 回归只证明约定路径可执行。既有冻结 manifest（含 v32）与历史归档不改写；旧身份复现仍用其冻结 checkout。
 
+> M25 后续处置（2026-09-28，owner 同意按 v39–v42 预登记负面结果恢复 Kernel 默认策略）：v19 的扩大确认目标组 A(v18) 12/12、B(v19) 10/12，未满足采用判据；将 `diagnostic_kernel.md` 恢复为冻结前 v18 的逐字节文本，`KERNEL_PROMPT_VERSION` 恢复为 `p1.kernel.v18`。这只改变当前源码对新运行选用的 Kernel 提示；controller v22、工具与输出 schema、evaluator、预算和提交门保持原合同，v19 测量结果与 v33–v42 冻结清单和归档不改写。当前 Kernel 政策身份须与已封存的 v18 身份逐字段相等；T12 规划器测量若用 Kernel 对照，应显式绑定 v18 提示与当时实际的 controller v22，不能把 T12 初稿的 `p1.controller.v19` 当成现行对照。规划器冻结与真实模型测量仍按各自放行流程执行。
+
 > 当前约束：本文件定义 P0 基本原型及后续阶段边界；实施计划批准前不开始实现。
 
 ## 1. 产品摘要
