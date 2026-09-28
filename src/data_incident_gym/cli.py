@@ -62,6 +62,7 @@ from data_incident_gym.planner_comparison_manifest import (
     load_experiment_manifest,
     verify_experiment_manifest,
 )
+from data_incident_gym.planner_probe import run_planner_compatibility_probe
 from data_incident_gym.run_context import RunContextError, resolve_active_run
 from data_incident_gym.scenario_admission import (
     ADMISSIONS_DIRNAME,
@@ -197,6 +198,31 @@ def create_diagnosis_runner(
 
 def create_evaluation_runner() -> EvaluationRunner:
     return EvaluationRunner.for_project(Settings(), DiagnosticSettings())
+
+
+def _settings_bound_experiment_model(manifest):
+    """Build the probe model exactly as a real run would bind it: manifest
+    model configuration over the environment-provided key, no retries."""
+    from openai import AsyncOpenAI
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    from data_incident_gym.benchmark_runner import _bind_manifest_model_configuration
+    from data_incident_gym.diagnostic_agent import ModelIdentity
+    from data_incident_gym.diagnostic_config import openai_compatibility_kwargs
+
+    settings = _bind_manifest_model_configuration(DiagnosticSettings(), manifest)
+    client = AsyncOpenAI(
+        base_url=str(settings.model_base_url),
+        api_key=settings.model_api_key.get_secret_value(),
+        max_retries=0,
+    )
+    model = OpenAIChatModel(
+        settings.model_name,
+        provider=OpenAIProvider(openai_client=client),
+        **openai_compatibility_kwargs(settings),
+    )
+    return model, ModelIdentity("openai-compatible", settings.model_name)
 
 
 def create_doctor_runner() -> DoctorRunner:
@@ -896,7 +922,7 @@ def experiment_preflight(
     manifest: Path = BENCHMARK_MANIFEST_OPTION,
     confirm_sha256: str = BENCHMARK_SHA256_OPTION,
 ) -> None:
-    """执行与完整 108 格赛程绑定的 doctor；不会创建 cell 或 ledger。"""
+    """执行 doctor 与规划器兼容探针；不会创建 cell 或 ledger。"""
     try:
         _, loaded = _confirmed_experiment_manifest(manifest, confirm_sha256)
         runner_obj = create_benchmark_runner(loaded)
@@ -919,6 +945,18 @@ def experiment_preflight(
     )
     typer.echo("started_cells: 0")
     if not acceptable:
+        raise typer.Exit(code=1)
+
+    try:
+        probe_model, probe_identity = _settings_bound_experiment_model(loaded)
+        probe = asyncio.run(run_planner_compatibility_probe(probe_model, probe_identity))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"规划器兼容探针失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"PLANNER_PROBE: {'PASSED' if probe.passed else 'FAILED'}")
+    typer.echo(f"planner_probe_observed: {probe.observed}")
+    typer.echo(f"planner_probe_transport: {probe.transport or '-'}")
+    if not probe.passed:
         raise typer.Exit(code=1)
 
 

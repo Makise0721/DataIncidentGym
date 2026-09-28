@@ -4,8 +4,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import data_incident_gym.cli as cli
 from typer.testing import CliRunner
+
+import data_incident_gym.cli as cli
 
 runner = CliRunner()
 
@@ -90,3 +91,54 @@ def test_experiment_verify_rejects_v1_manifest_path() -> None:
         ],
     )
     assert result.exit_code == 1
+
+
+def test_experiment_preflight_runs_the_planner_probe_after_doctor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+
+    calls: list[str] = []
+
+    class _ProbeOutcome:
+        passed = False
+        observed = "MODEL_ERROR"
+        transport = "transport=HTTP_502"
+        detail = {"plan_step_receipts": 0}
+
+    class _Runner:
+        async def preflight(self):
+            calls.append("doctor")
+            return SimpleNamespace(
+                result=SimpleNamespace(status=SimpleNamespace(value="PASSED")),
+                model_probe_required=True,
+            )
+
+    async def fake_probe(model, identity, **kwargs):
+        calls.append("probe")
+        return _ProbeOutcome()
+
+    monkeypatch.setattr(
+        cli,
+        "_confirmed_experiment_manifest",
+        lambda path, sha: (Path("x"), SimpleNamespace(manifest_id="p1-planner-compare-v1")),
+    )
+    monkeypatch.setattr(cli, "create_benchmark_runner", lambda manifest: _Runner())
+    monkeypatch.setattr(cli, "is_receipt_acceptable", lambda receipt: True)
+    monkeypatch.setattr(cli, "_settings_bound_experiment_model", lambda loaded: (None, None))
+    monkeypatch.setattr(cli, "run_planner_compatibility_probe", fake_probe)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "experiment",
+            "preflight",
+            "--manifest",
+            "config/benchmark/p1-planner-compare-v1.json",
+            "--confirm-sha256",
+            "f" * 64,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert calls == ["doctor", "probe"]
+    assert "PLANNER_PROBE" in result.output
