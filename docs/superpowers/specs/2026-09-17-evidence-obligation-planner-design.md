@@ -1,7 +1,10 @@
 # T12 设计：公开证据义务规划器（候选策略）
 
 - 日期：2026-09-17 首版；同日在审计意见后修订（计划校验层可执行定义、新变体 dev-only、T05 验收更正、实跑清单）。
-- 状态：**设计待审**；本文只定义身份、计划校验层、对照、指标、离线验收集与实跑清单，实现随后进行。
+- 状态：规划器实现、离线回归与真实 DB/dbt 确定性证据链已交付；真实模型测量尚未设计与冻结。
+  2026-09-28 的 v19 采用轮未通过后，owner 同意恢复当前 Kernel 默认提示为 v18。
+  本文 §3 的未来测量对照按当前合同更新为 v18 提示与 controller v22；
+  首版所写 controller v19 是当时的历史设计基线，不可直接作为新测量身份。
 - 依据：[改进计划](../plans/2026-09-15-research-driven-improvement-plan.md) T12；依赖 T05（回放库）、T06（场景准入与集合）、
   T07（弃答/引用指标）、T08（重复可靠性）、T09（策略协议）。
 - 本文不改变现有 kernel / static 的 prompt、controller、账本或任何冻结身份；也不启动真实模型测量。
@@ -128,7 +131,7 @@ PLANNING ──plan_step(校验通过)──▶ EXECUTING ──▶ 真实 ToolR
 | 角色 | 策略 | 说明 |
 | --- | --- | --- |
 | 处理组 | `EVIDENCE_PLANNER` | 本候选 |
-| 主对照 | `DIAGNOSTIC_KERNEL`（`p1.kernel.v18` / `p1.controller.v19`） | 现任策略，prompt/controller/账本不变 |
+| 主对照 | `DIAGNOSTIC_KERNEL`（`p1.kernel.v18` / `p1.controller.v22`） | 当前默认政策身份；新测量须从当前实现冻结并核对完整政策摘要 |
 | 第二对照 | `STATIC_SKILL` | 无 kernel 路径的基线 |
 | 策略见证 | `FIXED_RULE`、`REFERENCE_ANALYST` | 确定性策略，给出"同一公开证据下可达结论"的上下界，不参与模型能力比较 |
 
