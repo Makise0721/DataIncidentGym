@@ -24,6 +24,7 @@ from data_incident_gym.diagnosis import (
     DiagnosticStrategy,
     EvidenceGateTraceEvent,
     KernelStateTraceEvent,
+    ModelProtocolTraceEvent,
     PlanTraceEvent,
     ToolTraceEvent,
 )
@@ -49,6 +50,7 @@ from data_incident_gym.planner_comparison_manifest import build_experiment_manif
 from data_incident_gym.planner_comparison_report import (
     PlannerComparisonReporter,
     PlannerComparisonReportError,
+    _retry_observations,
 )
 from data_incident_gym.planner_probe_receipt import (
     create_planner_probe_receipt,
@@ -435,6 +437,16 @@ def test_formal_report_analyzes_complete_synthetic_archive(
     assert summary["integrity"]["full_evaluation_recomputations"] == 108
     assert summary["primary"]["paired_planner_vs_kernel"]["pairs"] == 36
     assert summary["primary"]["screening"] == "NOT_ESTABLISHED_T06_IDENTITY_PENDING"
+    planner_costs = summary["costs_and_failures"][DiagnosticStrategy.EVIDENCE_PLANNER.value]
+    assert "output_retries" not in planner_costs["totals"]
+    assert planner_costs["retry_observations"] == {
+        "model_protocol": {
+            "status": "INCOMPLETE",
+            "output_retry_used_observations": None,
+            "events_without_output_retry_used": 0,
+        },
+        "evidence_gate_refusal_events": 0,
+    }
     assert summary_path.is_file()
     assert markdown_path.is_file()
     assert "NOT_ESTABLISHED_T06_IDENTITY_PENDING" in markdown_path.read_text(encoding="utf-8")
@@ -454,6 +466,49 @@ def _metric_item(
         "trace": tuple(SimpleNamespace(event=event) for event in events),
         "diagnosis": SimpleNamespace(evidence_ids=(), claims=()),
     }
+
+
+def test_retry_observations_keep_protocol_values_separate_from_gate_refusals() -> None:
+    protocol_event = ModelProtocolTraceEvent(
+        event_type="MODEL_PROTOCOL",
+        stage="OUTPUT_VALIDATION",
+        tool_name="submit_diagnosis",
+        category="DECISION_CONTRACT_REJECTED",
+        output_retry_used=1,
+    )
+    gate_refusal = EvidenceGateTraceEvent(
+        event_type="EVIDENCE_GATE",
+        reason_code="SUBMISSION_REJECTED",
+        accepted=False,
+    )
+    item = _metric_item(
+        1,
+        DiagnosticStrategy.EVIDENCE_PLANNER,
+        (protocol_event, protocol_event, gate_refusal),
+    )
+
+    assert _retry_observations([item]) == {
+        "model_protocol": {
+            "status": "INCOMPLETE",
+            "output_retry_used_observations": [1, 1],
+            "events_without_output_retry_used": 0,
+        },
+        "evidence_gate_refusal_events": 1,
+    }
+
+    unobserved_event = ModelProtocolTraceEvent(
+        event_type="MODEL_PROTOCOL",
+        stage="PROVIDER_RESPONSE",
+        tool_name=None,
+        category="PROVIDER_PROTOCOL_FAILURE",
+        output_retry_used=None,
+    )
+    unobserved = _retry_observations(
+        [_metric_item(2, DiagnosticStrategy.EVIDENCE_PLANNER, (unobserved_event,))]
+    )
+    assert unobserved["model_protocol"]["status"] == "INCOMPLETE"
+    assert unobserved["model_protocol"]["output_retry_used_observations"] is None
+    assert unobserved["model_protocol"]["events_without_output_retry_used"] == 1
 
 
 def _metric_items(*, include_tool_error: bool, omit_first_planner_state: bool = False):

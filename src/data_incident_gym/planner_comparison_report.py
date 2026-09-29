@@ -85,16 +85,26 @@ def _trace_events(item: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(envelope.event for envelope in item["trace"])
 
 
-def _output_retry_count(events: tuple[Any, ...]) -> int:
-    recorded = [
-        event.output_retry_used
-        for event in events
-        if isinstance(event, ModelProtocolTraceEvent) and event.output_retry_used is not None
-    ]
-    submission_refusals = sum(
-        isinstance(event, EvidenceGateTraceEvent) and not event.accepted for event in events
+def _retry_observations(items: list[dict[str, Any]]) -> dict[str, Any]:
+    events = tuple(event for item in items for event in _trace_events(item))
+    protocol_events = tuple(
+        event for event in events if isinstance(event, ModelProtocolTraceEvent)
     )
-    return max([*recorded, submission_refusals], default=0)
+    retry_values = [
+        event.output_retry_used
+        for event in protocol_events
+        if event.output_retry_used is not None
+    ]
+    return {
+        "model_protocol": {
+            "status": "INCOMPLETE",
+            "output_retry_used_observations": retry_values or None,
+            "events_without_output_retry_used": len(protocol_events) - len(retry_values),
+        },
+        "evidence_gate_refusal_events": sum(
+            isinstance(event, EvidenceGateTraceEvent) and not event.accepted for event in events
+        ),
+    }
 
 
 def _transport_kind(value: str | None) -> str:
@@ -782,7 +792,6 @@ class PlannerComparisonReporter:
                     item["metadata"].diagnosis_metrics.successful_tool_calls for item in items
                 ),
                 "elapsed_ms": sum(item["metadata"].diagnosis_metrics.elapsed_ms for item in items),
-                "output_retries": sum(_output_retry_count(_trace_events(item)) for item in items),
             }
             errors = Counter(
                 item["diagnosis"].summary
@@ -791,6 +800,7 @@ class PlannerComparisonReporter:
             )
             costs[strategy.value] = {
                 "totals": totals,
+                "retry_observations": _retry_observations(items),
                 "model_error_causes": dict(sorted(errors.items())),
             }
 
