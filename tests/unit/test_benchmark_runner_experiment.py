@@ -17,8 +17,16 @@ from data_incident_gym.benchmark_runner import (
     _manifest_relpath_for,
     _verify_manifest_for,
 )
+from data_incident_gym.diagnostic_agent import ModelIdentity
+from data_incident_gym.doctor import DoctorCheckCode, DoctorResult, DoctorRunner, DoctorStatus
 from data_incident_gym.planner_comparison_manifest import (
     build_experiment_manifest,
+)
+from data_incident_gym.planner_probe import PlannerProbeResult
+from data_incident_gym.planner_probe_receipt import (
+    PLANNER_PROBE_RECEIPT_FILENAME,
+    PlannerProbeReceiptError,
+    load_planner_probe_receipt,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -63,6 +71,132 @@ def test_runner_accepts_experiment_manifest_identity() -> None:
         artifact_writer=_Dummy,  # type: ignore[arg-type]
     )
     assert runner._manifest.manifest_id == "p1-planner-compare-v1"
+
+
+def _doctor_result() -> DoctorResult:
+    checks = tuple(DoctorRunner._check(code, True, "OK") for code in DoctorCheckCode)
+    return DoctorResult(status=DoctorStatus.PASSED, checks=checks)
+
+
+class _Doctor:
+    def run(self) -> DoctorResult:
+        return _doctor_result()
+
+
+def _runner_with_probe(
+    tmp_path: Path,
+    manifest,
+    *,
+    probe_factory=None,
+) -> BenchmarkRunner:
+    return BenchmarkRunner(
+        manifest,
+        project_root=tmp_path,
+        doctor_factory=_Doctor,
+        evaluation_runner_factory=lambda: pytest.fail("cells must not start in this test"),
+        artifact_writer=_Dummy(),  # type: ignore[arg-type]
+        checkout_verifier=lambda _manifest: None,
+        checkout_revision_reader=lambda: "b" * 40,
+        planner_probe_factory=probe_factory,
+    )
+
+
+def _passing_probe_factory(manifest, calls: list[str] | None = None):
+    async def factory():
+        if calls is not None:
+            calls.append("probe")
+        return (
+            ModelIdentity(
+                provider=manifest.model_configuration.provider,
+                model=manifest.model_configuration.model,
+            ),
+            PlannerProbeResult(
+                passed=True,
+                observed="PLAN_LOOP_COMPLETED",
+                detail={"plan_step_receipts": 1},
+            ),
+        )
+
+    return factory
+
+
+def test_experiment_runner_requires_probe_before_preflight_or_run(tmp_path: Path) -> None:
+    manifest = _experiment()
+    runner = _runner_with_probe(tmp_path, manifest)
+
+    with pytest.raises(BenchmarkRunnerError, match="dedicated compatibility probe"):
+        import asyncio
+
+        asyncio.run(runner.preflight())
+    with pytest.raises(BenchmarkRunnerError, match="dedicated compatibility probe"):
+        import asyncio
+
+        asyncio.run(runner.run())
+    assert not (tmp_path / "artifacts").exists()
+
+
+def test_experiment_preflight_seals_probe_and_run_rejects_tampering(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    manifest = _experiment()
+    calls: list[str] = []
+    runner = _runner_with_probe(
+        tmp_path,
+        manifest,
+        probe_factory=_passing_probe_factory(manifest, calls),
+    )
+
+    asyncio.run(runner.preflight())
+    suite_root = tmp_path / "artifacts" / "benchmarks" / manifest.manifest_id
+    receipt_path = suite_root / PLANNER_PROBE_RECEIPT_FILENAME
+    receipt = load_planner_probe_receipt(
+        receipt_path,
+        manifest,
+        checkout_revision="b" * 40,
+    )
+    assert receipt.passed is True
+    assert receipt.scope_cell_count == 108
+    assert calls == ["probe"]
+
+    receipt_path.write_text(receipt_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    with pytest.raises(BenchmarkRunnerError, match="tampered"):
+        asyncio.run(runner.run())
+    assert not (suite_root / "subset.json").exists()
+
+
+def test_failed_probe_receipt_is_preserved_and_blocks_run(tmp_path: Path) -> None:
+    import asyncio
+
+    manifest = _experiment()
+
+    async def failed_factory():
+        return (
+            ModelIdentity("wrong-provider", manifest.model_configuration.model),
+            PlannerProbeResult(
+                passed=True,
+                observed="PLAN_LOOP_COMPLETED",
+                detail={"plan_step_receipts": 1},
+            ),
+        )
+
+    runner = _runner_with_probe(tmp_path, manifest, probe_factory=failed_factory)
+    with pytest.raises(BenchmarkRunnerError, match="probe failed"):
+        asyncio.run(runner.preflight())
+
+    suite_root = tmp_path / "artifacts" / "benchmarks" / manifest.manifest_id
+    receipt_path = suite_root / PLANNER_PROBE_RECEIPT_FILENAME
+    assert receipt_path.is_file()
+    with pytest.raises(PlannerProbeReceiptError, match="identity or scope"):
+        load_planner_probe_receipt(
+            receipt_path,
+            manifest,
+            checkout_revision="b" * 40,
+        )
+    with pytest.raises(BenchmarkRunnerError):
+        asyncio.run(runner.run())
+    assert not (suite_root / "subset.json").exists()
 
 
 def test_verify_and_path_dispatch_by_schema() -> None:

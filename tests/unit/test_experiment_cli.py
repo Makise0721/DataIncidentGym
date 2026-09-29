@@ -93,29 +93,18 @@ def test_experiment_verify_rejects_v1_manifest_path() -> None:
     assert result.exit_code == 1
 
 
-def test_experiment_preflight_runs_the_planner_probe_after_doctor(
+def test_experiment_preflight_delegates_probe_to_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-
     calls: list[str] = []
-
-    class _ProbeOutcome:
-        passed = False
-        observed = "MODEL_ERROR"
-        transport = "transport=HTTP_502"
-        detail = {"plan_step_receipts": 0}
 
     class _Runner:
         async def preflight(self):
-            calls.append("doctor")
+            calls.append("runner-preflight")
             return SimpleNamespace(
                 result=SimpleNamespace(status=SimpleNamespace(value="PASSED")),
                 model_probe_required=True,
             )
-
-    async def fake_probe(model, identity, **kwargs):
-        calls.append("probe")
-        return _ProbeOutcome()
 
     monkeypatch.setattr(
         cli,
@@ -124,8 +113,16 @@ def test_experiment_preflight_runs_the_planner_probe_after_doctor(
     )
     monkeypatch.setattr(cli, "create_benchmark_runner", lambda manifest: _Runner())
     monkeypatch.setattr(cli, "is_receipt_acceptable", lambda receipt: True)
-    monkeypatch.setattr(cli, "_settings_bound_experiment_model", lambda loaded: (None, None))
-    monkeypatch.setattr(cli, "run_planner_compatibility_probe", fake_probe)
+    monkeypatch.setattr(
+        cli,
+        "_settings_bound_experiment_model",
+        lambda *_: pytest.fail("CLI must not construct a separate probe model"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_planner_compatibility_probe",
+        lambda *_args, **_kwargs: pytest.fail("CLI must let the runner execute the probe"),
+    )
 
     result = runner.invoke(
         cli.app,
@@ -139,6 +136,60 @@ def test_experiment_preflight_runs_the_planner_probe_after_doctor(
         ],
     )
 
-    assert result.exit_code == 1
-    assert calls == ["doctor", "probe"]
-    assert "PLANNER_PROBE" in result.output
+    assert result.exit_code == 0, result.output
+    assert calls == ["runner-preflight"]
+    assert "PLANNER_PROBE: PASSED" in result.output
+    assert "planner-probe.json" in result.output
+
+
+def test_experiment_report_wires_output_to_formal_reporter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    manifest = SimpleNamespace(manifest_id="p1-planner-compare-v1")
+
+    class _Reporter:
+        def __init__(self, loaded, suite_root, *, project_root):
+            captured["manifest"] = loaded
+            captured["suite_root"] = suite_root
+            captured["project_root"] = project_root
+
+        def write(self, output_dir):
+            captured["output_dir"] = output_dir
+            return (
+                tmp_path / "summary.json",
+                tmp_path / "report.md",
+                {"integrity": {"status": "VERIFIED_COMPLETE"}, "primary": {"screening": "PENDING"}},
+            )
+
+    monkeypatch.setattr(
+        cli,
+        "_confirmed_experiment_manifest",
+        lambda path, sha: (Path("manifest.json"), manifest),
+    )
+    monkeypatch.setattr(cli, "PlannerComparisonReporter", _Reporter)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "experiment",
+            "report",
+            "--manifest",
+            "config/benchmark/p1-planner-compare-v1.json",
+            "--confirm-sha256",
+            "f" * 64,
+            "--output-dir",
+            str(tmp_path / "report-output"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["manifest"] is manifest
+    assert (
+        captured["suite_root"]
+        == cli.PROJECT_ROOT / "artifacts" / "benchmarks" / manifest.manifest_id
+    )
+    assert captured["output_dir"] == tmp_path / "report-output"
+    assert "integrity: VERIFIED_COMPLETE" in result.output
+    assert "screening: PENDING" in result.output

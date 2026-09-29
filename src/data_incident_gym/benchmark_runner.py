@@ -6,7 +6,7 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +55,7 @@ from data_incident_gym.diagnosis import (
 from data_incident_gym.diagnostic_agent import (
     P1_ROOT_CAUSE_CODES,
     DiagnosisRunner,
+    ModelIdentity,
     policy_identity_for_strategy,
 )
 from data_incident_gym.diagnostic_config import DiagnosticSettings
@@ -87,6 +88,14 @@ from data_incident_gym.planner_comparison_manifest import (
     PlannerComparisonManifest,
     experiment_manifest_path_for,
     verify_experiment_manifest,
+)
+from data_incident_gym.planner_probe import PlannerProbeResult
+from data_incident_gym.planner_probe_receipt import (
+    PLANNER_PROBE_RECEIPT_FILENAME,
+    PlannerProbeReceiptError,
+    create_planner_probe_receipt,
+    load_planner_probe_receipt,
+    write_planner_probe_receipt,
 )
 from data_incident_gym.scenarios import load_scenario_spec
 
@@ -285,6 +294,10 @@ EvaluationRunnerFactory = Callable[[], EvaluationRunner]
 CheckoutVerifier = Callable[[BenchmarkManifest], None]
 CheckoutRevisionReader = Callable[[], str]
 Clock = Callable[[], datetime]
+PlannerProbeFactory = Callable[
+    [],
+    Awaitable[tuple[ModelIdentity, PlannerProbeResult]] | tuple[ModelIdentity, PlannerProbeResult],
+]
 
 
 def _bind_manifest_model_configuration(
@@ -523,11 +536,14 @@ class BenchmarkRunner:
         checkout_verifier: CheckoutVerifier | None = None,
         checkout_revision_reader: CheckoutRevisionReader | None = None,
         cell_selector: BenchmarkCellSelector | None = None,
+        planner_probe_factory: PlannerProbeFactory | None = None,
     ) -> None:
         if not _manifest_identity_approved(manifest):
             raise BenchmarkRunnerError("manifest_id is not an approved formal identity")
         if cell_selector is not None and cell_selector.manifest_id != manifest.manifest_id:
             raise BenchmarkRunnerError("cell selector is bound to another manifest")
+        if isinstance(manifest, PlannerComparisonManifest) and cell_selector is not None:
+            raise BenchmarkRunnerError("planner comparison requires the complete frozen scope")
         self._manifest = manifest
         self._project_root = project_root
         self._doctor_factory = doctor_factory
@@ -539,6 +555,7 @@ class BenchmarkRunner:
             checkout_revision_reader or self._read_checkout_revision
         )
         self._cell_selector = cell_selector
+        self._planner_probe_factory = planner_probe_factory
 
     @classmethod
     def for_project(
@@ -549,6 +566,7 @@ class BenchmarkRunner:
         settings: Settings | None = None,
         diagnostic_settings: DiagnosticSettings | None = None,
         cell_selector: BenchmarkCellSelector | None = None,
+        planner_probe_factory: PlannerProbeFactory | None = None,
     ) -> BenchmarkRunner:
         settings = settings or Settings()
         diagnostic_settings = _bind_manifest_model_configuration(
@@ -610,6 +628,7 @@ class BenchmarkRunner:
             evaluation_runner_factory=evaluation_runner_factory,
             artifact_writer=artifact_writer,
             cell_selector=cell_selector,
+            planner_probe_factory=planner_probe_factory,
         )
 
     def _suite_root(self) -> Path:
@@ -941,6 +960,78 @@ class BenchmarkRunner:
             model_probe_required=model_probe_required,
         )
 
+    async def _run_planner_probe(
+        self,
+        suite_root: Path,
+        *,
+        checkout_revision: str,
+    ) -> None:
+        if not isinstance(self._manifest, PlannerComparisonManifest):
+            return
+        factory = self._planner_probe_factory
+        if factory is None:
+            raise BenchmarkRunnerError(
+                "planner comparison requires its dedicated compatibility probe"
+            )
+
+        identity: ModelIdentity | None = None
+        result: PlannerProbeResult
+        try:
+            candidate = factory()
+            if inspect.isawaitable(candidate):
+                candidate = await candidate
+            if (
+                not isinstance(candidate, tuple)
+                or len(candidate) != 2
+                or not isinstance(candidate[0], ModelIdentity)
+                or not isinstance(candidate[1], PlannerProbeResult)
+            ):
+                raise TypeError("planner probe factory returned an invalid result")
+            identity, result = candidate
+        except Exception as error:  # noqa: BLE001 -- persist a fixed, sanitized failure
+            result = PlannerProbeResult(
+                passed=False,
+                observed="PROBE_EXECUTION_ERROR",
+                detail={"error_class": type(error).__name__},
+            )
+
+        configuration = self._manifest.model_configuration
+        identity_matches = identity is not None and (
+            identity.provider == configuration.provider and identity.model == configuration.model
+        )
+        if not identity_matches:
+            detail = dict(result.detail)
+            detail["model_identity_matches_manifest"] = False
+            result = PlannerProbeResult(
+                passed=False,
+                observed="MODEL_IDENTITY_MISMATCH",
+                transport=result.transport,
+                detail=detail,
+            )
+        receipt = create_planner_probe_receipt(
+            self._manifest,
+            checkout_revision=checkout_revision,
+            model_provider=None if identity is None else identity.provider,
+            model_name=None if identity is None else identity.model,
+            passed=result.passed,
+            observed=result.observed,
+            transport=result.transport,
+            detail=result.detail,
+            checked_at=_aware_utc(self._clock()),
+        )
+        try:
+            write_planner_probe_receipt(
+                suite_root / PLANNER_PROBE_RECEIPT_FILENAME,
+                receipt,
+            )
+        except PlannerProbeReceiptError as error:
+            raise BenchmarkRunnerError(str(error)) from error
+        if not result.passed:
+            raise BenchmarkRunnerError(
+                "planner compatibility probe failed; its failure receipt is preserved: "
+                f"{result.observed}"
+            )
+
     def _assert_unstarted_artifacts_absent(
         self,
         ledger: dict[str, BenchmarkLedgerEntry],
@@ -960,6 +1051,13 @@ class BenchmarkRunner:
     async def preflight(self) -> BenchmarkDoctorReceipt:
         """Validate an untouched suite and persist its bound doctor receipt."""
 
+        if (
+            isinstance(self._manifest, PlannerComparisonManifest)
+            and self._planner_probe_factory is None
+        ):
+            raise BenchmarkRunnerError(
+                "planner comparison requires its dedicated compatibility probe"
+            )
         self._checkout_verifier(self._manifest)
         suite_root = self._suite_root()
         ledger_path = suite_root / _LEDGER_FILENAME
@@ -978,11 +1076,19 @@ class BenchmarkRunner:
                 raise BenchmarkRunnerError("preflight requires an empty benchmark ledger")
             self._assert_unstarted_artifacts_absent(ledger)
             checkout_revision = self._checkout_revision_reader()
-            return await self._run_doctor(
+            receipt = await self._run_doctor(
                 doctor_path,
                 checkout_revision=checkout_revision,
                 model_probe_required=self._model_probe_required(),
             )
+            if isinstance(self._manifest, PlannerComparisonManifest) and is_receipt_acceptable(
+                receipt
+            ):
+                await self._run_planner_probe(
+                    suite_root,
+                    checkout_revision=checkout_revision,
+                )
+            return receipt
 
     def _materialize_setup_error(
         self,
@@ -1079,6 +1185,13 @@ class BenchmarkRunner:
         )
 
     async def run(self) -> BenchmarkRunResult:
+        if (
+            isinstance(self._manifest, PlannerComparisonManifest)
+            and self._planner_probe_factory is None
+        ):
+            raise BenchmarkRunnerError(
+                "planner comparison requires its dedicated compatibility probe"
+            )
         self._checkout_verifier(self._manifest)
         suite_root = self._suite_root()
         cells = self._selected_cells()
@@ -1093,9 +1206,16 @@ class BenchmarkRunner:
             doctor_result = receipt.result
             self.assert_receipt_scope(receipt)
             if not is_receipt_acceptable(receipt):
-                raise BenchmarkRunnerError(
-                    "doctor receipt is not acceptable for this suite scope"
-                )
+                raise BenchmarkRunnerError("doctor receipt is not acceptable for this suite scope")
+            if isinstance(self._manifest, PlannerComparisonManifest):
+                try:
+                    load_planner_probe_receipt(
+                        suite_root / PLANNER_PROBE_RECEIPT_FILENAME,
+                        self._manifest,
+                        checkout_revision=receipt.checkout_revision,
+                    )
+                except PlannerProbeReceiptError as error:
+                    raise BenchmarkRunnerError(str(error)) from error
             selected_run_ids = {cell.run_id for cell in cells}
             if any(run_id not in selected_run_ids for run_id in ledger):
                 raise BenchmarkRunnerError(

@@ -56,11 +56,16 @@ from data_incident_gym.planner_comparison_manifest import (
     EXPERIMENT_MANIFEST_ID,
     EXPERIMENT_MANIFEST_PATH,
     EXPERIMENT_MODEL,
+    PlannerComparisonManifest,
     build_experiment_manifest,
     experiment_manifest_path_for,
     freeze_experiment_manifest,
     load_experiment_manifest,
     verify_experiment_manifest,
+)
+from data_incident_gym.planner_comparison_report import (
+    PlannerComparisonReporter,
+    PlannerComparisonReportError,
 )
 from data_incident_gym.planner_probe import run_planner_compatibility_probe
 from data_incident_gym.run_context import RunContextError, resolve_active_run
@@ -164,6 +169,7 @@ def _diagnostic_strategy(strategy: CliStrategy) -> DiagnosticStrategy:
         CliStrategy.STATIC_SKILL: DiagnosticStrategy.STATIC_SKILL,
     }[strategy]
 
+
 DOCTOR_RECOMMENDATIONS_ZH = {
     "USE_PYTHON_3_12": "建议使用 Python 3.12.10。",
     "INSTALL_UV_0_11_24": "建议安装并使用 uv 0.11.24。",
@@ -222,7 +228,7 @@ def _settings_bound_experiment_model(manifest):
         provider=OpenAIProvider(openai_client=client),
         **openai_compatibility_kwargs(settings),
     )
-    return model, ModelIdentity("openai-compatible", settings.model_name)
+    return model, ModelIdentity("openai-compatible", settings.model_name), client
 
 
 def create_doctor_runner() -> DoctorRunner:
@@ -230,6 +236,21 @@ def create_doctor_runner() -> DoctorRunner:
 
 
 def create_benchmark_runner(manifest, selector=None) -> BenchmarkRunner:
+    if isinstance(manifest, PlannerComparisonManifest):
+
+        async def planner_probe_factory():
+            model, identity, client = _settings_bound_experiment_model(manifest)
+            try:
+                result = await run_planner_compatibility_probe(model, identity)
+            finally:
+                await client.close()
+            return identity, result
+
+        return BenchmarkRunner.for_project(
+            manifest,
+            cell_selector=selector,
+            planner_probe_factory=planner_probe_factory,
+        )
     return BenchmarkRunner.for_project(manifest, cell_selector=selector)
 
 
@@ -866,6 +887,7 @@ def _confirmed_experiment_manifest(path: Path, confirm_sha256: str):
 EXPERIMENT_ID_OPTION = typer.Option(EXPERIMENT_MANIFEST_ID, "--manifest-id")
 EXPERIMENT_OUTPUT_OPTION = typer.Option(EXPERIMENT_MANIFEST_PATH, "--output")
 EXPERIMENT_MODEL_OPTION = typer.Option(EXPERIMENT_MODEL, "--model")
+EXPERIMENT_REPORT_OUTPUT_OPTION = typer.Option(None, "--output-dir")
 
 
 @experiment_app.command("freeze")
@@ -946,18 +968,11 @@ def experiment_preflight(
     typer.echo("started_cells: 0")
     if not acceptable:
         raise typer.Exit(code=1)
-
-    try:
-        probe_model, probe_identity = _settings_bound_experiment_model(loaded)
-        probe = asyncio.run(run_planner_compatibility_probe(probe_model, probe_identity))
-    except (OSError, ValueError) as exc:
-        typer.echo(f"规划器兼容探针失败：{exc}", err=True)
-        raise typer.Exit(code=1) from None
-    typer.echo(f"PLANNER_PROBE: {'PASSED' if probe.passed else 'FAILED'}")
-    typer.echo(f"planner_probe_observed: {probe.observed}")
-    typer.echo(f"planner_probe_transport: {probe.transport or '-'}")
-    if not probe.passed:
-        raise typer.Exit(code=1)
+    typer.echo("PLANNER_PROBE: PASSED")
+    typer.echo(
+        "planner_probe_receipt: "
+        f"{PROJECT_ROOT / 'artifacts' / 'benchmarks' / loaded.manifest_id / 'planner-probe.json'}"
+    )
 
 
 @experiment_app.command("run")
@@ -1020,3 +1035,33 @@ def experiment_partial(
         typer.echo(
             f"macro pass^{key}: {value} ({metric['groups']} groups / {metric['trials']} trials)"
         )
+
+
+@experiment_app.command("report")
+def experiment_report(
+    manifest: Path = BENCHMARK_MANIFEST_OPTION,
+    confirm_sha256: str = BENCHMARK_SHA256_OPTION,
+    output_dir: Path | None = EXPERIMENT_REPORT_OUTPUT_OPTION,
+) -> None:
+    """只读重载完整 108 格归档并写入正式 T07/T08/PLAN 报告。"""
+    try:
+        _, loaded = _confirmed_experiment_manifest(manifest, confirm_sha256)
+        suite_root = PROJECT_ROOT / "artifacts" / "benchmarks" / loaded.manifest_id
+        reporter = PlannerComparisonReporter(
+            loaded,
+            suite_root,
+            project_root=PROJECT_ROOT,
+        )
+        summary_path, markdown_path, summary = reporter.write(output_dir)
+    except (
+        BenchmarkManifestError,
+        PlannerComparisonReportError,
+        OSError,
+        ValueError,
+    ) as exc:
+        typer.echo(f"实验正式报告失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"integrity: {summary['integrity']['status']}")
+    typer.echo(f"screening: {summary['primary']['screening']}")
+    typer.echo(f"summary: {summary_path}")
+    typer.echo(f"report: {markdown_path}")
