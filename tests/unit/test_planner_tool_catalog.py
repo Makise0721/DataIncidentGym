@@ -362,6 +362,123 @@ def test_an_empty_grant_is_an_empty_catalog_not_a_full_fallback() -> None:
     assert planner_tool_catalog(set(), EVIDENCE_TOOLS_V1_VERSION) == []
 
 
+@pytest.mark.parametrize("grant", [frozenset(), frozenset({"get_relation_schema"})])
+def test_the_model_receives_only_the_actual_session_grant(project_root: Path, grant) -> None:
+    captured = []
+
+    def play(messages, _info):
+        captured.append(catalog_from_messages(messages))
+        return ModelResponse(parts=[ToolCallPart("submit_diagnosis", _abstain())])
+
+    session = StrategySession(
+        run_id=RUN_ID, tools=_PlannerTools(), context=_context(),
+        declaration=_declaration(), allowlist=grant,
+    )
+    runner = EvidencePlannerRunner.for_run(
+        RUN_ID, SimpleNamespace(), project_root, model=FunctionModel(play),
+        model_identity=ModelIdentity("test", "scripted"), session=session,
+    )
+    result = asyncio.run(runner.diagnose())
+    full = planner_controller_payload()["catalog_projection"]["full_catalog"]
+    expected = [entry for entry in full if entry["name"] in grant]
+    assert captured == [expected]
+    assert result.metrics.tool_call_attempts == 0
+    assert not result.evidence_records
+
+
+@pytest.mark.parametrize("grant", [set(), PROTOCOL_TOOL_ALLOWLIST])
+def test_an_unknown_surface_does_not_silently_fall_back_to_v1(grant) -> None:
+    with pytest.raises(ValueError, match="unsupported.*surface"):
+        planner_tool_catalog(grant, "p1.evidence_tools.typo")
+
+
+@pytest.mark.parametrize(
+    ("tool", "argument", "target"),
+    [
+        ("get_relation_schema_expectation", "relation_names", "raw_orders"),
+        ("get_dbt_node_definition", "node_ids", NODE),
+    ],
+)
+def test_one_granted_v2_tool_is_both_visible_and_executable(
+    project_root: Path, monkeypatch: pytest.MonkeyPatch, tool, argument, target
+) -> None:
+    import data_incident_gym.planner_agent as agent_module
+
+    template = _context()
+    context = ObservableRunContext(
+        run_id=template.run_id,
+        artifact_dir=template.artifact_dir,
+        runtime={
+            "schema_version": "p1.runtime.v2",
+            "observable_relations": {"expectation": ["raw_orders"]},
+        },
+        incident_brief=template.incident_brief,
+    )
+    monkeypatch.setattr(agent_module, "resolve_run_context", lambda *a, **kw: context)
+    backend = _PlannerTools()
+    monkeypatch.setattr(backend, tool, lambda value: backend._one(tool, value), raising=False)
+    session = StrategySession(
+        run_id=RUN_ID, tools=backend, context=context, declaration=_declaration(),
+        allowlist=frozenset({tool}),
+    )
+    seen = []
+
+    def play(messages, _info):
+        catalog = catalog_from_messages(messages)
+        seen.append(catalog)
+        assert len(catalog) == 1
+        entry = catalog[0]
+        if len(seen) == 1:
+            assert entry["input_schema"]["required"] == [argument]
+            return ModelResponse(parts=[ToolCallPart("plan_step", {
+                "tool_name": entry["name"],
+                "arguments": {entry["input_schema"]["required"][0]: target},
+            })])
+        return ModelResponse(parts=[ToolCallPart("submit_diagnosis", _abstain())])
+
+    runner = EvidencePlannerRunner.for_run(
+        RUN_ID, SimpleNamespace(), project_root, model=FunctionModel(play),
+        model_identity=ModelIdentity("test", "scripted"), session=session,
+    )
+    result = asyncio.run(runner.diagnose())
+    assert all([entry["name"] for entry in catalog] == [tool] for catalog in seen)
+    assert backend.calls == [tool]
+    assert result.metrics.tool_call_attempts == 1
+    assert runner.controller.snapshot()["plan_refusals_used"] == 0
+    assert result.evidence_records
+
+
+def test_lineage_catalog_describes_transitive_nodes_and_distance() -> None:
+    from datetime import UTC, datetime
+
+    from data_incident_gym.evidence_tools import EvidenceTools
+
+    # Exercise the real traversal over a minimal in-memory manifest: the
+    # catalog must not describe this two-hop result as immediate neighbors.
+    start, middle, seed = "model.x.final", "model.x.staging", "seed.x.raw"
+    tools = object.__new__(EvidenceTools)
+    tools._run_id = RUN_ID
+    tools._artifacts = SimpleNamespace(
+        manifest={
+            "nodes": {
+                start: {"resource_type": "model", "name": "final"},
+                middle: {"resource_type": "model", "name": "staging"},
+                seed: {"resource_type": "seed", "name": "raw"},
+            },
+            "parent_map": {start: [middle], middle: [seed], seed: []},
+        },
+        manifest_generated_at=datetime(2026, 9, 29, tzinfo=UTC),
+    )
+    record, = tools.get_dbt_lineage(start, "upstream")
+    assert [(node.node_id, node.distance) for node in record.content.related_nodes] == [
+        (middle, 1), (seed, 2),
+    ]
+    entry = planner_tool_catalog({"get_dbt_lineage"})[0]
+    assert "reachable" in entry["description"]
+    assert "distance" in entry["description"]
+    assert "immediate" not in entry["description"]
+
+
 @pytest.mark.parametrize(
     ("grant", "surface"),
     [
@@ -437,7 +554,7 @@ def test_a_v2_context_delivers_the_v2_catalog() -> None:
     [
         ("run results summary", "get_dbt_run_results"),
         ("failure detail", "get_dbt_node_error"),
-        ("neighbors", "get_dbt_lineage"),
+        ("reachable", "get_dbt_lineage"),
         ("column list", "get_relation_schema"),
         ("aggregate profile", "get_relation_data_profile"),
         ("history series", "get_relation_history"),
@@ -569,7 +686,7 @@ def test_two_plan_refusals_block_a_third_catalog_derived_plan(
 
 
 def test_the_catalog_ignores_everything_but_the_public_grant(
-    project_root: Path,
+    project_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[list] = []
 
@@ -595,6 +712,12 @@ def test_the_catalog_ignores_everything_but_the_public_grant(
         declaration=_declaration(),
     )
     plain_runner = _capture_runner(project_root, play)
+    asyncio.run(plain_runner.diagnose())
+    import data_incident_gym.planner_agent as agent_module
+
+    # for_run resolves its own context; poisoning only the injected session's
+    # context would never exercise the runner's model-visible projection.
+    monkeypatch.setattr(agent_module, "resolve_run_context", lambda *a, **kw: private_context)
     private_runner = EvidencePlannerRunner.for_run(
         RUN_ID,
         SimpleNamespace(),
@@ -603,8 +726,8 @@ def test_the_catalog_ignores_everything_but_the_public_grant(
         model_identity=ModelIdentity("test", "scripted"),
         session=session,
     )
-    asyncio.run(plain_runner.diagnose())
     asyncio.run(private_runner.diagnose())
+    assert private_runner._context is private_context
 
     # Same public grant, different run content: identical catalogs.
     assert plain_runner._catalog == private_runner._catalog
@@ -749,10 +872,22 @@ def test_the_planner_declaration_discloses_the_catalog_marker(
 # -- probe wiring: the offline probe sees the same catalog ---------------------
 
 
-def test_the_offline_probe_receives_the_catalog_and_completes_its_loop() -> None:
+def test_the_offline_probe_receives_the_catalog_and_completes_its_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import data_incident_gym.planner_probe as probe_module
     from data_incident_gym.planner_probe import run_planner_compatibility_probe
 
     seen: list[list] = []
+    declarations = []
+    real_declaration = probe_module.planner_builtin_declaration
+
+    def capture_declaration(**kwargs):
+        declaration = real_declaration(**kwargs)
+        declarations.append(declaration)
+        return declaration
+
+    monkeypatch.setattr(probe_module, "planner_builtin_declaration", capture_declaration)
 
     def play(messages, _info) -> ModelResponse:
         seen.append(list(messages))
@@ -786,10 +921,7 @@ def test_the_offline_probe_receives_the_catalog_and_completes_its_loop() -> None
     assert catalog_from_messages(seen[0]) == planner_tool_catalog(
         PROTOCOL_TOOL_ALLOWLIST, EVIDENCE_TOOLS_V1_VERSION
     )
-    declaration_marker = "evidence_tool_catalog"
-    assert declaration_marker  # the probe's own declaration carries it too
-    from data_incident_gym.planner_agent import PLANNER_VISIBLE_CONTEXT
-
-    assert PLANNER_VISIBLE_CONTEXT == (
+    assert len(declarations) == 1
+    assert declarations[0].visible_context == (
         "incident_brief", "relation_whitelist", "evidence_tool_catalog"
     )

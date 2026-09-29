@@ -95,7 +95,8 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
         "The stored failure detail of one dbt node from this run's results."
     ),
     "get_dbt_lineage": (
-        "The immediate neighbors of one dbt node in one direction."
+        "The reachable model, seed and source nodes in one direction, "
+        "with their shortest edge distance from the requested node."
     ),
     "get_relation_schema": "The column list (name, type, nullability) of one relation.",
     "get_relation_data_profile": "The current aggregate profile of one relation.",
@@ -121,7 +122,7 @@ _TOOL_ARGUMENT_NOTES: dict[str, str] = {
     ),
     "get_dbt_lineage": (
         "direction is 'upstream' or 'downstream'; "
-        "node_id names the node whose neighbors to read."
+        "node_id names the starting node; results include indirect dependencies or dependents."
     ),
     "get_relation_schema": (
         "relation_name names one relation; readable relations stay limited "
@@ -225,7 +226,7 @@ def tool_obligations_for_allowlist(
 
     return (
         V2_TOOL_OBLIGATIONS
-        if set(EVIDENCE_BATCH_TOOLS).issubset(set(allowlist))
+        if set(EVIDENCE_BATCH_TOOLS).intersection(allowlist)
         else TOOL_OBLIGATIONS
     )
 
@@ -303,6 +304,8 @@ def planner_tool_catalog(
     tool would be a lie the model cannot detect.
     """
 
+    if surface not in {EVIDENCE_TOOLS_V1_VERSION, EVIDENCE_TOOLS_V2_VERSION}:
+        raise ValueError(f"unsupported evidence tool surface: {surface}")
     obligations = (
         V2_TOOL_OBLIGATIONS if surface == EVIDENCE_TOOLS_V2_VERSION else TOOL_OBLIGATIONS
     )
