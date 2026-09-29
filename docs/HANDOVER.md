@@ -1,118 +1,51 @@
-# DataIncidentGym 交接文档
+# DataIncidentGym 当前交接
 
-> 写作时间：2026-09-07。读者：下一个接手本项目的操作者/代理。
-> 权威顺序：`docs/requirements.md`（需求，Windows 工作区材料）> 本文档（操作现状）> `decision.md`（逐轮决策日志）> `README.md`（面向外部的项目描述）。
+更新日期：2026-09-29。本文替代 2026-09-07 的操作现状；旧版保留在 Git 历史中。
 
-## 1. 项目一句话与最终状态
+## 当前目标与停点
 
-DataIncidentGym 是本地单用户 CLI：在真实 PostgreSQL + dbt（Jaffle Shop）上确定性注入数据事故，让受限 Agent 只用只读工具调查，由确定性 evaluator 按冻结合同评分。P1 全部 17 场景已建成；正式基准批次已执行并结案。
+本阶段收口为可复现的数据事故诊断研究项目，保留实现、实验和失败证据。当前不再自动扩大真实模型测量，也不继续“测量失败后补提示，再增加样本”的循环。没有证据支持 Kernel 在现有条件下稳定、普遍优于 Static Skill；规划器也尚无端到端收益证据。
 
-**当前正式结论：`INVALID` / 模型质量 `NOT_ESTABLISHED`。** 不存在任何有效的准确率、Kernel 优势或生产可用性结论。措辞红线：不得把任何批次数字（包括 100%/87.5%）表述为准确率、普遍结论或策略优越性。
+Kernel 当前采用 `p1.kernel.v18`。v19 在部分子集取得优势，但扩大机制范围后的预登记采用条件未满足，因此没有作为默认策略采用。具体批次结果、分母和局限见 [RESULTS.md](../RESULTS.md)，不得把某个暂停前缀的通过率写成整个项目的准确率或能力上限。
 
-## 2. 位置地图
+本轮文档更新与推送不包含新的模型请求、数据库运行、manifest 冻结或 CI 等待。历史计划里的“下一步”不代表当前仍有执行授权。
 
-| 位置 | 内容 |
-|---|---|
-| `C:\Users\29913\codex_space\DataIncidentGym`（Windows） | 主工作区，`main`=`df22569`，与远端一致。未跟踪材料：`AGENTS.md`、`decision.md`、`docs/requirements.md`、`docs/superpowers/`（含全部计划文档） |
-| `\\wsl.localhost\Ubuntu\home\makise\codex_space\DataIncidentGym`（WSL） | 执行主 checkout，已同步 `main`=`df22569`，干净。操作一律走 `wsl.exe -d Ubuntu -- bash -lc '...'` |
-| WSL `…-smoke-v3/v4/v5/v6/v7/v8` | 六个 smoke 批次 worktree（各含证据与日志），分支 `codex/benchmark-smoke-v*` 已推送 |
-| WSL `…-formal-v2` / `…-formal-v9` | 两次正式批次 worktree（含归档/结案记录），分支已推送 |
-| WSL `…-relation-policy` | **另一会话创建**（`codex/kernel-relation-policy`@4ac9779），本项目主链未使用，勿动 |
-| Windows 隔离 worktree `C:\Users\29913\.config\superpowers\worktrees\DataIncidentGym\benchmark-rerun-enablement` | 历史遗留（Task 1–4 初版），只读保留 |
-| Windows `C:\Users\29913\codex_space\DataIncidentGym\decision.md` | 1579 行起为 Task 5–7 / Kernel 修订 / 正式批次逐轮记录 |
+## 阅读入口
 
-## 3. Git/CI 状态（2026-09-07 收尾时）
+- [README.md](../README.md)：项目定位、能力边界、安装和常用命令。
+- [RESULTS.md](../RESULTS.md)：当前研究结论与代表性实验，保留早期 v9 结案记录。
+- [requirements.md](requirements.md)：实现合同与逐次修订；合同实现通过不等于模型质量通过。
+- [decision.md](../decision.md)：当前阶段决定与历史决策记录。
+- `docs/superpowers/`：具体设计、实施和实验报告。按报告中的 manifest、代码修订与归档定位证据，历史报告不作为当前环境说明。
 
-- `main` = `df22569`（`fix: validate kernel state before reporter access`），main CI `34120037221` 全绿（unit 373 / integration 34 / e2e 47）。
-- 远端分支（全部保留，不删）：`codex/benchmark-smoke-v3/v5/v6/v7/v8`、`codex/kernel-contract-v6/v7/v8`、`codex/kernel-relation-policy`、`codex/model-mimo-v2-5-pro`、`codex/formal-v9-hardening`、`codex/benchmark-formal-v2`、`codex/benchmark-formal-v9`、`codex/formal-v9-final`、`codex/benchmark-rerun-enablement`。
-- 本地分支（Windows 侧）：`codex/benchmark-smoke-v4`（未推送，按当时授权边界）、`codex/formal-v9-final` 等。
+## 实现与身份
 
-## 4. Manifest 身份台账（全部已消耗，冻结后永不复用）
+当前源码的 Kernel prompt / controller 为 `p1.kernel.v18` / `p1.controller.v22`，evaluator 为 `p1.evaluator.v5`；规划器为 `p1.planner.v2` / `p1.planner_controller.v2`。版本字符串不能替代源码摘要和冻结身份核对。
 
-| 身份 | 用途 | 结果 |
-|---|---|---|
-| `p1-formal-v1` | 第一次正式 106 格 | `INVALID_HARNESS`（历史封存） |
-| `p1-formal-v2` | 第二次正式 106 格（修复后） | 32/106 fail-stop（seq32 diagnosis 逃逸）→ `INVALID`，已修复 |
-| `p1-formal-v3` | 12 格 FIXED_RULE smoke | 11 PASSED / 1 质量失败；harness 干净 |
-| `p1-formal-v4` | 8 格真实模型 smoke | Kernel 工具成功率 68.97%，0/4 终态 |
-| `p1-formal-v5` | v6 绑定参数化验证 | 75.00%，1/4 |
-| `p1-formal-v6` | v7 provenance 白名单验证 | 66.67%，2/4；**发现 kernel 门与工具层 allowlist 合同错位** |
-| `p1-formal-v7` | v8 同源化验证 | 87.50%，0/4；关系纪律错误归零 |
-| `p1-formal-v8` | mimo-v2.5-pro 判定门重测 | **100%，2/4 —— 判定门首次同时达标**，解锁 Task 7 |
-| `p1-formal-v9` | 正式批次（第二Attempt + 用户豁免恢复） | 86/106 fail-stop → 恢复至 **106/106 终态**；结论 **`INVALID`**（seq86 环境硬门） |
-| `p1-formal-v10+` | **未使用**——未来正式批次从这里开始（需先在 `APPROVED_MANIFEST_IDS` 追加批准并走 CI） |
+框架已支持受限取证、证据引用检查、拒绝反馈与离线复核、场景认证准入、离线重评分及隔离客户端验收。这些是工程能力；脚本化模型和确定性测试通过，只证明约定路径能够执行。
 
-判定门定义（对 8 格 subset smoke）：Kernel 工具成功率 ≥80% **且** ≥2/4 格非 `MODEL_ERROR` 终态。v8 已达标（100% + 2/4）。
+普通正式清单为 106 格（94 个 model-backed 格、12 个固定规则格）；独立规划器比较清单为 108 格。按 selector 执行的子集、暂停前缀与完整赛程必须分别报告。场景经过开发使用，不能改称未见测试集。
 
-## 5. 当前实现要点（main=`df22569`）
+## 本地环境与凭据
 
-- 模型：`mimo-v2.5-pro` @ `https://api.xiaomimimo.com/v1`（M5.3 需求修订，2026-09-06）。密钥在 Windows 用户环境 `MIMO_API_KEY`，经 `WSLENV` 以 `DIG_DIAGNOSTIC_MODEL_API_KEY` 传入 WSL（不落盘）。
-- Kernel 契约：`p1.kernel.v8` + `p1.controller.v7`。三轮修订已落地并实跑验证：绑定参数化传输（无并行意图信封）、单响应多业务调用、账本/工具描述注入 `provable_relations` 白名单（与工具层 allowlist 同源）、关系拒绝镜像工具层语义（`RELATION_NOT_ALLOWED` + BLOCKED gap 镜像）。
-- `diagnose()` 顶层 fail-closed（`eb01a68`）：构造期/teardown 异常转化为安全 `MODEL_RUNTIME_ERROR` 终态（Kernel 策略合成零用量 `InvestigationState`）。经 v9 批次实跑验证（越过 v2 的失效点 54 格）。
-- reporter 修复（`df22569`）：`KernelStateTraceEvent.state` 需 `InvestigationState.model_validate` 后访问（该字段是 `Any`）。
-- 预算 8/8/2/300、evaluator `p1.evaluator.v2`、六文件产物合同、四态结论规则（`KERNEL_ADVANTAGE`/`TRADEOFF`/`NOT_PROVEN`/`INVALID`）——**从未改动**。
+当前维护环境是 Windows 11 / PowerShell 7，Python 3.12。冻结实验曾要求 `uv 0.11.24`、PostgreSQL 17.6；复现时以对应修订的 doctor 和执行报告为准，不能用本机工具“可运行”替代版本检查。
 
-## 6. seq86 根因更正与当前 standing 约束（2026-09-07）
+主树及每个 worktree 都有自己的环境与运行产物。干净 worktree 不会自动拥有被忽略的 `.env.diagnostic`。数据库检查要求显式诊断数据库配置，模型凭据也必须按实际 settings 解析规则注入。模板见 [环境配置示例](../.env.diagnostic.example)，不得把真实密钥写进版本控制、报告或命令输出。
 
-1. **seq86 根因已更正**：v9 批次唯一硬门失败格 sequence 86（`schema_type_change_order_customer_a` / KERNEL_NO_SCHEMA，`ENVIRONMENT_VERIFIED` expected=RUN_SETUP_COMPLETE / actual=BUILD_FAILED）的根因是**宿主硬件故障导致 dbt 子进程崩溃**，而非此前记录的「故障注入未生效」。当时观察到的「构建 PASS=25/ERROR=0 但注入类型变更未反映」是崩溃的现场表征，不是 inject 路径缺陷；此前「特定顺序上下文 inject 问题 / 低频瞬态、需 83→86 离线重放取证」的解读已推翻。该硬件故障**现已解决**。
-2. **恢复段语义**：用户豁免一次性纪律后从 86 格恢复跑完剩余 20 格，**只补齐了终态数量（106/106），并未消除 seq86 这一格的硬门失败**。reporter 按冻结规则（环境硬门失败 → 整批无效）判为 **INVALID** 是正确行为，结论不变。
-3. **standing 约束**：**后续不再运行任何真实模型，包括 doctor 模型探针**。因此不会再启动 v10+ 正式批次（正式批次含 94 个 model-backed 格，必然触发真实模型请求）；正式评测线封闭在 INVALID / NOT_ESTABLISHED，剩余工作为文档与留痕整理。
-4. **宿主硬件偶发不稳定**：WHEA APIC 41 parity error 历史 + 纯 Python segfault 复现记录（见 `decision.md` 与 `.dig/crash-debug-20260904`）；两次正式批次约每 50–86 格一次的偶发异常即源于此，现已解决。
+当前模型密钥优先读取 `DIG_DIAGNOSTIC_MODEL_API_KEY`，兼容回退为 `MIMO_API_KEY`；其它变量名需要执行端显式映射。端点、模型名称与协议配置必须匹配对应清单。`doctor` / preflight 可发出真实模型请求，不作为普通离线自检使用。
 
-## 7. 环境已知坑（操作层，全部踩过）
+## 归档与复现纪律
 
-1. **WSL 无法直连 GitHub**：`github.com` 被本机加速器（Steam++/Watt Toolkit，Windows 0.0.0.0:443）劫持解析到 127.0.0.1。push 用 bundle 通道：WSL `git bundle create /mnt/c/... <range>` → Windows `git fetch <bundle> 'refs/heads/X:refs/heads/X'` → `git push`。
-2. **wsl.exe 传参陷阱**：分号链中内联 `$?` 会被外层 shell 提前展开为 0（假绿）；bash 变量在单命令形式下被吃掉；heredoc 里的反引号会被执行。对策：验证一律用日志 grep 或 Git Bash 外层退出码；复杂脚本用 `python3 - <<EOF` 且内容不含反引号/美元号，或用 Edit 工具直接改 UNC 路径文件。
-3. **Docker Desktop 空闲回收**会在工具调用间隙干净关闭容器（exit 0）→ 长流程前 `setsid sleep 43200 &` keep-alive + 每阶段 `docker compose up -d --wait postgres`。
-4. **doctor 需要 `.env.diagnostic`**（13 检查安全门）：worktree 必须从 Windows 复制（mode 600），否则连接族检查按设计固定 UNAVAILABLE。
-5. **submodule 克隆**：WSL 内网络克隆失败，用本地路径 `git clone /home/makise/codex_space/DataIncidentGym/third_party/jaffle_shop` 再 checkout `36bde6c`。
-6. **/tmp 跨 WSL 关机丢失**：日志放工作区 `.dig/`。
-7. **detached HEAD 陷阱**：在 detached 状态 commit 会脱离分支（v9 最终证据曾落游离 HEAD，靠 rebase 挽救）。任何 worktree 提交前先 `git branch --show-current`。
-8. **坏的 checkpoint ref**：`refs/codex/turn-diffs/...` 曾指向 tree 对象阻塞一切 fetch，两侧各删过一次；若再现，删除指向不可达对象的非法 ref 即可。
-9. **geometric-repack 失败**：fetch 加 `-c gc.auto=0 -c maintenance.auto=false`。
+- `artifacts/` 与 `.dig/` 是被忽略的本地产物，不随 Git 克隆或本次推送发布。报告与清单入库不代表完整原始数据已发布。
+- `.dig/scoring-inputs/` 含评分侧私有合同快照，只用于管理平面的严格重载和离线复核，不能交给被测模型或放进公共任务包。
+- 保留冻结清单、原始六文件、ledger、回执及历史派生评分。离线重评分不能覆写原始成绩。
+- 重现实验使用清单绑定修订及清单提交的独立干净 checkout。后续文档提交不使旧清单自动兼容当前 HEAD；`benchmark verify` 通过也不替代真实检出门。
+- 暂停后是否能继续取决于 ledger、回执和停止规则。同身份不能覆盖已终态格；滚动窗口仍满足暂停条件时不会因再次运行命令而自动解除。
 
-## 8. 标准操作卡
+## 后续维护
 
-**新 smoke/正式批次（从零）**：
-```bash
-# 1. worktree（从 main CI 绿的 SHA）
-git worktree add -b codex/benchmark-<name> /home/makise/codex_space/DataIncidentGym-<name> <SHA>
-cd …-<name> && git clone -q …/DataIncidentGym/third_party/jaffle_shop third_party/jaffle_shop
-git -C third_party/jaffle_shop checkout -q 36bde6cba69d962b83be1d52fc65a0dce1cb4ebb
-uv sync --frozen
-cp /home/makise/codex_space/DataIncidentGym-smoke-v5/.env.diagnostic .env.diagnostic && chmod 600 .env.diagnostic
-mkdir -p .dig/<name>
-# 2. 基线（fingerprint 必须为 e5c7848e…b18 才与历史可比）
-docker compose up -d --wait postgres && uv run data-incident-gym pipeline build
-# 3. freeze → verify → 包装提交（仅 Manifest 文件，checkout 必须干净）→ preflight → run
-# 4. 完成后顺序：report（必须在 archive 前）→ archive（独占一次）→ 审计 → 证据提交
-```
+按改动影响选择定向测试，再完成必要的收口检查；命令见 README 和项目 AGENTS.md。无需为纯文档改动重跑长时间数据库套件。
 
-**关键命令**（SHA/manifest 按实际替换；`--only-strategy fixed-rule` / `--only-sequence N` 为 subset smoke；正式批次不带 selector）：
-```bash
-uv run data-incident-gym benchmark freeze --manifest-id p1-formal-vN --implementation-revision <40hex> --output config/benchmark/p1-formal-vN.json
-uv run data-incident-gym benchmark verify   --manifest config/benchmark/p1-formal-vN.json
-uv run data-incident-gym benchmark preflight --manifest … --confirm-sha256 <64hex>
-uv run data-incident-gym benchmark run      --manifest … --confirm-sha256 <64hex>
-uv run data-incident-gym benchmark report   --manifest … --confirm-sha256 <64hex>   # subset 会拒绝
-uv run data-incident-gym benchmark archive  --manifest … --confirm-sha256 <64hex>   # 独占一次
-```
+开始新工作前核对 `git status`、当前分支和提交。主树可能保留历史未跟踪文档、代理状态及本机脚本；不得全量暂存、清理或把它们当作本轮交付。历史 worktree 和 stash 也不属于可随意删除的临时文件。
 
-**恢复语义（已实跑验证）**：fail-stop/中断后，同目录同 Manifest 同命令重跑即跳过已终态格继续；但 checkout 相对实现修订**只允许含 Manifest 一个文件**——证据提交后需先 `git checkout <包装提交>`（detached）再恢复；归档命令目标已存在会 fail-closed，不能重跑。
-
-**判定门审计**：独立审计代理复算 `_source_aggregate`（字节正确 NUL 分隔、按 repo 相对 posix 路径排序、终态 run 去重），核对 ledger 对、六文件、receipt 五元绑定、文件位置合同。
-
-## 9. 纪律与红线（继承自需求与历轮决策）
-
-- 措辞红线：INVALID/NOT_ESTABLISHED 状态下禁止任何"成功/优势/准确率"表述；subset 数字禁止外推。
-- 预算 8/8/2/300、evaluator、finalize 门、场景合同从未改动；改动需先修订 `docs/requirements.md` 并获批准。
-- 密钥不落盘、不打印；`.env.diagnostic` mode 600；`.dig/`、`artifacts/`、`reports/`（部分已按授权转为跟踪证据）不入库的边界见 `.gitignore`。
-- 真实模型请求 = 花费；每次批次/探针数量在执行前报数、执行后对账（历轮均如此记录于 decision.md）。
-
-## 10. 快速背景阅读顺序（新会话 15 分钟入门）
-
-1. 本文档全文。
-2. `decision.md` 末 6 节（2026-09-05 起的 Kernel 修订与正式批次记录）。
-3. `docs/superpowers/plans/2026-09-03-benchmark-rerun-enablement.md` 的 Task 5–7 与"checkout 组织修正"节。
-4. `docs/superpowers/plans/2026-09-05-kernel-contract-revision.md` 与 `2026-09-06-kernel-v7-provenance.md` 的"执行状态"节。
-5. `…-formal-v9/reports/benchmark/p1-formal-v9/formal-run-record.md` 与根 `RESULTS.md`（在 formal-v9 worktree）。
+如将来重新开展研究，应先明确一个可证伪问题、最小测量范围和停止判据，再取得相应授权；当前没有自动排队执行的下一批正式测量。
