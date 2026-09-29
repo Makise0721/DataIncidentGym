@@ -17,6 +17,7 @@ from data_incident_gym.diagnosis import DiagnosticStrategy
 from data_incident_gym.planner_comparison_manifest import (
     APPROVED_EXPERIMENT_IDS,
     EXPERIMENT_MANIFEST_ID_V2,
+    EXPERIMENT_MANIFEST_ID_V3,
     EXPERIMENT_SCHEMA_VERSION,
     EXPERIMENT_SCHEMA_VERSION_V2,
     EXPERIMENT_STRATEGIES,
@@ -24,6 +25,7 @@ from data_incident_gym.planner_comparison_manifest import (
     PlannerComparisonManifestV2,
     build_experiment_manifest,
     build_experiment_manifest_v2,
+    build_experiment_manifest_v3,
     experiment_manifest_path_for,
     freeze_experiment_manifest,
     generate_experiment_cells,
@@ -35,12 +37,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_experiment_registry_pattern_and_path() -> None:
-    assert APPROVED_EXPERIMENT_IDS == ("p1-planner-compare-v1", "p1-planner-compare-v2")
+    assert APPROVED_EXPERIMENT_IDS == (
+        "p1-planner-compare-v1",
+        "p1-planner-compare-v2",
+        "p1-planner-compare-v3",
+    )
     assert experiment_manifest_path_for("p1-planner-compare-v1") == Path(
         "config/benchmark/p1-planner-compare-v1.json"
     )
     assert experiment_manifest_path_for(EXPERIMENT_MANIFEST_ID_V2) == Path(
         "config/benchmark/p1-planner-compare-v2.json"
+    )
+    assert experiment_manifest_path_for(EXPERIMENT_MANIFEST_ID_V3) == Path(
+        "config/benchmark/p1-planner-compare-v3.json"
     )
     with pytest.raises(BenchmarkManifestError):
         experiment_manifest_path_for("p1-formal-v39")
@@ -388,3 +397,71 @@ def test_freeze_experiment_manifest_is_exclusive_and_path_bound(
     assert right.read_text(encoding="utf-8") == manifest.canonical_json()
     with pytest.raises(BenchmarkManifestError):
         freeze_experiment_manifest(manifest, right, project_root=tmp_path)
+
+
+# -- v3: a new identity instance under the same v2 contract --------------------
+
+
+def test_build_experiment_manifest_v3_binds_the_current_surfaces() -> None:
+    manifest = build_experiment_manifest_v3("c" * 40, "e" * 64, project_root=PROJECT_ROOT)
+
+    assert isinstance(manifest, PlannerComparisonManifestV2)
+    assert manifest.manifest_id == "p1-planner-compare-v3"
+    assert manifest.schema_version == EXPERIMENT_SCHEMA_VERSION_V2
+    assert manifest.implementation_revision == "c" * 40
+    assert manifest.admission_attestation_sha256 == "e" * 64
+    assert manifest.total_cells == 108 and manifest.model_backed_count == 108
+    assert manifest.cells == generate_experiment_cells("p1-planner-compare-v3")
+    # Fresh run IDs: no cell collides with the v1/v2 schedules.
+    v2 = build_experiment_manifest_v2("c" * 40, "e" * 64, project_root=PROJECT_ROOT)
+    assert not {cell.run_id for cell in manifest.cells} & {cell.run_id for cell in v2.cells}
+    # The policies are computed from the current source: the planner carries
+    # the tool-contract-visible v2 identity; kernel/static stay frozen.
+    policies = {policy.strategy: policy for policy in manifest.policies}
+    planner = policies[DiagnosticStrategy.EVIDENCE_PLANNER].policy_identity
+    assert planner.strategy_prompt_version == "p1.planner.v2"
+    assert planner.controller_protocol_version == "p1.planner_controller.v2"
+    kernel = policies[DiagnosticStrategy.DIAGNOSTIC_KERNEL].policy_identity
+    static = policies[DiagnosticStrategy.STATIC_SKILL].policy_identity
+    assert kernel.strategy_prompt_version == "p1.kernel.v18"
+    assert static.strategy_prompt_version == "p1.static.v5"
+
+
+def test_v3_freeze_requires_an_admission_report_like_v2() -> None:
+    manifest = build_experiment_manifest_v3("c" * 40, "e" * 64, project_root=PROJECT_ROOT)
+
+    with pytest.raises(BenchmarkManifestError, match="requires --admission-report"):
+        freeze_experiment_manifest(
+            manifest,
+            Path("config/benchmark/p1-planner-compare-v3.json"),
+            project_root=PROJECT_ROOT,
+        )
+
+
+def test_v3_verifies_against_the_tracked_attestation_and_current_source() -> None:
+    from data_incident_gym.planner_admission_attestation import load_admission_attestation
+
+    attestation = load_admission_attestation(project_root=PROJECT_ROOT)
+    manifest = build_experiment_manifest_v3(
+        "c" * 40, attestation.digest(), project_root=PROJECT_ROOT
+    )
+
+    assert verify_experiment_manifest(manifest, project_root=PROJECT_ROOT) is manifest
+
+    stale = build_experiment_manifest_v3("c" * 40, "e" * 64, project_root=PROJECT_ROOT)
+    with pytest.raises(BenchmarkManifestError, match="attestation"):
+        verify_experiment_manifest(stale, project_root=PROJECT_ROOT)
+
+
+def test_the_runner_approves_only_registered_experiment_identities() -> None:
+    from data_incident_gym.benchmark_runner import _manifest_identity_approved
+
+    v3 = build_experiment_manifest_v3("c" * 40, "e" * 64, project_root=PROJECT_ROOT)
+    v2 = build_experiment_manifest_v2("c" * 40, "e" * 64, project_root=PROJECT_ROOT)
+    v1 = build_experiment_manifest("c" * 40, project_root=PROJECT_ROOT)
+    assert _manifest_identity_approved(v3)
+    assert _manifest_identity_approved(v2)
+    assert _manifest_identity_approved(v1)
+
+    unregistered = v3.model_copy(update={"manifest_id": "p1-planner-compare-v9"})
+    assert not _manifest_identity_approved(unregistered)

@@ -60,10 +60,12 @@ from data_incident_gym.planner_comparison_manifest import (
     APPROVED_EXPERIMENT_IDS,
     EXPERIMENT_MANIFEST_ID,
     EXPERIMENT_MANIFEST_ID_V2,
+    EXPERIMENT_MANIFEST_ID_V3,
     EXPERIMENT_MODEL,
     PlannerComparisonManifest,
     build_experiment_manifest,
     build_experiment_manifest_v2,
+    build_experiment_manifest_v3,
     experiment_manifest_path_for,
     freeze_experiment_manifest,
     load_experiment_manifest,
@@ -933,17 +935,28 @@ def experiment_freeze(
                 + ", ".join(FORMAL_MODEL_BASE_URLS)
             )
         output_path = output or experiment_manifest_path_for(manifest_id)
-        if manifest_id == EXPERIMENT_MANIFEST_ID_V2:
+        if manifest_id in (EXPERIMENT_MANIFEST_ID_V2, EXPERIMENT_MANIFEST_ID_V3):
             if admission_report is None:
-                raise BenchmarkManifestError("v2 freeze requires --admission-report")
+                raise BenchmarkManifestError(
+                    "v2/v3 freeze requires --admission-report"
+                )
             attestation = load_admission_attestation(project_root=PROJECT_ROOT)
-            manifest = build_experiment_manifest_v2(
-                implementation_revision,
-                attestation.digest(),
-                project_root=PROJECT_ROOT,
-                model_name=model,
-                model_base_url=base_url,
-            )
+            if manifest_id == EXPERIMENT_MANIFEST_ID_V3:
+                manifest = build_experiment_manifest_v3(
+                    implementation_revision,
+                    attestation.digest(),
+                    project_root=PROJECT_ROOT,
+                    model_name=model,
+                    model_base_url=base_url,
+                )
+            else:
+                manifest = build_experiment_manifest_v2(
+                    implementation_revision,
+                    attestation.digest(),
+                    project_root=PROJECT_ROOT,
+                    model_name=model,
+                    model_base_url=base_url,
+                )
         else:
             if admission_report is not None:
                 raise BenchmarkManifestError(
@@ -956,7 +969,7 @@ def experiment_freeze(
                 model_name=model,
                 model_base_url=base_url,
             )
-        if manifest_id != EXPERIMENT_MANIFEST_ID_V2:
+        if manifest_id not in (EXPERIMENT_MANIFEST_ID_V2, EXPERIMENT_MANIFEST_ID_V3):
             verify_experiment_manifest(manifest, project_root=PROJECT_ROOT)
         path = freeze_experiment_manifest(
             manifest,

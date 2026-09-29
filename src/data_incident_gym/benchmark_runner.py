@@ -87,6 +87,7 @@ from data_incident_gym.planner_comparison_manifest import (
     APPROVED_EXPERIMENT_IDS,
     EXPERIMENT_MANIFEST_ID,
     EXPERIMENT_MANIFEST_ID_V2,
+    EXPERIMENT_MANIFEST_ID_V3,
     EXPERIMENT_SCHEMA_VERSION,
     EXPERIMENT_SCHEMA_VERSION_V2,
     PlannerComparisonManifest,
@@ -326,7 +327,7 @@ def _manifest_identity_approved(manifest: AnyBenchmarkManifest) -> bool:
     if isinstance(manifest, PlannerComparisonManifest):
         if type(manifest) is PlannerComparisonManifestV2:
             return (
-                manifest.manifest_id == EXPERIMENT_MANIFEST_ID_V2
+                manifest.manifest_id in (EXPERIMENT_MANIFEST_ID_V2, EXPERIMENT_MANIFEST_ID_V3)
                 and manifest.schema_version == EXPERIMENT_SCHEMA_VERSION_V2
                 and manifest.manifest_id in APPROVED_EXPERIMENT_IDS
             )

@@ -54,6 +54,11 @@ EXPERIMENT_MANIFEST_PATH = Path("config/benchmark/p1-planner-compare-v1.json")
 EXPERIMENT_SCHEMA_VERSION_V2 = "p1.planner_comparison_manifest.v2"
 EXPERIMENT_MANIFEST_ID_V2 = "p1-planner-compare-v2"
 EXPERIMENT_MANIFEST_PATH_V2 = Path("config/benchmark/p1-planner-compare-v2.json")
+#: v3 is a new identity INSTANCE under the same v2 contract: identical fields,
+#: same admission attestation, new implementation revision and current policy
+#: identities (the tool-contract-visible planner surface). No fourth schema.
+EXPERIMENT_MANIFEST_ID_V3 = "p1-planner-compare-v3"
+EXPERIMENT_MANIFEST_PATH_V3 = Path("config/benchmark/p1-planner-compare-v3.json")
 
 #: The experiment schedules exactly these three strategies, in this order.
 EXPERIMENT_STRATEGIES = (
@@ -77,7 +82,11 @@ _EXPERIMENT_ID_PATTERN = r"^p1-planner-compare-v[1-9][0-9]*$"
 #: measurements used (deepseek via commandcode), with empty overrides.
 EXPERIMENT_MODEL = "deepseek/deepseek-v4.1-flash"
 
-APPROVED_EXPERIMENT_IDS: tuple[str, ...] = (EXPERIMENT_MANIFEST_ID, EXPERIMENT_MANIFEST_ID_V2)
+APPROVED_EXPERIMENT_IDS: tuple[str, ...] = (
+    EXPERIMENT_MANIFEST_ID,
+    EXPERIMENT_MANIFEST_ID_V2,
+    EXPERIMENT_MANIFEST_ID_V3,
+)
 
 
 def experiment_manifest_path_for(manifest_id: str) -> Path:
@@ -159,6 +168,7 @@ class PlannerComparisonManifest(BaseModel):
         expected_schema = {
             EXPERIMENT_MANIFEST_ID: EXPERIMENT_SCHEMA_VERSION,
             EXPERIMENT_MANIFEST_ID_V2: EXPERIMENT_SCHEMA_VERSION_V2,
+            EXPERIMENT_MANIFEST_ID_V3: EXPERIMENT_SCHEMA_VERSION_V2,
         }.get(self.manifest_id)
         if expected_schema is None or self.schema_version != expected_schema:
             raise ValueError("experiment schema version and manifest identity do not match")
@@ -303,13 +313,44 @@ def build_experiment_manifest_v2(
     return PlannerComparisonManifestV2.model_validate(payload)
 
 
+def build_experiment_manifest_v3(
+    implementation_revision: str,
+    admission_attestation_sha256: str,
+    *,
+    project_root: Path,
+    model_base_url: str = FORMAL_MODEL_BASE_URLS[EXPERIMENT_MODEL],
+    model_name: str = EXPERIMENT_MODEL,
+) -> PlannerComparisonManifestV2:
+    """Build v3: the v2 contract with a new identity, the current policy
+    surfaces (the tool-contract-visible planner) and a fresh revision."""
+
+    base = build_experiment_manifest(
+        implementation_revision,
+        project_root=project_root,
+        model_base_url=model_base_url,
+        model_name=model_name,
+    )
+    payload = base.model_dump(mode="json")
+    payload.update(
+        {
+            "schema_version": EXPERIMENT_SCHEMA_VERSION_V2,
+            "manifest_id": EXPERIMENT_MANIFEST_ID_V3,
+            "cells": [
+                cell.model_dump(mode="json")
+                for cell in generate_experiment_cells(EXPERIMENT_MANIFEST_ID_V3)
+            ],
+            "admission_attestation_sha256": admission_attestation_sha256,
+        }
+    )
+    return PlannerComparisonManifestV2.model_validate(payload)
+
+
 def _validate_experiment_manifest_type_and_identity(
     manifest: PlannerComparisonManifest,
 ) -> None:
     if type(manifest) is PlannerComparisonManifestV2:
-        valid = (
-            manifest.schema_version == EXPERIMENT_SCHEMA_VERSION_V2
-            and manifest.manifest_id == EXPERIMENT_MANIFEST_ID_V2
+        valid = manifest.schema_version == EXPERIMENT_SCHEMA_VERSION_V2 and (
+            manifest.manifest_id in (EXPERIMENT_MANIFEST_ID_V2, EXPERIMENT_MANIFEST_ID_V3)
         )
     elif type(manifest) is PlannerComparisonManifest:
         valid = (
@@ -432,6 +473,8 @@ __all__ = [
     "EXPERIMENT_MANIFEST_PATH",
     "EXPERIMENT_MANIFEST_ID_V2",
     "EXPERIMENT_MANIFEST_PATH_V2",
+    "EXPERIMENT_MANIFEST_ID_V3",
+    "EXPERIMENT_MANIFEST_PATH_V3",
     "EXPERIMENT_SCHEMA_VERSION",
     "EXPERIMENT_SCHEMA_VERSION_V2",
     "EXPERIMENT_STRATEGIES",
@@ -439,6 +482,7 @@ __all__ = [
     "PlannerComparisonManifestV2",
     "build_experiment_manifest",
     "build_experiment_manifest_v2",
+    "build_experiment_manifest_v3",
     "experiment_manifest_path_for",
     "freeze_experiment_manifest",
     "generate_experiment_cells",
