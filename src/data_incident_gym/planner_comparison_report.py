@@ -43,6 +43,7 @@ from data_incident_gym.evaluation_inputs import (
 from data_incident_gym.planner_comparison_manifest import (
     EXPERIMENT_STRATEGIES,
     PlannerComparisonManifest,
+    PlannerComparisonManifestV2,
     verify_experiment_manifest,
 )
 from data_incident_gym.planner_probe_receipt import (
@@ -657,7 +658,12 @@ class PlannerComparisonReporter:
             >= strata[layer]["strategies"][KERNEL_STRATEGY.value]["passed"]
             for layer in _EXPECTED_LAYER_COUNTS
         )
-        if not getattr(self._manifest, "admission_identity", None):
+        admission_attestation_sha256 = (
+            self._manifest.admission_attestation_sha256
+            if isinstance(self._manifest, PlannerComparisonManifestV2)
+            else None
+        )
+        if admission_attestation_sha256 is None:
             screening = "NOT_ESTABLISHED_T06_IDENTITY_PENDING"
         elif (
             net_wins >= 4
@@ -833,12 +839,23 @@ class PlannerComparisonReporter:
             "t06_admission_identity": {
                 "status": (
                     "BOUND"
-                    if getattr(self._manifest, "admission_identity", None)
+                    if admission_attestation_sha256 is not None
                     else "NOT_BOUND_PENDING_OWNER_DECISION"
                 ),
+                **(
+                    {"attestation_sha256": admission_attestation_sha256}
+                    if admission_attestation_sha256 is not None
+                    else {}
+                ),
                 "note": (
-                    "The current planner manifest schema has no T06 admission artifact identity; "
-                    "the owner must resolve this before v2 freeze or any screening conclusion."
+                    "Validated T06 admission attestation is bound by SHA-256 "
+                    f"{admission_attestation_sha256}."
+                    if admission_attestation_sha256 is not None
+                    else (
+                        "The current planner manifest schema has no T06 admission artifact "
+                        "identity; "
+                        "the owner must resolve this before v2 freeze or any screening conclusion."
+                    )
                 ),
             },
             "primary": {

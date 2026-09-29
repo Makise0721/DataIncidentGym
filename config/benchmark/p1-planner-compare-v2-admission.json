@@ -1,0 +1,66 @@
+{
+  "entries": [
+    {
+      "admission_entry_sha256": "9e3f95cdea87ef7250a82bb18f5c02c966afcd7890dc4b30611ea5ec223a89ca",
+      "case_id": "schema_type_change_order_customer_a",
+      "scenario_digest": "1f2e775aa3bea6298418278ea39657391717bf4557c0a3bca4921c4b25021e40"
+    },
+    {
+      "admission_entry_sha256": "326a05d9b3c73ff00f56daaca1b8d82c8103d726cfe97be12055234ddb8598ae",
+      "case_id": "schema_type_change_order_customer_b",
+      "scenario_digest": "f1b91e23dda1f3cda3e48b0cc682c9af832405a47d9e7d0321bbce1dc0193e83"
+    },
+    {
+      "admission_entry_sha256": "f336e96d9c8bd29569f37c8fb3c17548884b8026daa2edc41bd395b57edcc2d7",
+      "case_id": "required_null_order_customer_a",
+      "scenario_digest": "c9b768b8a8af815920c48532f1e922f5de610e46b53304af118861a506541e5d"
+    },
+    {
+      "admission_entry_sha256": "7b377d4b00f535336ef8a33ab9fa168644789f30d4e1b69eec848ad1f57f799c",
+      "case_id": "required_null_order_customer_b",
+      "scenario_digest": "124a8ba8b28f90c402648e49420e130eb0db5e03c7ebea3aab3da110d845db18"
+    },
+    {
+      "admission_entry_sha256": "89530ad70b3cd6178bc563651eadce566996c8bd5871c0f42c5d0df27f136bc4",
+      "case_id": "duplicate_payment_coupon_a",
+      "scenario_digest": "8c2c41c441c5c609e90ad0648ee55eaeeadfb09a0bf15686926fd8e91f208c8f"
+    },
+    {
+      "admission_entry_sha256": "3dce910d92b77328b29f0562309f678c0d3dfa6def2d017c817b8b8ab7e4b167",
+      "case_id": "duplicate_payment_coupon_b",
+      "scenario_digest": "fc6a8ab0c6a2f4fb29a26e7b99733ddef69256d1963dac9d4da1038ea5261530"
+    },
+    {
+      "admission_entry_sha256": "e8f8e5742ba37aacefae6cc2b464f54cae7a105918e2ca8eec1da3b3e63c42f1",
+      "case_id": "orphan_payment_coupon_a",
+      "scenario_digest": "f8849fcb2d6d18e36796b33959762225b6c72bb720f78b109ec4f1ae846a2f03"
+    },
+    {
+      "admission_entry_sha256": "c014ef7549d275402003b395a8d631c78ade8d7e9990b9fd3bc4ad7150d9ab35",
+      "case_id": "orphan_payment_coupon_b",
+      "scenario_digest": "46fabc67bbc9f1526779400f8312053bf436e437514e9d2095a1de6f32b5a961"
+    },
+    {
+      "admission_entry_sha256": "c5acb21262cb6178fc3ea174899fa6cb5271f457756438d3eabb6ac53c4a4a4f",
+      "case_id": "silent_payment_drop_partition_a",
+      "scenario_digest": "5d42fda438152633f94838066cc82ea8cdbcc97465898f63ee039b876209300f"
+    },
+    {
+      "admission_entry_sha256": "ab4eefd93cf0b7cd36abfc8bc5334c6a9567655ebe37feeeacb92fdc6477caa8",
+      "case_id": "silent_payment_drop_partition_b",
+      "scenario_digest": "5413f38968bebd2149d7531f25e00fed9af4c213c78b3150bac78b116df75649"
+    },
+    {
+      "admission_entry_sha256": "60567bcf4b03b66946b7bb4603320bfa5fb0fb17b4aa3a84fc933bc77223da88",
+      "case_id": "order_volume_pattern_a",
+      "scenario_digest": "d1d348b3f9c043472a1dcb0bedc5be0a4463a1c153c8f0024fe13322ca941336"
+    },
+    {
+      "admission_entry_sha256": "e01dc37a95813c3291d3bfcc22899237dba98639b6bd355a3b2721e6538ea15c",
+      "case_id": "order_volume_within_sla",
+      "scenario_digest": "9f452f943b535546357947b716f67bfff652611513d3bf05016a806ef21547f6"
+    }
+  ],
+  "raw_report_sha256": "aeced2c345432489eab98099d71d2dd97a61f622b8030c0b1e2c7d2506b34266",
+  "schema_version": "p1.planner_admission_attestation.v1"
+}

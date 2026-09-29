@@ -1,6 +1,8 @@
 """Contract tests for the independent planner-comparison experiment manifest
 (p1.planner_comparison_manifest.v1, namespace p1-planner-compare-vN)."""
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -14,10 +16,14 @@ from data_incident_gym.benchmark_manifest import (
 from data_incident_gym.diagnosis import DiagnosticStrategy
 from data_incident_gym.planner_comparison_manifest import (
     APPROVED_EXPERIMENT_IDS,
+    EXPERIMENT_MANIFEST_ID_V2,
     EXPERIMENT_SCHEMA_VERSION,
+    EXPERIMENT_SCHEMA_VERSION_V2,
     EXPERIMENT_STRATEGIES,
     PlannerComparisonManifest,
+    PlannerComparisonManifestV2,
     build_experiment_manifest,
+    build_experiment_manifest_v2,
     experiment_manifest_path_for,
     freeze_experiment_manifest,
     generate_experiment_cells,
@@ -29,9 +35,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_experiment_registry_pattern_and_path() -> None:
-    assert APPROVED_EXPERIMENT_IDS == ("p1-planner-compare-v1",)
+    assert APPROVED_EXPERIMENT_IDS == ("p1-planner-compare-v1", "p1-planner-compare-v2")
     assert experiment_manifest_path_for("p1-planner-compare-v1") == Path(
         "config/benchmark/p1-planner-compare-v1.json"
+    )
+    assert experiment_manifest_path_for(EXPERIMENT_MANIFEST_ID_V2) == Path(
+        "config/benchmark/p1-planner-compare-v2.json"
     )
     with pytest.raises(BenchmarkManifestError):
         experiment_manifest_path_for("p1-formal-v39")
@@ -231,6 +240,113 @@ def test_experiment_loader_round_trip_and_cross_version_rejection(
 
     with pytest.raises(BenchmarkManifestError):
         load_experiment_manifest(PROJECT_ROOT / "config" / "benchmark" / "p1-formal-v39.json")
+
+
+def test_v2_manifest_builder_and_loader_bind_a_distinct_identity(
+    tmp_path: Path,
+) -> None:
+    manifest = build_experiment_manifest_v2(
+        "d" * 40,
+        "e" * 64,
+        project_root=PROJECT_ROOT,
+    )
+    assert isinstance(manifest, PlannerComparisonManifestV2)
+    assert manifest.schema_version == EXPERIMENT_SCHEMA_VERSION_V2
+    assert manifest.manifest_id == EXPERIMENT_MANIFEST_ID_V2
+    assert manifest.admission_attestation_sha256 == "e" * 64
+    assert manifest.total_cells == 108
+    assert manifest.cells == generate_experiment_cells(EXPERIMENT_MANIFEST_ID_V2)
+
+    path = tmp_path / f"{EXPERIMENT_MANIFEST_ID_V2}.json"
+    path.write_text(manifest.canonical_json(), encoding="utf-8")
+    assert load_experiment_manifest(path) == manifest
+
+    v1_payload = build_experiment_manifest("d" * 40, project_root=PROJECT_ROOT).model_dump(
+        mode="json"
+    )
+    wrong_v1_pair = {**v1_payload, "manifest_id": EXPERIMENT_MANIFEST_ID_V2}
+    with pytest.raises(ValidationError):
+        PlannerComparisonManifest.model_validate(wrong_v1_pair)
+
+    wrong_v2_pair = {**manifest.model_dump(mode="json"), "manifest_id": "p1-planner-compare-v1"}
+    with pytest.raises(ValidationError):
+        PlannerComparisonManifestV2.model_validate(wrong_v2_pair)
+
+    missing_attestation = manifest.model_dump(mode="json")
+    del missing_attestation["admission_attestation_sha256"]
+    with pytest.raises(ValidationError):
+        PlannerComparisonManifestV2.model_validate(missing_attestation)
+
+
+def test_v1_loader_rejects_admission_attestation_field(tmp_path: Path) -> None:
+    manifest = build_experiment_manifest("d" * 40, project_root=PROJECT_ROOT)
+    payload = manifest.model_dump(mode="json")
+    payload["admission_attestation_sha256"] = "e" * 64
+    path = tmp_path / "p1-planner-compare-v1.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(BenchmarkManifestError):
+        load_experiment_manifest(path)
+
+
+def test_experiment_manifest_loader_rejects_nonfinite_json_constants(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "p1-planner-compare-v1.json"
+    path.write_text('{"schema_version":"p1.planner_comparison_manifest.v1", "x":NaN}')
+
+    with pytest.raises(BenchmarkManifestError):
+        load_experiment_manifest(path)
+
+
+def test_frozen_v1_bytes_and_verification_remain_unchanged() -> None:
+    path = PROJECT_ROOT / "config" / "benchmark" / "p1-planner-compare-v1.json"
+    raw = path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == (
+        "e4a09d16dd15b5b4433b5a25d1e5b8544a4b8c341cb97b793853fcd1d0378826"
+    )
+    manifest = load_experiment_manifest(path)
+    assert verify_experiment_manifest(manifest, project_root=PROJECT_ROOT) is manifest
+
+
+def test_v2_verification_dispatches_to_current_admission_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import data_incident_gym.planner_comparison_manifest as manifest_module
+
+    manifest = build_experiment_manifest_v2(
+        "d" * 40,
+        "f" * 64,
+        project_root=PROJECT_ROOT,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_verify(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    monkeypatch.setattr(manifest_module, "verify_admission_attestation", fake_verify)
+    assert verify_experiment_manifest(manifest, project_root=PROJECT_ROOT) is manifest
+    assert captured == {
+        "expected_sha256": "f" * 64,
+        "formal_scenario_ids": FORMAL_SCENARIO_IDS,
+        "project_root": PROJECT_ROOT,
+    }
+
+
+def test_proof_only_v2_freeze_fails_without_private_source_report() -> None:
+    manifest = build_experiment_manifest_v2(
+        "d" * 40,
+        "f" * 64,
+        project_root=PROJECT_ROOT,
+    )
+
+    with pytest.raises(BenchmarkManifestError, match="requires --admission-report"):
+        freeze_experiment_manifest(
+            manifest,
+            Path("config/benchmark/p1-planner-compare-v2.json"),
+            project_root=PROJECT_ROOT,
+        )
 
 
 def test_verify_experiment_manifest_recomputes_and_rejects_drift() -> None:

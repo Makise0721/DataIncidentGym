@@ -21,6 +21,7 @@ from data_incident_gym.diagnostic_agent import ModelIdentity
 from data_incident_gym.doctor import DoctorCheckCode, DoctorResult, DoctorRunner, DoctorStatus
 from data_incident_gym.planner_comparison_manifest import (
     build_experiment_manifest,
+    build_experiment_manifest_v2,
 )
 from data_incident_gym.planner_probe import PlannerProbeResult
 from data_incident_gym.planner_probe_receipt import (
@@ -49,12 +50,26 @@ def _v1() -> object:
 def test_identity_approval_dispatches_by_schema() -> None:
     assert _manifest_identity_approved(_v1())
     assert _manifest_identity_approved(_experiment())
+    assert _manifest_identity_approved(
+        build_experiment_manifest_v2("a" * 40, "b" * 64, project_root=PROJECT_ROOT)
+    )
 
     stranger = _experiment().model_copy(update={"manifest_id": "p1-planner-compare-v9"})
     assert not _manifest_identity_approved(stranger)
     with pytest.raises(BenchmarkRunnerError):
         BenchmarkRunner(
             stranger,
+            project_root=PROJECT_ROOT,
+            doctor_factory=_Dummy,
+            evaluation_runner_factory=_Dummy,
+            artifact_writer=_Dummy,  # type: ignore[arg-type]
+        )
+
+    forged_base = _experiment().model_copy(update={"manifest_id": "p1-planner-compare-v2"})
+    assert not _manifest_identity_approved(forged_base)
+    with pytest.raises(BenchmarkRunnerError):
+        BenchmarkRunner(
+            forged_base,
             project_root=PROJECT_ROOT,
             doctor_factory=_Dummy,
             evaluation_runner_factory=_Dummy,
@@ -214,3 +229,32 @@ def test_verify_and_path_dispatch_by_schema() -> None:
     drifted = experiment.model_copy(update={"policies": ()})
     with pytest.raises(BenchmarkManifestError):
         _verify_manifest_for(drifted, project_root=PROJECT_ROOT)
+
+
+def test_direct_v2_runner_paths_recheck_admission_identity() -> None:
+    import asyncio
+
+    manifest = build_experiment_manifest_v2(
+        "a" * 40,
+        "f" * 64,
+        project_root=PROJECT_ROOT,
+    )
+    calls: list[str] = []
+    runner = BenchmarkRunner(
+        manifest,
+        project_root=PROJECT_ROOT,
+        doctor_factory=_Dummy,
+        evaluation_runner_factory=lambda: pytest.fail("proof failure must precede cell start"),
+        artifact_writer=_Dummy(),  # type: ignore[arg-type]
+        checkout_verifier=lambda _manifest: pytest.fail(
+            "v2 admission verification must run even with an injected checkout verifier"
+        ),
+        checkout_revision_reader=lambda: "b" * 40,
+        planner_probe_factory=_passing_probe_factory(manifest, calls),
+    )
+
+    with pytest.raises(BenchmarkManifestError, match="admission attestation"):
+        asyncio.run(runner.preflight())
+    with pytest.raises(BenchmarkManifestError, match="admission attestation"):
+        asyncio.run(runner.run())
+    assert calls == []

@@ -51,13 +51,19 @@ from data_incident_gym.evaluation_rescore import (
 )
 from data_incident_gym.evaluation_runner import EvaluationRunner, EvaluationWorkflowError
 from data_incident_gym.lab import IncidentLab, LabError
+from data_incident_gym.planner_admission_attestation import (
+    build_admission_attestation,
+    load_admission_attestation,
+    write_admission_attestation,
+)
 from data_incident_gym.planner_comparison_manifest import (
     APPROVED_EXPERIMENT_IDS,
     EXPERIMENT_MANIFEST_ID,
-    EXPERIMENT_MANIFEST_PATH,
+    EXPERIMENT_MANIFEST_ID_V2,
     EXPERIMENT_MODEL,
     PlannerComparisonManifest,
     build_experiment_manifest,
+    build_experiment_manifest_v2,
     experiment_manifest_path_for,
     freeze_experiment_manifest,
     load_experiment_manifest,
@@ -885,17 +891,38 @@ def _confirmed_experiment_manifest(path: Path, confirm_sha256: str):
 
 
 EXPERIMENT_ID_OPTION = typer.Option(EXPERIMENT_MANIFEST_ID, "--manifest-id")
-EXPERIMENT_OUTPUT_OPTION = typer.Option(EXPERIMENT_MANIFEST_PATH, "--output")
+EXPERIMENT_OUTPUT_OPTION = typer.Option(None, "--output")
 EXPERIMENT_MODEL_OPTION = typer.Option(EXPERIMENT_MODEL, "--model")
 EXPERIMENT_REPORT_OUTPUT_OPTION = typer.Option(None, "--output-dir")
+EXPERIMENT_ADMISSION_REPORT_OPTION = typer.Option(None, "--admission-report")
+EXPERIMENT_ATTEST_ADMISSION_REPORT_OPTION = typer.Option(..., "--admission-report")
+
+
+@experiment_app.command("attest-admission")
+def experiment_attest_admission(
+    admission_report: Path = EXPERIMENT_ATTEST_ADMISSION_REPORT_OPTION,
+) -> None:
+    """验证私有 T06 原件并独占写出脱敏、可跟踪的 v2 身份证明。"""
+    try:
+        attestation = build_admission_attestation(
+            admission_report,
+            project_root=PROJECT_ROOT,
+        )
+        path = write_admission_attestation(attestation, project_root=PROJECT_ROOT)
+    except (BenchmarkManifestError, OSError, ValueError) as exc:
+        typer.echo(f"准入证明生成失败：{exc}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(f"attestation: {path}")
+    typer.echo(f"sha256: {attestation.digest()}")
 
 
 @experiment_app.command("freeze")
 def experiment_freeze(
     manifest_id: str = EXPERIMENT_ID_OPTION,
     implementation_revision: str = IMPLEMENTATION_REVISION_OPTION,
-    output: Path = EXPERIMENT_OUTPUT_OPTION,
+    output: Path | None = EXPERIMENT_OUTPUT_OPTION,
     model: str = EXPERIMENT_MODEL_OPTION,
+    admission_report: Path | None = EXPERIMENT_ADMISSION_REPORT_OPTION,
 ) -> None:
     """生成一次性的规划器对照实验 Manifest；不会发起模型请求。"""
     try:
@@ -905,15 +932,38 @@ def experiment_freeze(
                 "experiment model must be one of the approved pairings: "
                 + ", ".join(FORMAL_MODEL_BASE_URLS)
             )
-        manifest = build_experiment_manifest(
-            implementation_revision,
+        output_path = output or experiment_manifest_path_for(manifest_id)
+        if manifest_id == EXPERIMENT_MANIFEST_ID_V2:
+            if admission_report is None:
+                raise BenchmarkManifestError("v2 freeze requires --admission-report")
+            attestation = load_admission_attestation(project_root=PROJECT_ROOT)
+            manifest = build_experiment_manifest_v2(
+                implementation_revision,
+                attestation.digest(),
+                project_root=PROJECT_ROOT,
+                model_name=model,
+                model_base_url=base_url,
+            )
+        else:
+            if admission_report is not None:
+                raise BenchmarkManifestError(
+                    "--admission-report is valid only for the v2 identity"
+                )
+            manifest = build_experiment_manifest(
+                implementation_revision,
+                project_root=PROJECT_ROOT,
+                manifest_id=manifest_id,
+                model_name=model,
+                model_base_url=base_url,
+            )
+        if manifest_id != EXPERIMENT_MANIFEST_ID_V2:
+            verify_experiment_manifest(manifest, project_root=PROJECT_ROOT)
+        path = freeze_experiment_manifest(
+            manifest,
+            output_path,
             project_root=PROJECT_ROOT,
-            manifest_id=manifest_id,
-            model_name=model,
-            model_base_url=base_url,
+            admission_report_path=admission_report,
         )
-        verify_experiment_manifest(manifest, project_root=PROJECT_ROOT)
-        path = freeze_experiment_manifest(manifest, output, project_root=PROJECT_ROOT)
     except (BenchmarkManifestError, ValueError) as exc:
         typer.echo(f"实验 manifest 冻结失败：{exc}", err=True)
         raise typer.Exit(code=1) from None

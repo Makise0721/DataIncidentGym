@@ -46,7 +46,10 @@ from data_incident_gym.evaluation_inputs import (
     write_evaluation_input_bundle,
 )
 from data_incident_gym.lab_verifier import ScenarioVerification, ScenarioVerificationStatus
-from data_incident_gym.planner_comparison_manifest import build_experiment_manifest
+from data_incident_gym.planner_comparison_manifest import (
+    build_experiment_manifest,
+    build_experiment_manifest_v2,
+)
 from data_incident_gym.planner_comparison_report import (
     PlannerComparisonReporter,
     PlannerComparisonReportError,
@@ -437,6 +440,13 @@ def test_formal_report_analyzes_complete_synthetic_archive(
     assert summary["integrity"]["full_evaluation_recomputations"] == 108
     assert summary["primary"]["paired_planner_vs_kernel"]["pairs"] == 36
     assert summary["primary"]["screening"] == "NOT_ESTABLISHED_T06_IDENTITY_PENDING"
+    assert summary["t06_admission_identity"] == {
+        "status": "NOT_BOUND_PENDING_OWNER_DECISION",
+        "note": (
+            "The current planner manifest schema has no T06 admission artifact identity; "
+            "the owner must resolve this before v2 freeze or any screening conclusion."
+        ),
+    }
     planner_costs = summary["costs_and_failures"][DiagnosticStrategy.EVIDENCE_PLANNER.value]
     assert "output_retries" not in planner_costs["totals"]
     assert planner_costs["retry_observations"] == {
@@ -450,6 +460,44 @@ def test_formal_report_analyzes_complete_synthetic_archive(
     assert summary_path.is_file()
     assert markdown_path.is_file()
     assert "NOT_ESTABLISHED_T06_IDENTITY_PENDING" in markdown_path.read_text(encoding="utf-8")
+
+
+def test_v2_formal_report_shows_verified_admission_attestation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import data_incident_gym.planner_comparison_report as report_module
+
+    attestation_sha256 = "b" * 64
+    manifest = build_experiment_manifest_v2(
+        "a" * 40,
+        attestation_sha256,
+        project_root=PROJECT_ROOT,
+    )
+    suite_root = _write_complete_synthetic_suite(tmp_path, manifest)
+    verified: list[object] = []
+    monkeypatch.setattr(
+        report_module,
+        "verify_experiment_manifest",
+        lambda value, **_: verified.append(value),
+    )
+    monkeypatch.setattr(
+        report_module,
+        "verify_scoring_identity",
+        lambda *_args, **_kwargs: None,
+    )
+    reporter = PlannerComparisonReporter(manifest, suite_root, project_root=tmp_path)
+
+    _, markdown_path, summary = reporter.write(tmp_path / "derived-report-v2")
+
+    assert verified == [manifest]
+    assert summary["t06_admission_identity"] == {
+        "status": "BOUND",
+        "attestation_sha256": attestation_sha256,
+        "note": f"Validated T06 admission attestation is bound by SHA-256 {attestation_sha256}.",
+    }
+    assert summary["primary"]["screening"] != "NOT_ESTABLISHED_T06_IDENTITY_PENDING"
+    assert attestation_sha256 in markdown_path.read_text(encoding="utf-8")
 
 
 def _metric_item(

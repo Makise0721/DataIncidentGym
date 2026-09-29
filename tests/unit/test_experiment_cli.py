@@ -69,15 +69,116 @@ def test_experiment_freeze_rejects_unapproved_identity() -> None:
             "experiment",
             "freeze",
             "--manifest-id",
-            "p1-planner-compare-v2",
+            "p1-planner-compare-v9",
             "--implementation-revision",
             "b" * 40,
             "--output",
-            "config/benchmark/p1-planner-compare-v2.json",
+            "config/benchmark/p1-planner-compare-v9.json",
         ],
     )
     assert result.exit_code == 1
-    assert "approved experiment identity" in result.output
+    assert "creates only the v1 identity" in result.output
+
+
+def test_experiment_v2_freeze_requires_original_admission_report() -> None:
+    result = runner.invoke(
+        cli.app,
+        [
+            "experiment",
+            "freeze",
+            "--manifest-id",
+            "p1-planner-compare-v2",
+            "--implementation-revision",
+            "b" * 40,
+        ],
+    )
+    assert result.exit_code == 1
+    assert "requires --admission-report" in result.output
+
+
+def test_experiment_v2_freeze_binds_proof_and_original_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    report_path = tmp_path / "planner-compare-v2-formal12.json"
+    attestation = SimpleNamespace(digest=lambda: "d" * 64)
+    manifest = SimpleNamespace(
+        manifest_id="p1-planner-compare-v2",
+        digest=lambda: "e" * 64,
+    )
+
+    monkeypatch.setattr(cli, "load_admission_attestation", lambda **_: attestation)
+    monkeypatch.setattr(
+        cli,
+        "build_experiment_manifest_v2",
+        lambda revision, digest, **kwargs: captured.update(
+            revision=revision,
+            admission_attestation_sha256=digest,
+            **kwargs,
+        )
+        or manifest,
+    )
+    monkeypatch.setattr(cli, "verify_experiment_manifest", lambda value, **_: value)
+    monkeypatch.setattr(
+        cli,
+        "freeze_experiment_manifest",
+        lambda value, output, **kwargs: captured.update(
+            output=output,
+            admission_report_path=kwargs.get("admission_report_path"),
+        )
+        or Path("config/benchmark/p1-planner-compare-v2.json"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "experiment",
+            "freeze",
+            "--manifest-id",
+            "p1-planner-compare-v2",
+            "--implementation-revision",
+            "b" * 40,
+            "--admission-report",
+            str(report_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["admission_attestation_sha256"] == "d" * 64
+    assert captured["output"] == Path("config/benchmark/p1-planner-compare-v2.json")
+    assert captured["admission_report_path"] == report_path
+
+
+def test_experiment_attest_admission_command_writes_only_proof_path_and_digest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    report_path = tmp_path / "private-report.json"
+    proof_path = Path("config/benchmark/p1-planner-compare-v2-admission.json")
+    attestation = SimpleNamespace(digest=lambda: "a" * 64)
+    monkeypatch.setattr(
+        cli,
+        "build_admission_attestation",
+        lambda path, **_: captured.update(report_path=path) or attestation,
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_admission_attestation",
+        lambda value, **_: proof_path,
+    )
+
+    result = runner.invoke(
+        cli.app,
+        ["experiment", "attest-admission", "--admission-report", str(report_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["report_path"] == report_path
+    assert f"attestation: {proof_path}" in result.output
+    assert "a" * 64 in result.output
+    assert str(report_path) not in result.output
 
 
 def test_experiment_verify_rejects_v1_manifest_path() -> None:

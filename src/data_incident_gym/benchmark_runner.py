@@ -85,7 +85,12 @@ from data_incident_gym.lab import IncidentLab
 from data_incident_gym.planner_agent import EvidencePlannerRunner
 from data_incident_gym.planner_comparison_manifest import (
     APPROVED_EXPERIMENT_IDS,
+    EXPERIMENT_MANIFEST_ID,
+    EXPERIMENT_MANIFEST_ID_V2,
+    EXPERIMENT_SCHEMA_VERSION,
+    EXPERIMENT_SCHEMA_VERSION_V2,
     PlannerComparisonManifest,
+    PlannerComparisonManifestV2,
     experiment_manifest_path_for,
     verify_experiment_manifest,
 )
@@ -319,7 +324,18 @@ AnyBenchmarkManifest = BenchmarkManifest | PlannerComparisonManifest
 
 def _manifest_identity_approved(manifest: AnyBenchmarkManifest) -> bool:
     if isinstance(manifest, PlannerComparisonManifest):
-        return manifest.manifest_id in APPROVED_EXPERIMENT_IDS
+        if type(manifest) is PlannerComparisonManifestV2:
+            return (
+                manifest.manifest_id == EXPERIMENT_MANIFEST_ID_V2
+                and manifest.schema_version == EXPERIMENT_SCHEMA_VERSION_V2
+                and manifest.manifest_id in APPROVED_EXPERIMENT_IDS
+            )
+        return (
+            type(manifest) is PlannerComparisonManifest
+            and manifest.manifest_id == EXPERIMENT_MANIFEST_ID
+            and manifest.schema_version == EXPERIMENT_SCHEMA_VERSION
+            and manifest.manifest_id in APPROVED_EXPERIMENT_IDS
+        )
     return manifest.manifest_id in APPROVED_MANIFEST_IDS
 
 
@@ -1058,6 +1074,8 @@ class BenchmarkRunner:
             raise BenchmarkRunnerError(
                 "planner comparison requires its dedicated compatibility probe"
             )
+        if isinstance(self._manifest, PlannerComparisonManifestV2):
+            _verify_manifest_for(self._manifest, project_root=self._project_root)
         self._checkout_verifier(self._manifest)
         suite_root = self._suite_root()
         ledger_path = suite_root / _LEDGER_FILENAME
@@ -1192,6 +1210,8 @@ class BenchmarkRunner:
             raise BenchmarkRunnerError(
                 "planner comparison requires its dedicated compatibility probe"
             )
+        if isinstance(self._manifest, PlannerComparisonManifestV2):
+            _verify_manifest_for(self._manifest, project_root=self._project_root)
         self._checkout_verifier(self._manifest)
         suite_root = self._suite_root()
         cells = self._selected_cells()

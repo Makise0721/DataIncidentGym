@@ -1,12 +1,13 @@
-"""Independent planner-comparison experiment manifest contract
-(p1.planner_comparison_manifest.v1, namespace p1-planner-compare-vN).
+"""Independent planner-comparison experiment manifest contracts
+(p1.planner_comparison_manifest.v1/v2, namespace p1-planner-compare-vN).
 
 Pre-registered by docs/superpowers/plans/2026-09-28-t12-planner-real-model-
 measurement-proposal.md §2-§3: three policy surfaces (EVIDENCE_PLANNER,
 DIAGNOSTIC_KERNEL, STATIC_SKILL) over the 12 formal dev scenarios x 3 repeats
 = 108 model-backed cells; planner-vs-kernel 36 pairs keyed (case, repeat).
 The v1 formal contract (six strategies / 106 cells / p1-formal-vN registry)
-is untouched; the two schemas reject each other's identities and files.
+is untouched. Planner-comparison v2 adds a T06 attestation identity while
+preserving the v1 measurement schedule and model configuration.
 """
 
 import json
@@ -42,10 +43,17 @@ from data_incident_gym.benchmark_manifest import (
     result_inputs_for_project,
 )
 from data_incident_gym.diagnosis import DiagnosticStrategy
+from data_incident_gym.planner_admission_attestation import (
+    validate_original_report_for_freeze,
+    verify_admission_attestation,
+)
 
 EXPERIMENT_SCHEMA_VERSION = "p1.planner_comparison_manifest.v1"
 EXPERIMENT_MANIFEST_ID = "p1-planner-compare-v1"
 EXPERIMENT_MANIFEST_PATH = Path("config/benchmark/p1-planner-compare-v1.json")
+EXPERIMENT_SCHEMA_VERSION_V2 = "p1.planner_comparison_manifest.v2"
+EXPERIMENT_MANIFEST_ID_V2 = "p1-planner-compare-v2"
+EXPERIMENT_MANIFEST_PATH_V2 = Path("config/benchmark/p1-planner-compare-v2.json")
 
 #: The experiment schedules exactly these three strategies, in this order.
 EXPERIMENT_STRATEGIES = (
@@ -69,7 +77,7 @@ _EXPERIMENT_ID_PATTERN = r"^p1-planner-compare-v[1-9][0-9]*$"
 #: measurements used (deepseek via commandcode), with empty overrides.
 EXPERIMENT_MODEL = "deepseek/deepseek-v4.1-flash"
 
-APPROVED_EXPERIMENT_IDS: tuple[str, ...] = (EXPERIMENT_MANIFEST_ID,)
+APPROVED_EXPERIMENT_IDS: tuple[str, ...] = (EXPERIMENT_MANIFEST_ID, EXPERIMENT_MANIFEST_ID_V2)
 
 
 def experiment_manifest_path_for(manifest_id: str) -> Path:
@@ -148,6 +156,12 @@ class PlannerComparisonManifest(BaseModel):
 
     @model_validator(mode="after")
     def validate_manifest(self) -> "PlannerComparisonManifest":
+        expected_schema = {
+            EXPERIMENT_MANIFEST_ID: EXPERIMENT_SCHEMA_VERSION,
+            EXPERIMENT_MANIFEST_ID_V2: EXPERIMENT_SCHEMA_VERSION_V2,
+        }.get(self.manifest_id)
+        if expected_schema is None or self.schema_version != expected_schema:
+            raise ValueError("experiment schema version and manifest identity do not match")
         catalog_ids = tuple(item.incident_case_id for item in self.scenario_catalog)
         if catalog_ids != P1_SCENARIO_IDS:
             raise ValueError("scenario catalog must match the frozen P1 order")
@@ -204,6 +218,11 @@ class PlannerComparisonManifest(BaseModel):
         return _sha256_bytes(self.canonical_json().encode("utf-8"))
 
 
+class PlannerComparisonManifestV2(PlannerComparisonManifest):
+    schema_version: Literal["p1.planner_comparison_manifest.v2"]
+    admission_attestation_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
 def build_experiment_manifest(
     implementation_revision: str,
     *,
@@ -214,10 +233,9 @@ def build_experiment_manifest(
 ) -> PlannerComparisonManifest:
     if re.fullmatch(_REVISION_PATTERN, implementation_revision) is None:
         raise BenchmarkManifestError("implementation_revision must be a 40-hex revision")
-    if manifest_id not in APPROVED_EXPERIMENT_IDS:
+    if manifest_id != EXPERIMENT_MANIFEST_ID:
         raise BenchmarkManifestError(
-            "experiment manifest_id must be an approved experiment identity: "
-            + ", ".join(APPROVED_EXPERIMENT_IDS)
+            "build_experiment_manifest creates only the v1 identity"
         )
     if model_name not in FORMAL_MODEL_BASE_URLS:
         raise BenchmarkManifestError(
@@ -254,16 +272,62 @@ def build_experiment_manifest(
     )
 
 
+def build_experiment_manifest_v2(
+    implementation_revision: str,
+    admission_attestation_sha256: str,
+    *,
+    project_root: Path,
+    model_base_url: str = FORMAL_MODEL_BASE_URLS[EXPERIMENT_MODEL],
+    model_name: str = EXPERIMENT_MODEL,
+) -> PlannerComparisonManifestV2:
+    """Build v2 with the same schedule and current contracts, plus T06 identity."""
+
+    base = build_experiment_manifest(
+        implementation_revision,
+        project_root=project_root,
+        model_base_url=model_base_url,
+        model_name=model_name,
+    )
+    payload = base.model_dump(mode="json")
+    payload.update(
+        {
+            "schema_version": EXPERIMENT_SCHEMA_VERSION_V2,
+            "manifest_id": EXPERIMENT_MANIFEST_ID_V2,
+            "cells": [
+                cell.model_dump(mode="json")
+                for cell in generate_experiment_cells(EXPERIMENT_MANIFEST_ID_V2)
+            ],
+            "admission_attestation_sha256": admission_attestation_sha256,
+        }
+    )
+    return PlannerComparisonManifestV2.model_validate(payload)
+
+
+def _validate_experiment_manifest_type_and_identity(
+    manifest: PlannerComparisonManifest,
+) -> None:
+    if type(manifest) is PlannerComparisonManifestV2:
+        valid = (
+            manifest.schema_version == EXPERIMENT_SCHEMA_VERSION_V2
+            and manifest.manifest_id == EXPERIMENT_MANIFEST_ID_V2
+        )
+    elif type(manifest) is PlannerComparisonManifest:
+        valid = (
+            manifest.schema_version == EXPERIMENT_SCHEMA_VERSION
+            and manifest.manifest_id == EXPERIMENT_MANIFEST_ID
+        )
+    else:
+        valid = False
+    if not valid:
+        raise BenchmarkManifestError("experiment schema version and manifest identity do not match")
+
+
 def verify_experiment_manifest(
     manifest: PlannerComparisonManifest,
     *,
     project_root: Path,
 ) -> PlannerComparisonManifest:
-    if manifest.manifest_id not in APPROVED_EXPERIMENT_IDS:
-        raise BenchmarkManifestError(
-            "experiment manifest_id must be an approved experiment identity: "
-            + ", ".join(APPROVED_EXPERIMENT_IDS)
-        )
+    _validate_experiment_manifest_type_and_identity(manifest)
     if manifest.scenario_catalog != _catalog_for_project(project_root):
         raise BenchmarkManifestError("ScenarioSpec catalog or digest drifted")
     if manifest.result_inputs != result_inputs_for_project(project_root):
@@ -279,6 +343,12 @@ def verify_experiment_manifest(
         timeout_seconds=300,
     ):
         raise BenchmarkManifestError("budget drifted")
+    if isinstance(manifest, PlannerComparisonManifestV2):
+        verify_admission_attestation(
+            expected_sha256=manifest.admission_attestation_sha256,
+            formal_scenario_ids=manifest.formal_scenario_ids,
+            project_root=project_root,
+        )
     return manifest
 
 
@@ -287,8 +357,19 @@ def freeze_experiment_manifest(
     output: Path,
     *,
     project_root: Path,
+    admission_report_path: Path | None = None,
 ) -> Path:
     project_root = project_root.resolve(strict=True)
+    _validate_experiment_manifest_type_and_identity(manifest)
+    if isinstance(manifest, PlannerComparisonManifestV2):
+        validate_original_report_for_freeze(
+            admission_report_path,
+            expected_sha256=manifest.admission_attestation_sha256,
+            project_root=project_root,
+        )
+        verify_experiment_manifest(manifest, project_root=project_root)
+    elif admission_report_path is not None:
+        raise BenchmarkManifestError("--admission-report is valid only for the v2 identity")
     raw_output = Path(output)
     if not raw_output.is_absolute():
         raw_output = project_root / raw_output
@@ -315,14 +396,22 @@ def freeze_experiment_manifest(
     return resolved
 
 
-def load_experiment_manifest(path: Path) -> PlannerComparisonManifest:
+def load_experiment_manifest(
+    path: Path,
+) -> PlannerComparisonManifest | PlannerComparisonManifestV2:
     try:
         payload = json.loads(
             path.read_text(encoding="utf-8"),
             object_pairs_hook=_reject_duplicate_json_keys,
             parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
         )
-        manifest = PlannerComparisonManifest.model_validate(payload)
+        if not isinstance(payload, dict):
+            raise BenchmarkManifestError("experiment manifest JSON must be an object")
+        if payload.get("schema_version") == EXPERIMENT_SCHEMA_VERSION_V2:
+            manifest = PlannerComparisonManifestV2.model_validate(payload)
+        else:
+            manifest = PlannerComparisonManifest.model_validate(payload)
+        _validate_experiment_manifest_type_and_identity(manifest)
         if manifest.manifest_id not in APPROVED_EXPERIMENT_IDS:
             raise BenchmarkManifestError(
                 "experiment manifest_id must be an approved experiment identity: "
@@ -341,10 +430,15 @@ __all__ = [
     "APPROVED_EXPERIMENT_IDS",
     "EXPERIMENT_MANIFEST_ID",
     "EXPERIMENT_MANIFEST_PATH",
+    "EXPERIMENT_MANIFEST_ID_V2",
+    "EXPERIMENT_MANIFEST_PATH_V2",
     "EXPERIMENT_SCHEMA_VERSION",
+    "EXPERIMENT_SCHEMA_VERSION_V2",
     "EXPERIMENT_STRATEGIES",
     "PlannerComparisonManifest",
+    "PlannerComparisonManifestV2",
     "build_experiment_manifest",
+    "build_experiment_manifest_v2",
     "experiment_manifest_path_for",
     "freeze_experiment_manifest",
     "generate_experiment_cells",
