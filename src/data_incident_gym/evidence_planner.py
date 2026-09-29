@@ -81,7 +81,69 @@ from data_incident_gym.strategy_adapter import (
     ToolRequest,
 )
 
-PLANNER_PROTOCOL_VERSION = "p1.planner_controller.v1"
+PLANNER_PROTOCOL_VERSION = "p1.planner_controller.v2"
+
+#: Static, public-facing purpose statements for the catalog the model reads.
+#: They describe existing behavior only — no scenario content, no collection
+#: advice — and are bound into the controller identity through
+#: ``planner_controller_payload``'s catalog projection.
+_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "get_dbt_run_results": (
+        "The dbt run results summary of this run: overall status and the failed/skipped node lists."
+    ),
+    "get_dbt_node_error": (
+        "The stored failure detail of one dbt node from this run's results."
+    ),
+    "get_dbt_lineage": (
+        "The immediate neighbors of one dbt node in one direction."
+    ),
+    "get_relation_schema": "The column list (name, type, nullability) of one relation.",
+    "get_relation_data_profile": "The current aggregate profile of one relation.",
+    "get_relation_history": "The recorded profile history series of one relation.",
+    "get_relation_schema_expectation": (
+        "The baseline schema expectation for one or more relations (batch)."
+    ),
+    "get_dbt_node_definition": (
+        "The compiled definition of one or more dbt nodes (batch)."
+    ),
+}
+
+#: Public semantics the JSON schema cannot express. Sources: run scoping is
+#: enforced by ``PlannerController._validate_step`` (``PLAN_RUN_SCOPE_MISMATCH``);
+#: lineage directions are the backend ``Literal["upstream", "downstream"]``
+#: (``evidence_tools.py``); the batch encoding, first-occurrence dedupe, the
+#: 8-target limit and atomic per-target refusal are the frozen batch protocol
+#: (``evidence_batch.py``).
+_TOOL_ARGUMENT_NOTES: dict[str, str] = {
+    "get_dbt_run_results": "run_id must be this run's id; it is the only argument.",
+    "get_dbt_node_error": (
+        "run_id must be this run's id; node_id names the node whose stored failure to read."
+    ),
+    "get_dbt_lineage": (
+        "direction is 'upstream' or 'downstream'; "
+        "node_id names the node whose neighbors to read."
+    ),
+    "get_relation_schema": (
+        "relation_name names one relation; readable relations stay limited "
+        "by this run's visible relation whitelist."
+    ),
+    "get_relation_data_profile": (
+        "relation_name names one relation; readable relations stay limited "
+        "by this run's visible relation whitelist."
+    ),
+    "get_relation_history": (
+        "relation_name names one relation; readable relations stay limited "
+        "by this run's visible relation whitelist."
+    ),
+    "get_relation_schema_expectation": (
+        "relation_names is a comma-joined list; duplicates keep the first occurrence; "
+        "at most 8 targets per request; refusing any target refuses the call without evidence."
+    ),
+    "get_dbt_node_definition": (
+        "node_ids is a comma-joined list; duplicates keep the first occurrence; "
+        "at most 8 targets per request; refusing any target refuses the call without evidence."
+    ),
+}
 
 #: Validation codes of this layer. They never appear on a ``ToolReceipt``, and
 #: backend codes (``RELATION_NOT_ALLOWED`` ...) never appear on a verdict.
@@ -192,6 +254,22 @@ def _digest(payload: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _obligation_input_schema(spec: ToolObligationSpec) -> dict[str, Any]:
+    """The closed-object string schema one obligation's arguments must match.
+
+    The single source for both ``obligation_tool_schemas`` (identity surface)
+    and ``planner_tool_catalog`` (model-visible surface): a second hand-copied
+    signature is exactly what this module must not grow.
+    """
+
+    return {
+        "type": "object",
+        "properties": {name: {"type": "string"} for name in spec.arguments},
+        "required": list(spec.arguments),
+        "additionalProperties": False,
+    }
+
+
 def obligation_tool_schemas(
     obligations: dict[str, ToolObligationSpec] | None = None,
 ) -> list[dict[str, Any]]:
@@ -205,14 +283,44 @@ def obligation_tool_schemas(
     return [
         {
             "name": tool,
-            "input_schema": {
-                "type": "object",
-                "properties": {name: {"type": "string"} for name in spec.arguments},
-                "required": list(spec.arguments),
-                "additionalProperties": False,
-            },
+            "input_schema": _obligation_input_schema(spec),
         }
         for tool, spec in sorted((obligations or TOOL_OBLIGATIONS).items())
+    ]
+
+
+def planner_tool_catalog(
+    allowlist: Collection[str],
+    surface: str = EVIDENCE_TOOLS_V1_VERSION,
+) -> list[dict[str, Any]]:
+    """The granted read-only tool contract, as the model reads it.
+
+    Exactly the session-granted subset of the surface's obligation table, in
+    name order: name, public purpose, the same-source input schema and the
+    public argument notes. An empty grant yields an empty catalog — never a
+    silent fallback to the full table — and an unknown granted name fails
+    before any agent starts, because a catalog that quietly dropped a granted
+    tool would be a lie the model cannot detect.
+    """
+
+    obligations = (
+        V2_TOOL_OBLIGATIONS if surface == EVIDENCE_TOOLS_V2_VERSION else TOOL_OBLIGATIONS
+    )
+    unknown = sorted(set(allowlist) - set(obligations))
+    if unknown:
+        raise ValueError(
+            f"granted tool(s) outside the {surface} surface: {', '.join(unknown)}"
+        )
+    granted = set(allowlist)
+    return [
+        {
+            "name": tool,
+            "description": _TOOL_DESCRIPTIONS[tool],
+            "input_schema": _obligation_input_schema(spec),
+            "argument_notes": _TOOL_ARGUMENT_NOTES[tool],
+        }
+        for tool, spec in sorted(obligations.items())
+        if tool in granted
     ]
 
 
@@ -467,6 +575,19 @@ def planner_controller_payload(
     payload: dict[str, Any] = {
         "protocol_version": PLANNER_PROTOCOL_VERSION,
         "model_tools": planner_model_tool_payload(surface),
+        "catalog_projection": {
+            "field_name": "evidence_tool_catalog",
+            "entry_fields": ["name", "description", "input_schema", "argument_notes"],
+            "injection": (
+                "once, in the initial user payload; "
+                "later turns read it from the message history"
+            ),
+            "source": "the session's granted tool allowlist",
+            "ordering": "tool name, ascending",
+            "empty_allowlist": "empty catalog; no fallback to the full table",
+            "unknown_granted_name": "construction fails before any agent starts",
+            "full_catalog": planner_tool_catalog(set(obligations), surface),
+        },
         "tools": {
             tool: {
                 "evidence_kind": spec.evidence_kind,
@@ -983,4 +1104,5 @@ __all__ = [
     "plan_outcome_summary",
     "planner_controller_payload",
     "planner_policy_surface",
+    "planner_tool_catalog",
 ]

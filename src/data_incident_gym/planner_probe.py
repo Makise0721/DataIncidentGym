@@ -27,9 +27,12 @@ from data_incident_gym.evidence import (
     EvidenceSource,
     EvidenceType,
 )
-from data_incident_gym.planner_agent import EvidencePlannerRunner
+from data_incident_gym.planner_agent import (
+    EvidencePlannerRunner,
+    planner_builtin_declaration,
+)
 from data_incident_gym.run_context import IncidentBrief, ObservableRunContext
-from data_incident_gym.strategy_adapter import StrategySession, builtin_declaration
+from data_incident_gym.strategy_adapter import StrategySession
 
 PLANNER_PROBE_RUN_ID = hashlib.sha256(b"planner-compatibility-probe").hexdigest()[:32]
 PLANNER_PROBE_TIMEOUT_SECONDS = 120
@@ -122,7 +125,7 @@ async def run_planner_compatibility_probe(
         run_id=PLANNER_PROBE_RUN_ID,
         tools=_ProbeBackend(),
         context=context,
-        declaration=builtin_declaration(
+        declaration=planner_builtin_declaration(
             model_provider=model_identity.provider,
             model_name=model_identity.model,
             deterministic=False,

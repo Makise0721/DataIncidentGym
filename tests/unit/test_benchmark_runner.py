@@ -401,6 +401,7 @@ def _runner(
     writer: object | None = None,
     evaluation_runner_factory: object | None = None,
     cell_selector: BenchmarkCellSelector | None = None,
+    planner_probe_factory: object | None = None,
 ) -> BenchmarkRunner:
     return BenchmarkRunner(
         manifest,
@@ -413,6 +414,7 @@ def _runner(
         checkout_verifier=lambda _manifest: None,
         checkout_revision_reader=lambda: "a" * 40,
         cell_selector=cell_selector,
+        planner_probe_factory=planner_probe_factory,
     )
 
 

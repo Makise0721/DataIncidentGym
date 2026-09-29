@@ -170,6 +170,7 @@ def trace_schema_for_policy_identity(policy_identity: PolicyIdentity) -> Literal
         "p1.fixed-rule.v1",
         "p1.reference-analyst.v1",
         "p1.planner_controller.v1",
+        "p1.planner_controller.v2",
     }:
         return "p1.trace.v1"
     raise ValueError("unsupported policy identity for trace schema selection")

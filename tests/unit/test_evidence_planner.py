@@ -559,7 +559,7 @@ def test_planner_identity_binds_the_prompt_and_the_plan_contract() -> None:
     identity = evidence_planner_policy_identity()
 
     assert identity.strategy is DiagnosticStrategy.EVIDENCE_PLANNER
-    assert identity.strategy_prompt_version == PLANNER_PROMPT_VERSION == "p1.planner.v1"
+    assert identity.strategy_prompt_version == PLANNER_PROMPT_VERSION == "p1.planner.v2"
     # Prompts are hashed as raw UTF-8 text; structured payloads use _digest.
     assert identity.strategy_prompt_sha256 == hashlib.sha256(
         PLANNER_PROMPT.encode("utf-8")

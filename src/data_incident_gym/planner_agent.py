@@ -69,6 +69,7 @@ from data_incident_gym.evidence_planner import (
     PlannerDeps,
     evidence_planner_policy_identity,
     planner_output_definition,
+    planner_tool_catalog,
     register_planner_tools,
 )
 from data_incident_gym.evidence_tools import EvidenceTools
@@ -77,6 +78,7 @@ from data_incident_gym.run_context import ObservableRunContext, resolve_run_cont
 from data_incident_gym.strategy_adapter import (
     FinalSubmission,
     FinalSubmissionV2,
+    StrategyDeclaration,
     StrategySession,
     builtin_declaration,
     tool_allowlist_for_context,
@@ -84,6 +86,22 @@ from data_incident_gym.strategy_adapter import (
 from data_incident_gym.submission_policy import SubmissionPolicy
 
 PLANNER_STRATEGY = DiagnosticStrategy.EVIDENCE_PLANNER
+
+#: The planner's own declaration: the shared default context plus the tool
+#: catalog this strategy projects into the model's task input. The shared
+#: ``builtin_declaration`` (and with it every other strategy) is untouched —
+#: the extra marker is this strategy's disclosed input difference.
+PLANNER_VISIBLE_CONTEXT = ("incident_brief", "relation_whitelist", "evidence_tool_catalog")
+
+
+def planner_builtin_declaration(
+    *, model_provider: str, model_name: str, deterministic: bool
+) -> StrategyDeclaration:
+    return builtin_declaration(
+        model_provider=model_provider,
+        model_name=model_name,
+        deterministic=deterministic,
+    ).model_copy(update={"visible_context": PLANNER_VISIBLE_CONTEXT})
 
 #: The fixed reason codes a MODEL_ERROR terminal may carry.
 MODEL_ERROR_REASONS = frozenset(
@@ -106,10 +124,15 @@ def _fingerprint(run_id: str, tool_name: str, arguments: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _user_prompt(context: ObservableRunContext) -> str:
+def _user_prompt(context: ObservableRunContext, catalog: list[dict[str, Any]]) -> str:
     payload = {
         "run_id": context.run_id,
         "incident_brief": context.incident_brief.model_dump(mode="json"),
+        # The granted tool contract, delivered once: exact names, argument
+        # schemas and public notes the model is told to plan against. Built
+        # from the session's actual authorization — never assumed from the
+        # surface — and an empty grant stays an empty list.
+        "evidence_tool_catalog": catalog,
         "observable_relations": context.runtime.get("observable_relations", {}),
     }
     # The v2 node-definition whitelist is part of the model-visible context;
@@ -119,6 +142,8 @@ def _user_prompt(context: ObservableRunContext) -> str:
         payload["observable_nodes"] = observable_nodes
     return (
         "Investigate the verified run using the public run-bound context below. "
+        "`evidence_tool_catalog` lists every evidence tool granted to this run with its "
+        "exact name and arguments; declare requests only against that contract. "
         "Declare every evidence request with `plan_step` before it is executed, close each "
         "obligation with `close_obligation`, and submit with `submit_diagnosis`.\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True)
@@ -149,6 +174,13 @@ class EvidencePlannerRunner:
         self._owned_model_client = owned_model_client
         self._policy_identity = evidence_planner_policy_identity(
             tool_surface_for_context(context)
+        )
+        # Built from the session's real authorization, before any agent starts:
+        # an unknown granted tool fails construction instead of being silently
+        # dropped from what the model is told it can call.
+        self._catalog = planner_tool_catalog(
+            set(session.task_context().tool_allowlist),
+            tool_surface_for_context(context),
         )
         self._accepted: Diagnosis | None = None
 
@@ -196,7 +228,7 @@ class EvidencePlannerRunner:
                 run_id=run_id,
                 tools=tools,
                 context=context,
-                declaration=builtin_declaration(
+                declaration=planner_builtin_declaration(
                     model_provider=model_identity.provider,
                     model_name=model_identity.model,
                     deterministic=False,
@@ -295,7 +327,7 @@ class EvidencePlannerRunner:
             with agent.parallel_tool_call_execution_mode("sequential"):
                 async with asyncio.timeout(TIMEOUT_SECONDS):
                     await agent.run(
-                        _user_prompt(self._context),
+                        _user_prompt(self._context, self._catalog),
                         deps=deps,
                         usage=usage,
                         # Model turns are guarded here; the evidence-call budget is
@@ -512,4 +544,10 @@ def _usage_limit_reason(error: UsageLimitExceeded) -> str:
     return "MODEL_REQUEST_LIMIT"
 
 
-__all__ = ["EvidencePlannerRunner", "MODEL_ERROR_REASONS", "PLANNER_STRATEGY"]
+__all__ = [
+    "EvidencePlannerRunner",
+    "MODEL_ERROR_REASONS",
+    "PLANNER_STRATEGY",
+    "PLANNER_VISIBLE_CONTEXT",
+    "planner_builtin_declaration",
+]

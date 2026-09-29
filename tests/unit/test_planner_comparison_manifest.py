@@ -89,11 +89,11 @@ def test_build_experiment_manifest_freezes_three_surfaces_and_108_cells() -> Non
     planner_identity = policies[DiagnosticStrategy.EVIDENCE_PLANNER].policy_identity
     kernel_identity = policies[DiagnosticStrategy.DIAGNOSTIC_KERNEL].policy_identity
     static_identity = policies[DiagnosticStrategy.STATIC_SKILL].policy_identity
-    assert planner_identity.strategy_prompt_version == "p1.planner.v1"
+    assert planner_identity.strategy_prompt_version == "p1.planner.v2"
     assert kernel_identity.strategy_prompt_version == "p1.kernel.v18"
     assert static_identity.strategy_prompt_version == "p1.static.v5"
 
-    assert planner_identity.controller_protocol_version == "p1.planner_controller.v1"
+    assert planner_identity.controller_protocol_version == "p1.planner_controller.v2"
     assert kernel_identity.controller_protocol_version == "p1.controller.v22"
     assert static_identity.controller_protocol_version == "p1.controller.v22"
 
@@ -299,14 +299,19 @@ def test_experiment_manifest_loader_rejects_nonfinite_json_constants(
         load_experiment_manifest(path)
 
 
-def test_frozen_v1_bytes_and_verification_remain_unchanged() -> None:
+def test_frozen_v1_bytes_stay_unchanged_and_the_new_policy_source_declares_drift() -> None:
+    """The frozen v1 manifest is history: its bytes never change, and since the
+    planner policy advanced to p1.planner.v2 the current source must refuse to
+    re-verify it instead of silently accepting a policy it no longer ships."""
+
     path = PROJECT_ROOT / "config" / "benchmark" / "p1-planner-compare-v1.json"
     raw = path.read_bytes()
     assert hashlib.sha256(raw).hexdigest() == (
         "e4a09d16dd15b5b4433b5a25d1e5b8544a4b8c341cb97b793853fcd1d0378826"
     )
     manifest = load_experiment_manifest(path)
-    assert verify_experiment_manifest(manifest, project_root=PROJECT_ROOT) is manifest
+    with pytest.raises(BenchmarkManifestError, match="policy identity drifted"):
+        verify_experiment_manifest(manifest, project_root=PROJECT_ROOT)
 
 
 def test_v2_verification_dispatches_to_current_admission_proof(

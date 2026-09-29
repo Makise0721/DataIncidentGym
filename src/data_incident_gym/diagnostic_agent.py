@@ -254,8 +254,10 @@ KERNEL_PROMPT = _read_prompt("diagnostic_kernel.md")
 STATIC_PROMPT = _read_prompt("static_skill.md")
 NO_TOOL_PROMPT = _read_prompt("no_tool.md")
 #: T12: the evidence-obligation planner has its own prompt; the kernel and
-#: static prompts are untouched by its introduction.
-PLANNER_PROMPT_VERSION = "p1.planner.v1"
+#: static prompts are untouched by its introduction. v2 adds the granted tool
+#: catalog to the model's task input, so the prompt now tells the model to
+#: plan against that catalog's exact names and arguments.
+PLANNER_PROMPT_VERSION = "p1.planner.v2"
 PLANNER_PROMPT = _read_prompt("evidence_planner.md")
 
 

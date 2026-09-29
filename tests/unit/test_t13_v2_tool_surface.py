@@ -21,6 +21,7 @@ from data_incident_gym.evidence_planner import (
     V2_TOOL_OBLIGATIONS,
     evidence_planner_policy_identity,
     planner_controller_payload,
+    planner_tool_catalog,
     tool_obligations_for_allowlist,
 )
 from data_incident_gym.fixed_rule import (
@@ -175,9 +176,15 @@ def test_the_v2_user_prompt_names_the_definition_whitelist(tmp_path) -> None:
         }
     )
 
-    assert "observable_nodes" not in _user_prompt(v1)
-    assert '"observable_nodes"' in _user_prompt(v2)
-    assert "model.jaffle_shop.customers" in _user_prompt(v2)
+    v1_catalog = planner_tool_catalog(PROTOCOL_TOOL_ALLOWLIST)
+    v2_catalog = planner_tool_catalog(EVIDENCE_V2_TOOL_ALLOWLIST, EVIDENCE_TOOLS_V2_VERSION)
+
+    assert "observable_nodes" not in _user_prompt(v1, v1_catalog)
+    v2_prompt = _user_prompt(v2, v2_catalog)
+    assert '"observable_nodes"' in v2_prompt
+    assert "model.jaffle_shop.customers" in v2_prompt
+    assert '"get_dbt_node_definition"' in v2_prompt
+    assert '"get_dbt_node_definition"' not in _user_prompt(v1, v1_catalog)
 
 
 def test_the_obligation_table_follows_the_granted_surface() -> None:

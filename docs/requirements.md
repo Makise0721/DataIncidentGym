@@ -34,6 +34,8 @@
 
 > M21 故障修复补充（2026-09-20，所有者要求解决 v28 结构化探针失败，并逐次批准三次有界独立探针）：失败诊断延伸到 `MODEL_TOOL_STRUCTURED_OUTPUT`，只记录固定 kind（TIMEOUT / CONNECTION_ERROR / HTTP_<status> / USAGE_LIMIT / UNEXPECTED_MODEL_BEHAVIOR / ERROR）、60 秒上限、耗时、SDK 用量计数、工具执行布尔值和输出验证器拒绝次数，不记录异常正文或模型响应。SDK `model_requests` 是用量计数，HTTP 失败时可为 0，不等于没有发送 POST；不作为套餐扣量依据。成功与未执行的检查仍无 diagnostic。针对精确配对 `https://api.commandcode.ai/provider/v1` + `deepseek/deepseek-v4.1-flash`，共享客户端能力声明 `openai_supports_tool_choice_required=False`，doctor、DiagnosisRunner、EvidencePlannerRunner 同源使用；SDK 将默认强制选择降为 `auto`，不关闭 thinking，不改变工具 schema、提示、2 次探针请求/60 秒/1 次输出重试或正式策略预算。实际工具执行和结构化输出验收仍必须满足；其他模型/端点沿用原配置。该传输行为变化须绑定新的实施修订，既有冻结清单与失败回执不得修改。
 
+> M20 修订 2（2026-09-29 依据 [工具契约可见性设计](superpowers/specs/2026-09-29-planner-tool-contract-visibility-design.md) 与实施计划批准；证据为 p1-planner-compare-v2 的 29 格暂停前缀）：规划器策略身份升级为 prompt `p1.planner.v2` / controller `p1.planner_controller.v2`，原因是**模型可见输入合同变化**——首次任务输入 payload 新增 `evidence_tool_catalog`。（1）目录由 `planner_tool_catalog(allowlist, surface)` 纯函数生成：仅接收公开授权集合与工具 surface，不接触 ScenarioSpec、期望状态、case ID 或评分附件；每条含 `name`、公开用途 `description`、`input_schema`、`argument_notes`，其中名称与参数 schema 与 `ToolObligationSpec`/`obligation_tool_schemas()` **同源**（同一 `_obligation_input_schema` 构造，禁止第二套手抄签名）；按名称稳定排序；空授权产生空目录、不回退全表；未知授权名在 agent 启动前（runner 构造期）显式失败，不静默丢弃、不映射为计划拒绝。`argument_notes` 仅描述既有公开规则（run 作用域、lineage 方向 upstream/downstream、v2 批量工具的逗号连接编码、去重保留首次与 8 目标上限、原子按目标拒绝），来源为实现文件。（2）注入语义：目录由 runner 从**当前 session 实际授权**（`task_context().tool_allowlist`，非 surface 默认）构建，一次性进入初始 user payload，后续回合沿消息历史读取、不重复注入；目录是接口说明，不是证据、不能被引用或计入已采类型，不是必须执行的清单，也不扩展关系白名单——合法请求仍可能收到真实后端拒绝。（3）身份绑定：controller 载荷新增版本化 `catalog_projection` 合同（user payload 字段名、条目字段、注入/过滤/排序规则、空集与未知名行为、最大授权 surface 下的完整目录含描述与参数说明）；描述、参数说明、目录字段结构或过滤合同的任何变化都改变身份摘要；底层签名表未变，`tool_schema_sha256` 保持。（4）规划器专属声明 `visible_context` 增加 `evidence_tool_catalog` 标记（`planner_builtin_declaration`），共享 `builtin_declaration` 与其他策略声明不变；因此规划器与 kernel/static 的 `comparison_identity` 不再逐字段相同，报告必须披露该输入差异，不得宣称全条件相同。`plan_step` SDK 入参 schema 保持宽松，非法名称/参数仍走 `PlannerController` 原有 `PLAN_*` verdict 与预算，目录不引入 SDK 门外拦截、自动纠错或别名映射。（5）兼容边界：trace schema 选择表登记 `p1.planner_controller.v2`（规划器轨迹仍 `p1.trace.v1`）；kernel/static 完整政策身份逐字段不变；历史冻结 manifest、回执与归档字节不变，但其规划器策略身份为先代版本，在当前源码上验证按设计报 `policy identity drifted`，不承诺旧清单可启动新运行。本修订不构成真实模型测量、拒绝率下降或整格通过提升的任何断言；后续测量须另行预登记并冻结新身份。
+
 
 > M22 修订（2026-09-20 依据所有者对 p1-formal-v27 预检归因的裁定批准）：目录模型 ID 安全正则由小写限定 `^[a-z0-9][a-z0-9._:/-]{0,127}$` 放宽为**允许 ASCII 大写** `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`——长度与其余字符限制不变，不做大小写归一，绑定模型名仍按原始 ID 精确匹配（大小写不同视为不存在）。背景：第三方目录合法包含大写厂商前缀 ID（26/71），旧正则会以无关条目阻断目标模型预检（v26/v27 失败与该缺陷一致）。控制字符、超长（>128）、非字符串 id、响应结构错误仍拒绝。不加重试、不放宽超时、不改请求上界；本修订不修改评测、预算、checkout 门与既有冻结 manifest。
 
@@ -426,7 +428,13 @@ uv run data-incident-gym benchmark partial --manifest config/benchmark/<id>.json
 ### 10.7 公开证据义务规划器（T12）
 
 模型不再直接调用证据工具，而是先声明"要满足什么义务"：`evidence_planner.py` 是确定性计划校验层，
-策略身份 `DiagnosticStrategy.EVIDENCE_PLANNER`（prompt `p1.planner.v1`，controller 协议 `p1.planner_controller.v1`）。
+策略身份 `DiagnosticStrategy.EVIDENCE_PLANNER`（prompt `p1.planner.v2`，controller 协议
+`p1.planner_controller.v2`）。
+
+- 首次任务输入携带 `evidence_tool_catalog`：本 run 获准底层工具的准确名称、参数 schema（与政策身份
+  同源）与公开参数说明，按名称排序，一次性注入、后续回合沿消息历史可见。模型须按目录声明
+  `plan_step`；目录不是证据、不是采集清单、也不扩展关系白名单（合同细节与身份绑定见 M20 修订 2）。
+  规划器专属声明以 `visible_context` 标记披露该输入；共享默认声明与其他策略不变。
 
 - 模型侧是两个**动作工具** `plan_step(tool_name, arguments, intent)` 与
   `close_obligation(obligation_id, outcome, evidence_ids, reason)`（都把收据/`PlanVerdict` 返回给模型继续

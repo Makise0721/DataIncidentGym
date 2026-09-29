@@ -10,7 +10,9 @@ from pathlib import Path
 
 from data_incident_gym.benchmark_report import analyze_partial_suite
 from data_incident_gym.diagnosis import DiagnosticStrategy
+from data_incident_gym.diagnostic_agent import ModelIdentity
 from data_incident_gym.planner_comparison_manifest import build_experiment_manifest
+from data_incident_gym.planner_probe import PlannerProbeResult
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -29,6 +31,25 @@ def _experiment():
     return build_experiment_manifest("a" * 40, project_root=PROJECT_ROOT)
 
 
+def _passing_probe_factory(manifest):
+    """The offline suite needs the probe seam wired, not a real model loop."""
+
+    async def factory():
+        return (
+            ModelIdentity(
+                provider=manifest.model_configuration.provider,
+                model=manifest.model_configuration.model,
+            ),
+            PlannerProbeResult(
+                passed=True,
+                observed="PLAN_LOOP_COMPLETED",
+                detail={"plan_step_receipts": 1},
+            ),
+        )
+
+    return factory
+
+
 def test_experiment_full_108_cell_suite_completes_offline(tmp_path: Path) -> None:
     manifest = _experiment()
     calls: list[tuple[str, DiagnosticStrategy, str]] = []
@@ -39,6 +60,7 @@ def test_experiment_full_108_cell_suite_completes_offline(tmp_path: Path) -> Non
         doctor_result=_doctor_result(),
         calls=calls,
         doctor_calls=doctor_calls,
+        planner_probe_factory=_passing_probe_factory(manifest),
     )
 
     asyncio.run(runner.preflight())
@@ -80,6 +102,7 @@ def test_experiment_rolling_window_pauses_before_the_next_cell(tmp_path: Path) -
         doctor_calls=[],
         writer=_FakeWriter(),
         evaluation_runner_factory=lambda: scripted,
+        planner_probe_factory=_passing_probe_factory(manifest),
     )
 
     asyncio.run(runner.preflight())
@@ -102,6 +125,7 @@ def test_experiment_partial_entry_reads_a_paused_suite(tmp_path: Path) -> None:
         doctor_calls=[],
         writer=_FakeWriter(),
         evaluation_runner_factory=lambda: scripted,
+        planner_probe_factory=_passing_probe_factory(manifest),
     )
 
     asyncio.run(runner.preflight())
